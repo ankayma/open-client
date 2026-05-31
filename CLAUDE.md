@@ -11,12 +11,12 @@ Repo này **PUBLIC** (Part D §D.2/§D.4, mô hình Tailscale). Coding do Claude
 ## Đọc trước khi viết dòng code đầu tiên
 
 1. `ARCHITECTURE.md` (repo này) — crate map, deployable, open/closed boundary, **binding invariants index**.
-2. Blueprint (nếu có `../workspace/` trên máy maintainer) — đọc đúng section, không đọc tràn:
-   - `../workspace/02-operations/invariants/part-a-foundation.md` — các invariant trong index dưới đây (hard constraint).
-   - `../workspace/02-operations/phase/part-c-phase-evolution.md` §C.2 + milestone hiện tại — **scope gate** (chỉ build cái phase này cho phép).
-   - `../workspace/02-operations/implementation/part-d-internal-impl.md` §D.1 (unit/crate), §D.2 (open/closed), §D.3 (Tauri).
-   - `../workspace/01-philosophy/vendor-charter/part-0.md` §1 — P.1, P.2, P.8, P.9.
-   - `../workspace/D-disciplines/t-a-coding-core.md` — T/A coding discipline + format `[T:source-id]` (§1,§3); intensity (§7); linter rules (§8). `t-a-coding-p2p.md` §3 (crypto), §6 (platform) = subset agent-relevant. General: `D-02-t-a-discipline.md`.
+2. Blueprint (nếu có `../../workspace/` trên máy maintainer) — đọc đúng section, không đọc tràn:
+   - `../../workspace/02-operations/invariants/part-a-foundation.md` — các invariant trong index dưới đây (hard constraint).
+   - `../../workspace/02-operations/phase/part-c-phase-evolution.md` §C.2 + milestone hiện tại — **scope gate** (chỉ build cái phase này cho phép).
+   - `../../workspace/02-operations/implementation/part-d-internal-impl.md` §D.1 (unit/crate), §D.2 (open/closed), §D.3 (Tauri).
+   - `../../workspace/01-philosophy/vendor-charter/part-0.md` §1 — P.1, P.2, P.8, P.9.
+   - `../../workspace/D-disciplines/t-a-coding-core.md` — T/A coding discipline + format `[T:source-id]` (§1,§3); intensity (§7); linter rules (§8). `t-a-coding-p2p.md` §3 (crypto), §6 (platform) = subset agent-relevant. General: `D-02-t-a-discipline.md`.
 3. README.md + `Cargo.toml` — crate đã có; đừng đặt lại tên (anti-pattern naming inconsistency).
 
 ## Binding constraints (guard — vi phạm = STOP, báo human)
