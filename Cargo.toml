@@ -1,0 +1,25 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/domain-core",
+    "crates/proto",
+    "crates/crypto",
+    "crates/ledger-client",
+    "crates/agent-core",
+    "crates/agent-daemon",
+    "crates/cli",
+]
+# gui/src-tauri added at milestone 1.1 via `cargo tauri init` (needs Tauri toolchain) — Part D §D.3
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+license = "TBD"   # Part D §D.7 — license chưa chốt (MIT/Apache/BSL)
+
+[workspace.dependencies]
+domain-core   = { path = "crates/domain-core" }
+proto         = { path = "crates/proto" }
+crypto        = { path = "crates/crypto" }
+ledger-client = { path = "crates/ledger-client" }
+agent-core    = { path = "crates/agent-core" }

@@ -1,0 +1,10 @@
+[package]
+name = "agent-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+domain-core = { workspace = true }
+proto       = { workspace = true }
+crypto      = { workspace = true }

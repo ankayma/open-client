@@ -1,0 +1,12 @@
+[package]
+name = "cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "mesh"
+path = "src/main.rs"
+
+[dependencies]
+agent-core = { workspace = true }

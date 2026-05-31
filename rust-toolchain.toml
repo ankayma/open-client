@@ -1,0 +1,3 @@
+[toolchain]
+channel = "stable"
+# A.1.21: pin specific version before production (e.g. "1.83.0")
