@@ -10,10 +10,12 @@ Repo này **PUBLIC** (Part D §D.2/§D.4, mô hình Tailscale). Coding do Claude
 
 ## Đọc trước khi viết dòng code đầu tiên
 
-1. `ARCHITECTURE.md` (repo này) — crate map, deployable, open/closed boundary, **binding invariants index**.
+1. `ARCHITECTURE.md` (repo này) — crate map, deployable, open/closed boundary, **binding invariants index** + R6 coverage overview.
+   - Khi cần verify (tách theo pace layer P.5): `docs/invariant-trace.md` (24 invariant Part A status) · `docs/concept-trace.md` (Part B B.1/B.3/B.4 → crate map) · `docs/qc-discipline.md` (4 lớp test + QC marker + STOP semantics) · `docs/phase-completion-checklist-<milestone>.md` (3 gate + mapping + CI G1-G9 cụ thể; archive khi exit).
 2. Blueprint (nếu có `../../workspace/` trên máy maintainer) — đọc đúng section, không đọc tràn:
-   - `../../workspace/02-architecture/invariants/part-a-foundation.md` — các invariant trong index dưới đây (hard constraint).
-   - `../../workspace/02-architecture/phase/part-c-phase-evolution.md` §C.2 + milestone hiện tại — **scope gate** (chỉ build cái phase này cho phép).
+   - `../../workspace/02-architecture/invariants/part-a-foundation.md` §H.2 — các invariant trong index dưới đây (hard constraint).
+   - `../../workspace/02-architecture/invariants/part-b-domain.md` §H.2 (ubiquitous language) + §H.3 (11 bounded context) — SSOT cho entity types trong `domain-core`/`proto`.
+   - `../../workspace/02-architecture/phase/part-c-phase-evolution.md` §H.3 (Phase 1 milestone) + §H.6 (A.1.24 rollout) + §H.7.2 (anti-pattern) — **scope gate** (chỉ build cái phase này cho phép).
    - `../../workspace/02-architecture/implementation/part-d-internal-impl.md` §D.1 (unit/crate), §D.2 (open/closed), §D.3 (Tauri).
    - `../../workspace/01-philosophy/vendor-charter/part-0.md` §1 — P.1, P.2, P.8, P.9.
    - `../../workspace/D-disciplines/t-a-coding-core.md` — T/A coding discipline + format `[T:source-id]` (§1,§3); intensity (§7); linter rules (§8). `t-a-coding-p2p.md` §3 (crypto), §6 (platform) = subset agent-relevant. General: `D-02-t-a-discipline.md`.
@@ -25,13 +27,18 @@ Repo này **PUBLIC** (Part D §D.2/§D.4, mô hình Tailscale). Coding do Claude
 |---|---|---|
 | **A.1.1** | data plane ≠ control plane, tách tuyệt đối | không nhét logic control-plane vào agent |
 | **A.1.4** | agent OPEN, customer audit được | giữ agent-core là lib độc lập, auditable |
-| **A.1.9** | single codebase, **không** fork Personal vs Enterprise | PL là deploy dimension, **không** phải trục chia code/crate (D.1.2) |
-| **A.1.20** | capability negotiation | agent cũ phải graceful degrade với feature mới |
-| **A.1.21** | supply-chain integrity | pin dep version, không thêm dep tùy tiện, không dynamic plugin |
+| **A.1.9** | single codebase, **không** fork Personal Tier A vs Enterprise Tier B | PL là deploy dimension, **không** phải trục chia code/crate (D.1.2) |
+| **A.1.11** | namespace per-PL từ Day 1 (`<pl>.tenant.<id>.>`) | mọi entity/subject mang `product_line` + `tenant_id` (A.3.6); không global namespace |
+| **A.1.20** | agent update + capability negotiation (Part D §D.1.7) | agent cũ phải graceful degrade với feature mới; rollback an toàn; force-upgrade theo SLO |
+| **A.1.21** | supply-chain integrity | pin dep version, không thêm dep tùy tiện, không dynamic plugin, signed commit/Cosign artifact |
+| **A.1.23** | per-PL infra isolation (Tier A shared / Tier B dedicated từ Day 1) | code phải để chỗ cho per-PL deployment config; không hardcode single-PL assumption |
+| **A.1.24** | `Organization` + `Workspace` = governance layer, **không** isolation | đừng mô hình Org/Workspace như cô lập hạ tầng; cấm Org cross-PL; "đổi domain = enroll mới" |
 | **A.3.1** | hexagonal, mỗi component = 1 crate | giữ port/adapter seam; không hợp nhất crate qua boundary |
-| **A.4.1** | agent-daemon NFR (latency, <100MB) | con số GUI **không** tính vào budget này (D.3.2) |
+| **A.4.1** | agent-daemon NFR `[A]` (latency, <100MB) | con số GUI **không** tính vào budget này (D.3.2); toàn bộ A.4 là `[A]` chưa đo |
 
-**Scope gate (P.8)** `[T per Part C]`: chỉ build cái milestone Part C hiện tại authorize. Không pre-build feature phase sau ("để sẵn cho chắc" = P.8 violation). Milestone 1.1 = agent core + GUI hello-world skeleton.
+**Scope gate (P.8)** `[T per Part C §H.3.1 + §H.7.2]`: chỉ build cái milestone Part C hiện tại authorize. Không pre-build feature phase sau ("để sẵn cho chắc" = P.8 violation). Anti-pattern Part C §H.7.2: pre-build Org/Workspace/delegation trước trigger L_subsidiary; pre-build F3 capability trước F3 customer.
+
+**Milestone 1.1 — Founding skeleton** (Part C §H.3.1): Rust workspace + WireGuard mesh agent core (5 platforms: Linux/macOS/Windows/iOS/Android); Tauri 2 UI shell ("hello world" mobile+desktop); client repos **public** từ Day 1 (agent core + CLI + UI); Personal Provisioning CA skeleton (SingleCustodian, ceremony rehearsed once non-prod); CI/CD baseline (hosted CI + Cosign); **Enterprise PL skeleton in code** (namespace, schema, ceremony procedure viết — **ZERO infra**, overhead <10% effort). Completion = 5 platforms compile + CI sign + Personal ceremony rehearsed + Enterprise CI staging deploy ≥80%/4 tuần (Phase 1→2 transition risk mitigation, milestone 1.4).
 
 ## T/A marking trong code `[T per t-a-coding-core §0-§3 + P.9]`
 
@@ -50,6 +57,8 @@ CLAUDE.md này = "system prompt" tự nạp (thay cho core §1.1 paste-template)
 - **P.2 (không shortcut)**: cấm `--skip-verification`-style flag "tạm thời". Front-load đúng từ đầu.
 - **P.3 (honest gap)**: chỗ chưa làm/giả định → `// TODO[A]:` + lý do, không giấu.
 - **Crate seam**: 11 bounded context = seam tách service sau (D.1.5). Giữ ranh giới; không leak domain qua crate khác.
+- **PL discipline (A.1.9 + A.1.11 + A.1.23)**: code `agent-core`/`proto`/`domain-core` phải support cả Personal (Tier A: F0/F0-Plus/F1 Starter) lẫn Enterprise (Tier B: F1 Growth/F2 Growth/F3 Enterprise) qua **feature flag + config**, không qua fork crate. Cross-PL: trust chain riêng (A.1.18) — agent connect đúng broker per-PL theo node cert; cert verify fail cross-PL ở TLS layer (Part B §B.5.1). `[F1 Starter]` ≠ `[F1 Growth]` — *cùng số, khác PL, khác infra*.
+- **A.1.24 discipline**: `Organization`/`Workspace` là Part C [A], **chưa implement**. Đừng pre-add type vào `domain-core` ở milestone 1.1 (anti-pattern Part C §H.7.2). Khi có, Org scoped 1 PL, Workspace logic-trong-Tenant — KHÔNG isolation layer.
 
 ## Workflow với human QC
 
