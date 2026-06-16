@@ -4,5 +4,21 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 
+[[bin]]
+name = "agent"
+path = "src/main.rs"
+
 [dependencies]
 agent-core = { workspace = true }
+async-nats = "0.40"
+chacha20poly1305 = "0.10"
+rand = "0.8"
+tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "time"] }
+anyhow = "1"
+
+[features]
+default = []
+# Gate A.1.4 NC: client escrows session key onto NATS data subject as a separate
+# message. Default build NEVER does this. CI under `GATE_NC=key_escrow_build`
+# stays red unless this feature compiled in (NC giả pattern).
+key-escrow-build = []
