@@ -8,6 +8,15 @@ rust-version.workspace = true
 name = "agent"
 path = "src/main.rs"
 
+# Gate A.1.4 NC variant. Same source — escrow path is `#[cfg(feature = "key-escrow-build")]`
+# in src/main.rs. `required-features` makes Cargo emit this binary ONLY when the feature
+# is enabled, so default `cargo build -p agent-daemon` produces just `agent`. Build NC:
+#   cargo build -p agent-daemon --bin agent-nc-escrow --features key-escrow-build
+[[bin]]
+name = "agent-nc-escrow"
+path = "src/main.rs"
+required-features = ["key-escrow-build"]
+
 [dependencies]
 agent-core = { workspace = true }
 async-nats = "0.40"
