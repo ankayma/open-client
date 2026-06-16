@@ -8,8 +8,8 @@ members = [
     "crates/agent-core",
     "crates/agent-daemon",
     "crates/cli",
+    "gui/src-tauri",  # [T:Part D §D.3] Tauri 2 GUI shell — initialized milestone 1.1
 ]
-# gui/src-tauri added at milestone 1.1 via `cargo tauri init` (needs Tauri toolchain) — Part D §D.3
 
 [workspace.package]
 version = "0.1.0"

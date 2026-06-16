@@ -1,0 +1,372 @@
+<script lang="ts">
+	import { goto } from '$app/navigation';
+	import { auth, connection, quota } from '$lib/stores';
+	import { connect, disconnect, getQuota } from '$lib/tauri';
+
+	let toggling = $state(false);
+
+	async function toggleConnection() {
+		toggling = true;
+		try {
+			const conn = $connection;
+			if (conn.status === 'connected') {
+				await disconnect();
+				connection.set({ status: 'disconnected' });
+			} else {
+				connection.set({ status: 'connecting' });
+				await connect();
+			}
+		} catch (e) {
+			console.error(e);
+		} finally {
+			toggling = false;
+		}
+	}
+
+	async function refreshQuota() {
+		try {
+			const q = await getQuota();
+			quota.set(q);
+		} catch {}
+	}
+
+	function formatBytes(bytes: number): string {
+		if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+		if (bytes < 1024 * 1024 * 1024) return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+		return `${(bytes / 1024 / 1024 / 1024).toFixed(2)} GB`;
+	}
+
+	let quotaPct = $derived(
+		$quota ? Math.min(100, ($quota.bandwidth_bytes_used / $quota.bandwidth_bytes_limit) * 100) : 0
+	);
+
+	let quotaWarn = $derived(quotaPct >= 80);
+	let quotaCritical = $derived(quotaPct >= 95);
+</script>
+
+<main>
+	<header>
+		<h2>Ankayma</h2>
+		<div class="header-actions">
+			<button class="icon-btn" aria-label="Settings" onclick={() => goto('/settings')}>
+				<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+					<circle cx="12" cy="12" r="3"/>
+					<path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 010 2.83 2 2 0 01-2.83 0l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 012.83-2.83l.06.06A1.65 1.65 0 009 4.68a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 2.83l-.06.06A1.65 1.65 0 0019.4 9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z"/>
+				</svg>
+			</button>
+		</div>
+	</header>
+
+	<section class="connection-card">
+		{#if $connection.status === 'connected'}
+			<div class="status-indicator connected"></div>
+			<div class="status-text">
+				<span class="status-label connected">Connected</span>
+				{#if $connection.status === 'connected'}
+					<span class="node-id">{$connection.node_id}</span>
+				{/if}
+			</div>
+		{:else if $connection.status === 'connecting'}
+			<div class="status-indicator connecting"></div>
+			<div class="status-text">
+				<span class="status-label">Connecting…</span>
+			</div>
+		{:else}
+			<div class="status-indicator"></div>
+			<div class="status-text">
+				<span class="status-label">Disconnected</span>
+				<span class="status-sub">Tap to connect</span>
+			</div>
+		{/if}
+
+		<button
+			class="toggle-btn"
+			class:active={$connection.status === 'connected'}
+			onclick={toggleConnection}
+			disabled={toggling || $connection.status === 'connecting'}
+			aria-label={$connection.status === 'connected' ? 'Disconnect' : 'Connect'}
+		>
+			<svg width="32" height="32" viewBox="0 0 24 24" fill="currentColor">
+				<path d="M13 3h-2v10h2V3zm4.83 2.17l-1.42 1.42A6.92 6.92 0 0119 12c0 3.87-3.13 7-7 7A7 7 0 015 12c0-1.68.59-3.22 1.58-4.42L5.17 6.17A8.932 8.932 0 003 12c0 4.97 4.03 9 9 9s9-4.03 9-9c0-2.74-1.23-5.18-3.17-6.83z"/>
+			</svg>
+		</button>
+	</section>
+
+	{#if $quota}
+		<section class="quota-card">
+			<div class="quota-header">
+				<span>Bandwidth</span>
+				<span class:warn={quotaWarn} class:critical={quotaCritical}>
+					{formatBytes($quota.bandwidth_bytes_used)} / {formatBytes($quota.bandwidth_bytes_limit)}
+				</span>
+			</div>
+			<div class="quota-bar">
+				<div
+					class="quota-fill"
+					class:warn={quotaWarn}
+					class:critical={quotaCritical}
+					style="width: {quotaPct}%"
+				></div>
+			</div>
+
+			{#if quotaWarn}
+				<div class="quota-nudge" class:critical={quotaCritical}>
+					{#if quotaCritical}
+						<strong>95% used</strong> — upgrade to avoid interruption
+					{:else}
+						<strong>80% used</strong> — consider upgrading for more bandwidth
+					{/if}
+					<button class="nudge-btn" onclick={() => goto('/upgrade')}>
+						Upgrade →
+					</button>
+				</div>
+			{/if}
+
+			<div class="quota-nodes">
+				<span>Nodes</span>
+				<span>{$quota.nodes_used} / {$quota.nodes_limit}</span>
+			</div>
+		</section>
+	{/if}
+
+	{#if $auth.status === 'authenticated' && $auth.user.tier === 'F0'}
+		<section class="upgrade-banner">
+			<div>
+				<strong>F0-Plus — $9/mo</strong>
+				<span>More bandwidth · Multiple subdomains · Raw TCP</span>
+			</div>
+			<button class="upgrade-btn" onclick={() => goto('/upgrade')}>Upgrade</button>
+		</section>
+	{/if}
+</main>
+
+<style>
+	main {
+		flex: 1;
+		display: flex;
+		flex-direction: column;
+		padding: calc(var(--safe-top) + 16px) 16px calc(var(--safe-bottom) + 24px);
+		gap: 16px;
+		max-width: 420px;
+		margin: 0 auto;
+		width: 100%;
+	}
+
+	header {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		padding: 8px 0;
+	}
+
+	h2 {
+		font-size: 20px;
+		font-weight: 700;
+	}
+
+	.icon-btn {
+		width: 40px;
+		height: 40px;
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		border-radius: 10px;
+		background: var(--c-surface);
+		border: 1px solid var(--c-border);
+		color: var(--c-text-dim);
+		transition: color 0.15s;
+	}
+
+	.icon-btn:hover {
+		color: var(--c-text);
+	}
+
+	.connection-card {
+		background: var(--c-surface);
+		border: 1px solid var(--c-border);
+		border-radius: var(--radius);
+		padding: 32px 24px;
+		display: flex;
+		flex-direction: column;
+		align-items: center;
+		gap: 16px;
+	}
+
+	.status-indicator {
+		width: 12px;
+		height: 12px;
+		border-radius: 50%;
+		background: var(--c-text-dim);
+	}
+
+	.status-indicator.connected {
+		background: var(--c-success);
+		box-shadow: 0 0 8px var(--c-success);
+	}
+
+	.status-indicator.connecting {
+		background: var(--c-warn);
+		animation: pulse 1s ease-in-out infinite;
+	}
+
+	@keyframes pulse {
+		0%, 100% { opacity: 1; }
+		50% { opacity: 0.3; }
+	}
+
+	.status-text {
+		text-align: center;
+	}
+
+	.status-label {
+		display: block;
+		font-size: 18px;
+		font-weight: 600;
+	}
+
+	.status-label.connected {
+		color: var(--c-success);
+	}
+
+	.node-id, .status-sub {
+		font-size: 12px;
+		color: var(--c-text-dim);
+		font-family: 'SF Mono', 'Fira Code', monospace;
+	}
+
+	.toggle-btn {
+		width: 80px;
+		height: 80px;
+		border-radius: 50%;
+		background: var(--c-border);
+		color: var(--c-text-dim);
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		transition: background 0.2s, color 0.2s, box-shadow 0.2s;
+	}
+
+	.toggle-btn.active {
+		background: color-mix(in srgb, var(--c-success) 20%, var(--c-surface));
+		color: var(--c-success);
+		box-shadow: 0 0 24px color-mix(in srgb, var(--c-success) 30%, transparent);
+	}
+
+	.toggle-btn:hover:not(:disabled) {
+		background: var(--c-accent);
+		color: #fff;
+	}
+
+	.toggle-btn:disabled {
+		opacity: 0.5;
+		cursor: not-allowed;
+	}
+
+	.quota-card {
+		background: var(--c-surface);
+		border: 1px solid var(--c-border);
+		border-radius: var(--radius);
+		padding: 16px;
+		display: flex;
+		flex-direction: column;
+		gap: 10px;
+	}
+
+	.quota-header {
+		display: flex;
+		justify-content: space-between;
+		font-size: 14px;
+	}
+
+	.quota-header span:first-child {
+		color: var(--c-text-dim);
+	}
+
+	.quota-header .warn { color: var(--c-warn); }
+	.quota-header .critical { color: var(--c-danger); }
+
+	.quota-bar {
+		height: 6px;
+		background: var(--c-border);
+		border-radius: 3px;
+		overflow: hidden;
+	}
+
+	.quota-fill {
+		height: 100%;
+		background: var(--c-accent);
+		border-radius: 3px;
+		transition: width 0.3s ease;
+	}
+
+	.quota-fill.warn { background: var(--c-warn); }
+	.quota-fill.critical { background: var(--c-danger); }
+
+	.quota-nudge {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		padding: 10px 12px;
+		background: color-mix(in srgb, var(--c-warn) 10%, transparent);
+		border: 1px solid color-mix(in srgb, var(--c-warn) 30%, transparent);
+		border-radius: 8px;
+		font-size: 13px;
+		gap: 8px;
+	}
+
+	.quota-nudge.critical {
+		background: color-mix(in srgb, var(--c-danger) 10%, transparent);
+		border-color: color-mix(in srgb, var(--c-danger) 30%, transparent);
+	}
+
+	.nudge-btn {
+		background: var(--c-accent);
+		color: #fff;
+		padding: 6px 12px;
+		border-radius: 6px;
+		font-size: 13px;
+		font-weight: 600;
+		white-space: nowrap;
+		flex-shrink: 0;
+	}
+
+	.quota-nodes {
+		display: flex;
+		justify-content: space-between;
+		font-size: 13px;
+		color: var(--c-text-dim);
+	}
+
+	.upgrade-banner {
+		background: color-mix(in srgb, var(--c-accent) 10%, var(--c-surface));
+		border: 1px solid color-mix(in srgb, var(--c-accent) 30%, transparent);
+		border-radius: var(--radius);
+		padding: 16px;
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: 12px;
+	}
+
+	.upgrade-banner strong {
+		display: block;
+		font-size: 14px;
+		margin-bottom: 2px;
+	}
+
+	.upgrade-banner span {
+		font-size: 12px;
+		color: var(--c-text-dim);
+	}
+
+	.upgrade-btn {
+		background: var(--c-accent);
+		color: #fff;
+		padding: 10px 18px;
+		border-radius: 8px;
+		font-size: 14px;
+		font-weight: 600;
+		white-space: nowrap;
+		flex-shrink: 0;
+	}
+</style>

@@ -1,0 +1,147 @@
+<script lang="ts">
+	import { goto } from '$app/navigation';
+	import { auth } from '$lib/stores';
+	import { signOut } from '$lib/tauri';
+
+	let signing_out = $state(false);
+
+	async function handleSignOut() {
+		signing_out = true;
+		try {
+			await signOut();
+			auth.set({ status: 'unauthenticated' });
+			goto('/welcome');
+		} catch {
+			signing_out = false;
+		}
+	}
+</script>
+
+<main>
+	<header>
+		<button class="back-btn" onclick={() => goto('/dashboard')}>
+			<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+				<path d="M19 12H5M12 5l-7 7 7 7"/>
+			</svg>
+		</button>
+		<h2>Settings</h2>
+		<div style="width: 36px"></div>
+	</header>
+
+	{#if $auth.status === 'authenticated'}
+		<section class="card">
+			<div class="row">
+				<span class="label">Account</span>
+				<span class="value">{$auth.user.email}</span>
+			</div>
+			<div class="row">
+				<span class="label">Plan</span>
+				<span class="value">{$auth.user.tier}</span>
+			</div>
+		</section>
+	{/if}
+
+	<section class="card">
+		<div class="row">
+			<span class="label">Version</span>
+			<span class="value mono">0.1.0</span>
+		</div>
+		<div class="row">
+			<span class="label">Agent</span>
+			<a href="https://github.com/ankayma/client" class="value link" target="_blank" rel="noopener">
+				Open source ↗
+			</a>
+		</div>
+	</section>
+
+	<button class="sign-out-btn" onclick={handleSignOut} disabled={signing_out}>
+		{signing_out ? 'Signing out…' : 'Sign out'}
+	</button>
+</main>
+
+<style>
+	main {
+		flex: 1;
+		display: flex;
+		flex-direction: column;
+		padding: calc(var(--safe-top) + 16px) 16px calc(var(--safe-bottom) + 40px);
+		gap: 16px;
+		max-width: 420px;
+		margin: 0 auto;
+		width: 100%;
+	}
+
+	header {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		padding: 8px 0;
+		margin-bottom: 8px;
+	}
+
+	h2 {
+		font-size: 18px;
+		font-weight: 700;
+	}
+
+	.back-btn {
+		display: flex;
+		align-items: center;
+		color: var(--c-text-dim);
+		padding: 8px;
+		border-radius: 8px;
+	}
+
+	.card {
+		background: var(--c-surface);
+		border: 1px solid var(--c-border);
+		border-radius: var(--radius);
+		overflow: hidden;
+	}
+
+	.row {
+		display: flex;
+		justify-content: space-between;
+		align-items: center;
+		padding: 14px 16px;
+		border-bottom: 1px solid var(--c-border);
+	}
+
+	.row:last-child {
+		border-bottom: none;
+	}
+
+	.label {
+		font-size: 14px;
+		color: var(--c-text-dim);
+	}
+
+	.value {
+		font-size: 14px;
+		font-weight: 500;
+	}
+
+	.mono {
+		font-family: 'SF Mono', 'Fira Code', monospace;
+		font-size: 13px;
+	}
+
+	.link {
+		color: var(--c-accent);
+	}
+
+	.sign-out-btn {
+		padding: 16px;
+		background: color-mix(in srgb, var(--c-danger) 10%, var(--c-surface));
+		border: 1px solid color-mix(in srgb, var(--c-danger) 30%, transparent);
+		color: var(--c-danger);
+		border-radius: var(--radius);
+		font-size: 15px;
+		font-weight: 600;
+		transition: background 0.15s;
+	}
+
+	.sign-out-btn:hover:not(:disabled) {
+		background: color-mix(in srgb, var(--c-danger) 20%, var(--c-surface));
+	}
+</style>

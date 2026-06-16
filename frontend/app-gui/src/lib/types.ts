@@ -1,0 +1,35 @@
+// Domain types — mirror domain-core entities (Part B §B.1)
+
+export type ProductLine = 'Personal' | 'Enterprise';
+
+export type Tier = 'F0' | 'F0Plus' | 'F1Starter';
+
+export interface User {
+	tenant_id: string;
+	email: string;
+	tier: Tier;
+	product_line: ProductLine;
+}
+
+export type AuthState =
+	| { status: 'unauthenticated' }
+	| { status: 'authenticating' }
+	| { status: 'authenticated'; user: User };
+
+export type ConnectionState =
+	| { status: 'disconnected' }
+	| { status: 'connecting' }
+	| { status: 'connected'; node_id: string; endpoint: string };
+
+export interface Quota {
+	bandwidth_bytes_used: number;
+	bandwidth_bytes_limit: number;
+	nodes_used: number;
+	nodes_limit: number;
+}
+
+export interface NodeInfo {
+	node_id: string;
+	hostname: string;
+	public_key: string;
+}
