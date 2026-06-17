@@ -37,6 +37,25 @@ pub struct PeerInfo {
     pub endpoint: Option<String>,
 }
 
+/// Authenticated session info from `GET /api/v1/session`. `[T:B.5.2]`
+#[derive(Debug, Clone, Deserialize)]
+pub struct SessionInfo {
+    pub tenant_id: String,
+    pub email: String,
+    pub login: String,
+    pub tier: String,
+}
+
+/// Usage quota from `GET /api/v1/quota`. `[T:B.5.2]`
+#[derive(Debug, Clone, Deserialize)]
+pub struct Quota {
+    pub bandwidth_bytes_used: u64,
+    pub bandwidth_bytes_limit: u64,
+    pub nodes_used: u32,
+    pub nodes_limit: u32,
+    pub tier: String,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

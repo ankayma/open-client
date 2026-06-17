@@ -18,6 +18,12 @@ export async function signInGithub(): Promise<void> {
 	return invoke('sign_in_github');
 }
 
+// After OAuth in the browser, the user pastes the session token shown on the
+// success page. The backend validates it against the control plane.
+export async function submitSessionToken(token: string): Promise<AuthState> {
+	return invoke<AuthState>('submit_session_token', { token });
+}
+
 export async function signOut(): Promise<void> {
 	return invoke('sign_out');
 }

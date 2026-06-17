@@ -1,8 +1,43 @@
 // GUI shell — thin Tauri command layer.
-// [T:A.1.1] All business logic (auth, WireGuard, billing) lives in agent-core / control-plane.
-// Commands here are stubs; real impl wires into agent-core when available.
+// [T:A.1.1] All control-plane I/O goes through agent-core; the GUI never talks
+// to the control plane directly. WireGuard tunnel bring-up is still pending
+// (boringtun, milestone 1.2 slice 5) — connect/* commands remain stubs.
 
+use std::sync::Mutex;
+
+use agent_core::{adapters, domain, reqwest};
 use serde::{Deserialize, Serialize};
+use tauri::{Manager, State};
+
+/// Default control plane; override with ANKAYMA_CONTROL_PLANE for dev/staging.
+const DEFAULT_CONTROL_PLANE: &str = "https://cp.ankayma.com";
+
+/// Process-wide app state: one HTTP client + the current session token.
+struct AppState {
+    http: reqwest::Client,
+    base_url: String,
+    session: Mutex<Option<String>>,
+}
+
+impl AppState {
+    fn new() -> Self {
+        let base_url = std::env::var("ANKAYMA_CONTROL_PLANE")
+            .unwrap_or_else(|_| DEFAULT_CONTROL_PLANE.to_string());
+        AppState {
+            http: reqwest::Client::new(),
+            base_url,
+            session: Mutex::new(None),
+        }
+    }
+
+    fn token(&self) -> Option<String> {
+        self.session.lock().expect("session lock poisoned").clone()
+    }
+
+    fn set_token(&self, tok: Option<String>) {
+        *self.session.lock().expect("session lock poisoned") = tok;
+    }
+}
 
 // --- Domain types (mirror Part B §B.1 subset needed by GUI) ---
 
@@ -18,8 +53,19 @@ pub enum AuthState {
 pub struct User {
     pub tenant_id: String,
     pub email: String,
-    pub tier: String,         // "F0" | "F0Plus" | "F1Starter"
-    pub product_line: String, // "Personal" | "Enterprise"
+    pub tier: String,         // "F0" | "F0Plus"
+    pub product_line: String, // this control plane is the Personal PL
+}
+
+impl From<domain::SessionInfo> for User {
+    fn from(s: domain::SessionInfo) -> Self {
+        User {
+            tenant_id: s.tenant_id,
+            email: s.email,
+            tier: s.tier,
+            product_line: "Personal".into(),
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -46,60 +92,89 @@ pub struct NodeInfo {
 }
 
 // --- Commands ---
-// [A] All commands are stubs pending agent-core WireGuard + control-plane integration (milestone 1.2)
 
 #[tauri::command]
-async fn check_auth_state() -> Result<AuthState, String> {
-    // [A] stub — replace with agent-core session check
-    Ok(AuthState::Unauthenticated)
+async fn check_auth_state(state: State<'_, AppState>) -> Result<AuthState, String> {
+    match state.token() {
+        None => Ok(AuthState::Unauthenticated),
+        // Re-validate the stored token against the control plane.
+        Some(tok) => match adapters::session_info(&state.http, &state.base_url, &tok).await {
+            Ok(s) => Ok(AuthState::Authenticated { user: s.into() }),
+            Err(_) => {
+                state.set_token(None);
+                Ok(AuthState::Unauthenticated)
+            }
+        },
+    }
 }
 
 #[tauri::command]
-async fn sign_in_github() -> Result<(), String> {
-    // [A] stub — open system browser to control-plane OAuth endpoint
-    // Real: tauri::api::shell::open(&app.shell_scope(), oauth_url, None)
-    Err("Not yet implemented — control-plane integration pending".into())
+async fn sign_in_github(state: State<'_, AppState>) -> Result<(), String> {
+    // Open the system browser to the control-plane OAuth start. After GitHub,
+    // the page shows a session token to paste back via submit_session_token.
+    let url = format!("{}/auth/github", state.base_url.trim_end_matches('/'));
+    open::that(&url).map_err(|e| format!("could not open browser: {e}"))
 }
 
 #[tauri::command]
-async fn sign_out() -> Result<(), String> {
-    // [A] stub — clear agent-core session
+async fn submit_session_token(
+    token: String,
+    state: State<'_, AppState>,
+) -> Result<AuthState, String> {
+    let token = token.trim().to_string();
+    if token.is_empty() {
+        return Err("session token is empty".into());
+    }
+    // Validate by fetching the session; only store the token if it works.
+    let info = adapters::session_info(&state.http, &state.base_url, &token)
+        .await
+        .map_err(|e| e.to_string())?;
+    state.set_token(Some(token));
+    Ok(AuthState::Authenticated { user: info.into() })
+}
+
+#[tauri::command]
+async fn sign_out(state: State<'_, AppState>) -> Result<(), String> {
+    state.set_token(None);
     Ok(())
 }
 
 #[tauri::command]
+async fn get_quota(state: State<'_, AppState>) -> Result<Quota, String> {
+    let tok = state.token().ok_or("not signed in")?;
+    let q = adapters::quota(&state.http, &state.base_url, &tok)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(Quota {
+        bandwidth_bytes_used: q.bandwidth_bytes_used,
+        bandwidth_bytes_limit: q.bandwidth_bytes_limit,
+        nodes_used: q.nodes_used,
+        nodes_limit: q.nodes_limit,
+    })
+}
+
+// --- Still stubs: need the WireGuard tunnel (boringtun, slice 5) ---
+
+#[tauri::command]
 async fn get_connection_status() -> Result<ConnectionState, String> {
-    // [A] stub — query agent-core daemon via IPC socket
+    // [A] stub — query agent-core daemon once the tunnel exists (slice 5)
     Ok(ConnectionState::Disconnected)
 }
 
 #[tauri::command]
 async fn connect() -> Result<(), String> {
-    // [A] stub — send Connect intent to agent-core
-    // Real: agent_core::application::connect(&session).await
-    Err("Not yet implemented — agent-core WireGuard pending".into())
+    // [A] stub — enroll + boringtun bring-up pending (slice 5)
+    Err("Not yet implemented — WireGuard tunnel pending (boringtun)".into())
 }
 
 #[tauri::command]
 async fn disconnect() -> Result<(), String> {
-    // [A] stub — send Disconnect intent to agent-core
     Ok(())
 }
 
 #[tauri::command]
-async fn get_quota() -> Result<Quota, String> {
-    // [A] stub — query control-plane quota endpoint via agent-core
-    Ok(Quota {
-        bandwidth_bytes_used: 0,
-        bandwidth_bytes_limit: 10 * 1024 * 1024 * 1024, // 10 GB F0 limit [A]
-        nodes_used: 1,
-        nodes_limit: 5,
-    })
-}
-
-#[tauri::command]
 async fn get_node_info() -> Result<NodeInfo, String> {
-    // [A] stub — read from agent-core local state
+    // [A] stub — populated from enrollment once connect() is wired (slice 5)
     Ok(NodeInfo {
         node_id: "node_placeholder".into(),
         hostname: "my-device".into(),
@@ -109,25 +184,24 @@ async fn get_node_info() -> Result<NodeInfo, String> {
 
 #[tauri::command]
 async fn create_join_link() -> Result<String, String> {
-    // [A] stub — control-plane generates signed enrollment token (15min TTL)
-    // Real: POST /api/enrollment/token → { url: "ankayma://join?token=<jwt>" }
-    Err("Not yet implemented — control-plane enrollment token pending milestone 1.2".into())
+    // [A] stub — POST /api/v1/enrollment/token (slice 4b)
+    Err("Not yet implemented — enrollment token pending".into())
 }
 
 #[tauri::command]
-async fn track_event(name: String, props: std::collections::HashMap<String, String>) -> Result<(), String> {
-    // [A] stub — relay to control-plane analytics endpoint via agent-core (milestone 1.2)
-    // Real: agent_core::telemetry::track(&session, &name, &props).await
+async fn track_event(
+    name: String,
+    props: std::collections::HashMap<String, String>,
+) -> Result<(), String> {
+    // [A] stub — analytics relay pending (milestone 1.2 signal acquisition)
     let _ = (name, props);
     Ok(())
 }
 
 #[tauri::command]
 async fn open_stripe_checkout() -> Result<(), String> {
-    // [A] stub — control-plane generates Stripe session URL, open in system browser
-    // Real: control_plane_client::billing::create_checkout_session().await -> url
-    //       tauri::api::shell::open(url)
-    Err("Not yet implemented — Stripe integration pending milestone 1.3".into())
+    // [A] stub — Stripe integration pending (milestone 1.3)
+    Err("Not yet implemented — Stripe pending (milestone 1.3)".into())
 }
 
 // --- App entry point ---
@@ -136,6 +210,7 @@ async fn open_stripe_checkout() -> Result<(), String> {
 pub fn run() {
     tauri::Builder::default()
         .setup(|app| {
+            app.manage(AppState::new());
             if cfg!(debug_assertions) {
                 app.handle().plugin(
                     tauri_plugin_log::Builder::default()
@@ -148,6 +223,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             check_auth_state,
             sign_in_github,
+            submit_session_token,
             sign_out,
             get_connection_status,
             connect,

@@ -9,3 +9,7 @@ pub mod ports; // trait interfaces for external systems
 // primitive through agent-core so entrypoints (cli/daemon/GUI) depend on the
 // lib, not on `crypto` directly (keeps the A.3.1 hexagonal seam). [T:A.3.1]
 pub use crypto::{KeyError, WgKeypair};
+
+// Re-export the HTTP client type so GUI/daemon share one client and never talk
+// to the control plane except through this crate's adapters. [T:A.1.1]
+pub use reqwest;
