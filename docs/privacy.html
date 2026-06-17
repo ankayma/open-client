@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Privacy Policy — Ankayma</title>
+  <link rel="stylesheet" href="style.css" />
+  <link rel="icon" href="favicon.svg" type="image/svg+xml" />
+</head>
+<body>
+<nav>
+  <div class="inner">
+    <a class="logo" href="/">Ank<span>ayma</span></a>
+    <ul></ul>
+    <a class="btn btn-outline" href="/">← Back</a>
+  </div>
+</nav>
+<div class="page-hero">
+  <div class="wrap">
+    <h1>Privacy Policy</h1>
+    <p>Effective: June 2026 · <a href="mailto:hello@ankayma.com">hello@ankayma.com</a></p>
+  </div>
+</div>
+<div class="wrap">
+  <div class="prose">
+    <h2>What we collect</h2>
+    <p><strong>Account data:</strong> GitHub username, email address (from GitHub OAuth).</p>
+    <p><strong>Node data:</strong> WireGuard public key, device hostname, overlay IP, node ID. Your private key is generated on-device and never sent to us.</p>
+    <p><strong>Usage data:</strong> Bandwidth consumed (bytes in/out per tenant, not content), connection timestamps, tunnel establishment events. This data is used for quota enforcement and billing.</p>
+    <p><strong>Audit logs:</strong> Append-only ledger of enrollment events, tier transitions, and policy changes. Retained per your tier's retention policy.</p>
+    <p><strong>Signal data (aggregate):</strong> Referrer URL, UTM parameters at signup, funnel events (signup started, first tunnel created). Used to understand how developers discover us. Not sold to third parties.</p>
+
+    <h2>What we do NOT collect</h2>
+    <ul>
+      <li>The content of your tunneled traffic — data travels peer-to-peer, encrypted with WireGuard, not through our servers</li>
+      <li>Your WireGuard private key</li>
+      <li>Behavioral profiling for advertising</li>
+    </ul>
+
+    <h2>How we use data</h2>
+    <ul>
+      <li>Operate the service (enrollment, broker, quota enforcement)</li>
+      <li>Billing via Stripe (F0-Plus)</li>
+      <li>Abuse detection (rate limiting, PhishTank check at signup)</li>
+      <li>Product improvement (aggregate funnel analytics only)</li>
+    </ul>
+
+    <h2>Data sharing</h2>
+    <p><strong>Stripe:</strong> Billing data for paid plans. Stripe's privacy policy applies.</p>
+    <p><strong>Infrastructure providers:</strong> Cloud hosting for control plane. Data processed under DPA agreements.</p>
+    <p>We do not sell your data. We do not share your data with advertisers.</p>
+
+    <h2>Data retention</h2>
+    <p>Account data: retained until account deletion. Audit logs: 1 year (F0/F0-Plus), 7 years (Enterprise — Phase 2+). Usage metrics: 90-day rolling window for F0.</p>
+
+    <h2>Your rights</h2>
+    <p>You may request export or deletion of your account data at any time by emailing <a href="mailto:hello@ankayma.com">hello@ankayma.com</a> or using in-app account deletion.</p>
+
+    <h2>Cookies</h2>
+    <p>The mobile/desktop app uses no cookies. The web admin console uses a single session cookie. The marketing site (this page) uses no tracking cookies.</p>
+
+    <h2>Security</h2>
+    <p>Data in transit is encrypted with TLS. Server-side data at rest is encrypted. See <a href="honest-limits.html">Honest Limits</a> for the current state of independent security verification.</p>
+
+    <h2>Changes</h2>
+    <p>Material changes will be communicated via the email on your account with 14 days notice.</p>
+  </div>
+</div>
+<footer>
+  <div class="inner">
+    <span>© 2026 Ankayma.</span>
+    <ul>
+      <li><a href="honest-limits.html">Honest limits</a></li>
+      <li><a href="privacy.html">Privacy</a></li>
+      <li><a href="terms.html">Terms</a></li>
+    </ul>
+  </div>
+</footer>
+</body>
+</html>

@@ -108,6 +108,13 @@ async fn get_node_info() -> Result<NodeInfo, String> {
 }
 
 #[tauri::command]
+async fn create_join_link() -> Result<String, String> {
+    // [A] stub — control-plane generates signed enrollment token (15min TTL)
+    // Real: POST /api/enrollment/token → { url: "ankayma://join?token=<jwt>" }
+    Err("Not yet implemented — control-plane enrollment token pending milestone 1.2".into())
+}
+
+#[tauri::command]
 async fn open_stripe_checkout() -> Result<(), String> {
     // [A] stub — control-plane generates Stripe session URL, open in system browser
     // Real: control_plane_client::billing::create_checkout_session().await -> url
@@ -139,6 +146,7 @@ pub fn run() {
             disconnect,
             get_quota,
             get_node_info,
+            create_join_link,
             open_stripe_checkout,
         ])
         .run(tauri::generate_context!())

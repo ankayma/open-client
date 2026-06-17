@@ -1,0 +1,255 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Ankayma — Zero-trust P2P network for developers</title>
+  <meta name="description" content="Connect any device, any network. WireGuard mesh with customer-controlled keys. Open-source agent. Under 5 minutes to first tunnel." />
+  <link rel="stylesheet" href="style.css" />
+  <link rel="icon" href="favicon.svg" type="image/svg+xml" />
+</head>
+<body>
+
+<nav>
+  <div class="inner">
+    <a class="logo" href="/">Ank<span>ayma</span></a>
+    <ul>
+      <li><a href="#how">How it works</a></li>
+      <li><a href="#features">Features</a></li>
+      <li><a href="#pricing">Pricing</a></li>
+      <li><a href="https://github.com/ankayma/open-client" target="_blank" rel="noopener">GitHub</a></li>
+    </ul>
+    <a class="btn btn-primary" href="#download">Download free</a>
+  </div>
+</nav>
+
+<!-- HERO -->
+<section class="hero">
+  <div class="wrap">
+    <div class="badge">Open-source agent · Free tier available</div>
+    <h1>Zero-trust mesh network.<br /><em>Your keys. Your infra.</em></h1>
+    <p>Connect any device across any network with WireGuard. Customer-controlled keys, open-source agent you can audit, under 5 minutes to first tunnel.</p>
+    <div class="hero-actions">
+      <a class="btn btn-primary" href="#download">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><path d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z"/></svg>
+        Download — it's free
+      </a>
+      <a class="btn btn-outline" href="https://github.com/ankayma/open-client" target="_blank" rel="noopener">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2C6.477 2 2 6.477 2 12c0 4.418 2.865 8.166 6.839 9.489.5.092.682-.217.682-.482 0-.237-.009-.868-.013-1.703-2.782.604-3.369-1.342-3.369-1.342-.454-1.155-1.11-1.463-1.11-1.463-.908-.62.069-.608.069-.608 1.003.07 1.531 1.03 1.531 1.03.892 1.529 2.341 1.087 2.91.832.092-.647.35-1.088.636-1.338-2.22-.253-4.555-1.11-4.555-4.943 0-1.091.39-1.984 1.03-2.682-.103-.253-.447-1.27.098-2.646 0 0 .84-.269 2.75 1.025A9.578 9.578 0 0112 6.836a9.59 9.59 0 012.504.337c1.909-1.294 2.747-1.025 2.747-1.025.547 1.376.203 2.394.1 2.646.64.698 1.026 1.591 1.026 2.682 0 3.841-2.337 4.687-4.565 4.935.359.309.678.919.678 1.852 0 1.336-.012 2.415-.012 2.741 0 .267.18.578.688.48C19.138 20.163 22 16.418 22 12c0-5.523-4.477-10-10-10z"/></svg>
+        View source
+      </a>
+    </div>
+    <p class="hero-note">Sign up with GitHub · No credit card · Cancel anytime</p>
+  </div>
+</section>
+
+<!-- SOCIAL PROOF -->
+<div class="social-proof">
+  <div class="wrap">
+    <p>Built with</p>
+    <div class="trust-row">
+      <div class="trust-item"><div class="dot"></div> WireGuard</div>
+      <div class="trust-item"><div class="dot"></div> Rust</div>
+      <div class="trust-item"><div class="dot"></div> Open-source agent</div>
+      <div class="trust-item"><div class="dot"></div> Customer-controlled keys</div>
+      <div class="trust-item"><div class="dot"></div> No vendor key custody</div>
+    </div>
+  </div>
+</div>
+
+<!-- HOW IT WORKS -->
+<section class="section" id="how" style="background: var(--surface); border-top: 1px solid var(--border); border-bottom: 1px solid var(--border);">
+  <div class="wrap">
+    <div class="section-label">How it works</div>
+    <h2>From install to tunnel in under 5 minutes</h2>
+    <p>No configuration files, no manual key exchange, no firewall rules.</p>
+    <div class="steps">
+      <div class="step">
+        <div class="step-num">1</div>
+        <div class="step-body">
+          <strong>Sign up with GitHub</strong>
+          <span>One click. Your GitHub account gates access — no new password to manage.</span>
+        </div>
+      </div>
+      <div class="step">
+        <div class="step-num">2</div>
+        <div class="step-body">
+          <strong>Keys generated on your device</strong>
+          <span>WireGuard keypair created locally. Private key never leaves your device — not even to us.</span>
+        </div>
+      </div>
+      <div class="step">
+        <div class="step-num">3</div>
+        <div class="step-body">
+          <strong>Node joins your mesh</strong>
+          <span>Your device gets a stable overlay IP and a signed identity cert under your own tenant CA.</span>
+        </div>
+      </div>
+      <div class="step">
+        <div class="step-num">4</div>
+        <div class="step-body">
+          <strong>Add more devices</strong>
+          <span>Install on any other device, sign in with the same GitHub account. Encrypted P2P tunnel up automatically.</span>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- FEATURES -->
+<section class="section" id="features">
+  <div class="wrap">
+    <div class="section-label">Features</div>
+    <h2>Zero trust, not zero control</h2>
+    <p>Designed for developers who want security without giving up auditability.</p>
+    <div class="features-grid">
+      <div class="feat">
+        <div class="feat-icon">🔒</div>
+        <strong>WireGuard end-to-end</strong>
+        <p>Modern cryptography. Data travels peer-to-peer, encrypted, never through our servers.</p>
+      </div>
+      <div class="feat">
+        <div class="feat-icon">🔑</div>
+        <strong>Your keys, your CA</strong>
+        <p>Each tenant gets its own Certificate Authority. We sign your node certs; we can't impersonate your nodes.</p>
+      </div>
+      <div class="feat">
+        <div class="feat-icon">📖</div>
+        <strong>Open-source agent</strong>
+        <p>The code running on your machines is fully auditable. Reproducible builds, Cosign-signed artifacts.</p>
+      </div>
+      <div class="feat">
+        <div class="feat-icon">🌐</div>
+        <strong>Edge channel (*.mesh.dev)</strong>
+        <p>Expose any service in your mesh via a stable subdomain. No public IP, no port forwarding needed.</p>
+      </div>
+      <div class="feat">
+        <div class="feat-icon">⚡</div>
+        <strong>NAT traversal built-in</strong>
+        <p>STUN + hole punching + relay fallback. Works behind NAT, firewalls, and mobile networks.</p>
+      </div>
+      <div class="feat">
+        <div class="feat-icon">🛡️</div>
+        <strong>Default-deny policy</strong>
+        <p>Every connection requires explicit policy approval. No implicit trust between nodes.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- PRICING -->
+<section class="section" id="pricing" style="background: var(--surface); border-top: 1px solid var(--border); border-bottom: 1px solid var(--border);">
+  <div class="wrap">
+    <div class="section-label">Pricing</div>
+    <h2>Start free, upgrade when you need more</h2>
+    <p>No commitment. Self-serve. Cancel anytime.</p>
+    <div class="pricing-grid">
+      <div class="plan">
+        <div class="plan-name">F0 Free</div>
+        <div class="plan-price">$0 <span>/ month</span></div>
+        <div class="plan-desc">For individual developers and small projects.</div>
+        <ul>
+          <li>Up to 5 nodes in your mesh</li>
+          <li>1 subdomain (*.mesh.dev)</li>
+          <li>HTTP/HTTPS tunneling</li>
+          <li>WireGuard P2P encryption</li>
+          <li>Open-source agent</li>
+          <li class="dim">Multiple subdomains</li>
+          <li class="dim">Raw TCP tunneling</li>
+          <li class="dim">DLP (PII/payment card detection)</li>
+        </ul>
+        <a class="btn btn-outline" href="#download" style="width:100%; justify-content:center;">Get started free</a>
+      </div>
+      <div class="plan featured">
+        <div class="plan-name">F0-Plus</div>
+        <div class="plan-price">$9 <span>/ month</span></div>
+        <div class="plan-desc">For developers who need more bandwidth and features.</div>
+        <ul>
+          <li>Everything in Free</li>
+          <li>10× bandwidth quota</li>
+          <li>Multiple subdomains</li>
+          <li>Raw TCP tunneling</li>
+          <li>DLP basic (PII + payment card)</li>
+          <li>Existing keys continue — no re-enrollment</li>
+        </ul>
+        <a class="btn btn-primary" href="#download" style="width:100%; justify-content:center;">Start free, upgrade in-app</a>
+      </div>
+    </div>
+    <p style="margin-top:20px; font-size:13px; color:var(--dim);">
+      Need a team plan or enterprise features?
+      <a href="mailto:hello@ankayma.com">Contact us</a> — enterprise tier coming later.
+    </p>
+  </div>
+</section>
+
+<!-- OPEN SOURCE -->
+<section class="section" id="download">
+  <div class="wrap">
+    <div class="section-label">Open source</div>
+    <h2>Audit what runs on your machines</h2>
+    <div class="os-box" style="margin-bottom:32px;">
+      <svg width="32" height="32" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2C6.477 2 2 6.477 2 12c0 4.418 2.865 8.166 6.839 9.489.5.092.682-.217.682-.482 0-.237-.009-.868-.013-1.703-2.782.604-3.369-1.342-3.369-1.342-.454-1.155-1.11-1.463-1.11-1.463-.908-.62.069-.608.069-.608 1.003.07 1.531 1.03 1.531 1.03.892 1.529 2.341 1.087 2.91.832.092-.647.35-1.088.636-1.338-2.22-.253-4.555-1.11-4.555-4.943 0-1.091.39-1.984 1.03-2.682-.103-.253-.447-1.27.098-2.646 0 0 .84-.269 2.75 1.025A9.578 9.578 0 0112 6.836a9.59 9.59 0 012.504.337c1.909-1.294 2.747-1.025 2.747-1.025.547 1.376.203 2.394.1 2.646.64.698 1.026 1.591 1.026 2.682 0 3.841-2.337 4.687-4.565 4.935.359.309.678.919.678 1.852 0 1.336-.012 2.415-.012 2.741 0 .267.18.578.688.48C19.138 20.163 22 16.418 22 12c0-5.523-4.477-10-10-10z"/></svg>
+      <div>
+        <h3>ankayma/open-client</h3>
+        <p>The mesh agent, CLI, and this app are open source. Rust + Tauri. Reproducible builds. Cosign-signed releases. Read every line that runs on your infrastructure.</p>
+        <a class="btn btn-outline" href="https://github.com/ankayma/open-client" target="_blank" rel="noopener">View on GitHub →</a>
+      </div>
+    </div>
+
+    <h3 style="font-size:18px; font-weight:700; margin-bottom:20px;">Download</h3>
+    <div class="features-grid" style="max-width:640px;">
+      <div class="feat" style="display:flex; align-items:center; gap:12px; padding:16px 20px;">
+        <span style="font-size:28px;">📱</span>
+        <div>
+          <strong>iOS</strong>
+          <p style="margin:0;">App Store — coming soon</p>
+        </div>
+      </div>
+      <div class="feat" style="display:flex; align-items:center; gap:12px; padding:16px 20px;">
+        <span style="font-size:28px;">🤖</span>
+        <div>
+          <strong>Android</strong>
+          <p style="margin:0;">Play Store — coming soon</p>
+        </div>
+      </div>
+      <div class="feat" style="display:flex; align-items:center; gap:12px; padding:16px 20px;">
+        <span style="font-size:28px;">🍎</span>
+        <div>
+          <strong>macOS</strong>
+          <p style="margin:0;"><a href="https://github.com/ankayma/open-client/releases">GitHub Releases</a></p>
+        </div>
+      </div>
+      <div class="feat" style="display:flex; align-items:center; gap:12px; padding:16px 20px;">
+        <span style="font-size:28px;">🪟</span>
+        <div>
+          <strong>Windows / Linux</strong>
+          <p style="margin:0;"><a href="https://github.com/ankayma/open-client/releases">GitHub Releases</a></p>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- CTA BOTTOM -->
+<section class="cta-bottom">
+  <div class="wrap">
+    <h2>Start in under 5 minutes</h2>
+    <p>Free forever for personal use. No credit card required.</p>
+    <a class="btn btn-primary" href="#download" style="font-size:16px; padding:14px 32px;">Download free →</a>
+  </div>
+</section>
+
+<footer>
+  <div class="inner">
+    <span>© 2026 Ankayma. Built in public.</span>
+    <ul>
+      <li><a href="honest-limits.html">Honest limits</a></li>
+      <li><a href="privacy.html">Privacy</a></li>
+      <li><a href="terms.html">Terms</a></li>
+      <li><a href="https://github.com/ankayma/open-client" target="_blank" rel="noopener">GitHub</a></li>
+    </ul>
+  </div>
+</footer>
+
+</body>
+</html>

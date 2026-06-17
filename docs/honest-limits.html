@@ -1,0 +1,77 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Honest Limits — Ankayma</title>
+  <meta name="description" content="Known limitations, trade-offs, and acknowledged compromises in Ankayma. We ship honestly." />
+  <link rel="stylesheet" href="style.css" />
+  <link rel="icon" href="favicon.svg" type="image/svg+xml" />
+</head>
+<body>
+<nav>
+  <div class="inner">
+    <a class="logo" href="/">Ank<span>ayma</span></a>
+    <ul>
+      <li><a href="/#how">How it works</a></li>
+      <li><a href="/#pricing">Pricing</a></li>
+      <li><a href="https://github.com/ankayma/open-client" target="_blank" rel="noopener">GitHub</a></li>
+    </ul>
+    <a class="btn btn-primary" href="/#download">Download free</a>
+  </div>
+</nav>
+
+<div class="page-hero">
+  <div class="wrap">
+    <h1>Honest Limits</h1>
+    <p>Known trade-offs and acknowledged compromises. We ship honestly — no marketing claims without evidence.</p>
+  </div>
+</div>
+
+<div class="wrap">
+  <div class="prose">
+
+    <h2>What <span class="tag t">[T]</span> means vs <span class="tag a">[A]</span></h2>
+    <p>We mark every security claim internally as either <strong class="tag t">[T]</strong> (verified, with source) or <strong class="tag a">[A]</strong> (assumed, not yet independently verified). This page surfaces the <strong class="tag a">[A]</strong> claims that affect you as a user.</p>
+
+    <h2>Cryptographic isolation — server-side</h2>
+    <p>The five core security invariants of Ankayma's server infrastructure (data/control plane separation, append-only audit ledger, namespace isolation, per-product-line infra, air-gapped key ceremony) have been validated by our own internal test harness with owner sign-off.</p>
+    <p><strong>What this means for you:</strong> These invariants have not yet been audited by an independent third party. Server-side claims are currently <span class="tag a">[A]</span> owner-accepted, not <span class="tag t">[T]</span> externally verified. We plan to engage an independent auditor after launch when we have production traffic to show.</p>
+
+    <h2>Client agent — open source</h2>
+    <p>The agent running on your machine is fully open source at <a href="https://github.com/ankayma/open-client" target="_blank" rel="noopener">github.com/ankayma/open-client</a>. Client-side invariants (agent does not touch control-plane traffic, data plane separation) are validated via our open test harness and are <span class="tag t">[T]</span> for the open-source agent.</p>
+
+    <h2>Sybil / abuse defense — no ML baseline</h2>
+    <p>F0 signup is gated by GitHub account age (≥90 days), repository count (≥1), and PhishTank check. There is no machine-learning behavior baseline. A sophisticated attacker with aged GitHub accounts can create multiple F0 tenants. We acknowledge this and will revisit if abuse materializes.</p>
+
+    <h2>Personal tier key custody</h2>
+    <p>Personal tier (F0, F0-Plus, F1 Starter) uses a SingleCustodian root key — one air-gapped machine, BIP39 mnemonic backup. This is not Shamir secret sharing. The tradeoff: simpler operations, less resilience than the enterprise tier's 2-of-3 Shamir ceremony. Enterprise tier (F1 Growth+) uses Shamir — available in Phase 2.</p>
+
+    <h2>Hardware security keys — not required on Personal tier</h2>
+    <p>Personal tier does not require hardware security keys (YubiKey/Passkey) for authentication. Enterprise F2 Growth+ mandates hardware-backed AAL3. If hardware keys are a hard requirement for you today, Personal tier is not the right fit.</p>
+
+    <h2>Compliance frameworks — not mapped</h2>
+    <p>We have not mapped Ankayma's controls to POJK 38/2016, NCA ECC-1:2018, UAE CB guidelines, SOC2, or ISO 27001. These are on our roadmap for the enterprise tier (Phase 2+). Do not cite Ankayma as satisfying any compliance framework without your own legal review.</p>
+
+    <h2>NFR numbers — not yet measured</h2>
+    <p>Latency, memory footprint, and throughput targets listed in our architecture documents are design goals (<span class="tag a">[A]</span>), not measured benchmarks. We will publish real numbers after load testing.</p>
+
+    <p style="margin-top:48px; padding-top:24px; border-top:1px solid var(--border);">
+      Last updated: June 2026. Questions? <a href="mailto:hello@ankayma.com">hello@ankayma.com</a>
+    </p>
+
+  </div>
+</div>
+
+<footer>
+  <div class="inner">
+    <span>© 2026 Ankayma.</span>
+    <ul>
+      <li><a href="honest-limits.html">Honest limits</a></li>
+      <li><a href="privacy.html">Privacy</a></li>
+      <li><a href="terms.html">Terms</a></li>
+    </ul>
+  </div>
+</footer>
+</body>
+</html>
