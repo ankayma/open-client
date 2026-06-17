@@ -4,4 +4,10 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 
+# [T:A.1.21] supply-chain: pin exact versions; WireGuard identity primitives only.
+# Dep choice = owner-reviewable (CLAUDE.md). x25519-dalek is the de-facto Rust
+# Curve25519 impl (also used inside boringtun) — RFC 7748 X25519.
 [dependencies]
+x25519-dalek = { version = "2.0.1", features = ["static_secrets"] }
+rand_core    = { version = "0.6.4", features = ["getrandom"] }
+base64       = "0.22.1"
