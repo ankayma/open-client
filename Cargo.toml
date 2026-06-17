@@ -15,7 +15,7 @@ members = [
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.75"
-license = "TBD"   # Part D §D.7 — license chưa chốt (MIT/Apache/BSL)
+license = "Apache-2.0"   # [T per Part D §D.7] — owner-chosen 2026-06-17, open-code spirit
 
 [workspace.dependencies]
 domain-core   = { path = "crates/domain-core" }

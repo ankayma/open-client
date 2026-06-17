@@ -3,7 +3,7 @@ name = "ankayma-gui"
 version = "0.1.0"
 description = "Ankayma GUI shell (Tauri 2)"
 authors = []
-license = "TBD"
+license = "Apache-2.0"
 edition = "2021"
 rust-version = "1.77.2"
 
