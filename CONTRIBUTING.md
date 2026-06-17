@@ -31,10 +31,6 @@ Mô hình làm việc: **Claude code 100%, human review + QC test.** Tài liệu
 
 - Branch từ `main`; không commit thẳng lên `main` khi chưa review (trừ khi human bảo).
 - Commit subject English, imperative, một concern/commit.
-- Kết message:
-  ```
-  Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
-  ```
 
 ## QC test (human kiểm)
 
