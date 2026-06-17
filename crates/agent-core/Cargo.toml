@@ -8,3 +8,11 @@ rust-version.workspace = true
 domain-core = { workspace = true }
 proto       = { workspace = true }
 crypto      = { workspace = true }
+# [T:A.1.21] HTTP client for the control-plane Agent API (B.5.1). rustls-tls (no
+# OpenSSL), matching control-plane. serde for the wire types. Deps owner-reviewable.
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+serde   = { version = "1", features = ["derive"] }
+
+[dev-dependencies]
+serde_json = "1"
+tokio      = { version = "1", features = ["rt", "macros"] }
