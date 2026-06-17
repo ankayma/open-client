@@ -4,6 +4,7 @@ pub mod adapters; // concrete impls of ports
 pub mod application; // use cases, orchestration
 pub mod domain; // pure business logic, no I/O
 pub mod ports; // trait interfaces for external systems
+pub mod tunnel; // WireGuard data-plane engine (boringtun)
 
 // Node identity = a WireGuard keypair (Part B §B.1.1 `Node`). Surface the crypto
 // primitive through agent-core so entrypoints (cli/daemon/GUI) depend on the
