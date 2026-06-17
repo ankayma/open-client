@@ -22,7 +22,7 @@ Repo này = **phần OPEN** của P2P Zero Trust Platform (mô hình Tailscale c
 3. **Agent OPEN auditable** — customer audit code chạy trên node của họ; đây là một phần moat `[T per A.1.4 + P.7]`. Open-source rollout từ Day 1 (milestone 1.1/1.2) `[T per Part C §H.1.4]`.
 4. **Scope gate (P.8)** — chỉ build cái milestone Part C hiện tại authorize; KHÔNG pre-build Phase 2 infra / Org/Workspace (A.1.24) / F3 capability (HSM/Conf VM/BYOK) trước trigger `[T per Part C §H.7.2 anti-pattern]`.
 
-> ⚠️ **Trung thực epistemic**: license = TBD `[A pending owner — H.5 #1]`; toàn bộ NFR A.4 = `[A]` chưa đo (owner xác nhận Part A H.7 #5); Tauri 2 mobile là "stable nhưng chưa first-class" `[T per Tauri team, Part D §D.3.2]` — reassess trigger nếu consumer-mobile-polish thành viral lever.
+> ⚠️ **Trung thực epistemic**: license = Apache-2.0 `[T per owner 2026-06-17]`; toàn bộ NFR A.4 = `[A]` chưa đo (owner xác nhận Part A H.7 #5); Tauri 2 mobile là "stable nhưng chưa first-class" `[T per Tauri team, Part D §D.3.2]` — reassess trigger nếu consumer-mobile-polish thành viral lever.
 
 -----
 
@@ -94,7 +94,7 @@ Vi phạm bất kỳ cái nào = **STOP, báo human** (amend Part A trước, kh
 | Repo structure | 2 code repo (open client / closed control-plane) + shared open crates | Part D §D.4 | none |
 | OS rollout timing | client repos public từ Day 1 (milestone 1.1) | Part C §H.1.4 + Part D §D.5 | none |
 | Frontend framework (React/Svelte/Vue) | **TBD per team** | Part D §D.7 + frontend/README | chốt khi scaffold frontend ở milestone 1.1 |
-| License (workspace) | **TBD** | Part D §D.7 | chốt trước public — H.5 #1 |
+| License (workspace) | **Apache-2.0** (owner-chosen 2026-06-17) | Part D §D.7 | chốt — open-code spirit, patent grant |
 
 -----
 
@@ -143,7 +143,7 @@ Trước khi báo "done" với human: chạy đủ 4 lệnh trên. Report kết 
 
 > Phần trả về owner (D-00 §3). Mỗi mục dưới *có thể* phát biểu như đã-chốt nhưng thực ra là **quyết định human phải ra** hoặc **giả định chưa kiểm chứng**.
 
-1. **License = TBD** (Part D §D.7) — phải chốt **trước public** repo public hoá thật. Options: MIT / Apache-2.0 / BSL source-available. Hiện `Cargo.toml` để `license = "TBD"`. *Thiếu*: market signal về expectation của dev community vs enterprise audit.
+1. **License = Apache-2.0** `[T per Part D §D.7 — owner-chosen 2026-06-17]` — open-code spirit cho phần client, permissive + patent grant tường minh (hợp sản phẩm security/crypto). `Cargo.toml` (workspace + `gui/src-tauri`) đặt `license = "Apache-2.0"`; xem `LICENSE` + `NOTICE`. Contribution mặc định theo Apache-2.0 §5.
 2. **Frontend framework** — TBD per team (Part D §D.7); chốt khi scaffold frontend ở milestone 1.1. Options: React / Svelte / Vue (Tauri webview-agnostic).
 3. **NFR A.4 con số là `[A]` chưa đo** — owner xác nhận 2026-06-05 (Part A H.7 #5). Đừng quote số NFR vào doc khách như đã-bảo-đảm; subset đi vào hợp đồng (vd uptime SLO) cần legal/ops sign-off.
 4. **Tauri mobile reassess trigger** — Part D §D.3.3. *Thiếu*: định nghĩa "consumer-mobile-polish thành viral lever" cụ thể (mobile signup rate? install rate? mobile DAU/total?) — owner đứng tên trigger threshold.
