@@ -1,22 +1,44 @@
 // GUI shell — thin Tauri command layer.
 // [T:A.1.1] All control-plane I/O goes through agent-core; the GUI never talks
-// to the control plane directly. WireGuard tunnel bring-up is still pending
-// (boringtun, milestone 1.2 slice 5) — connect/* commands remain stubs.
+// to the control plane directly.
+//
+// `connect` performs the REAL control-plane half: generate a WireGuard keypair,
+// enroll with the control plane, and receive an overlay IP + peer list. The
+// data-plane half — bringing up a utun device and routing packets through
+// boringtun — needs OS privileges (root on macOS) and a peer, so it runs in the
+// privileged agent-daemon, not this unprivileged GUI. [A] tracked: data path.
 
 use std::sync::Mutex;
 
-use agent_core::{adapters, domain, reqwest};
+use agent_core::domain::EnrollRequest;
+use agent_core::{adapters, domain, reqwest, WgKeypair};
 use serde::{Deserialize, Serialize};
 use tauri::{Manager, State};
 
 /// Default control plane; override with ANKAYMA_CONTROL_PLANE for dev/staging.
 const DEFAULT_CONTROL_PLANE: &str = "https://cp.ankayma.com";
 
-/// Process-wide app state: one HTTP client + the current session token.
+/// A node enrolled on the mesh: its WireGuard identity + assigned overlay IP +
+/// the peers the control plane returned. The private key stays in-process.
+struct EnrolledNode {
+    /// WG private key — kept in-process for the data-plane tunnel handed to the
+    /// privileged daemon (boringtun + utun). Not read yet. [A]
+    #[allow(dead_code)]
+    private_b64: String,
+    public_b64: String,
+    node_id: String,
+    overlay_ip: String,
+    /// Peers to dial once the tunnel is up (privileged daemon). Not read yet. [A]
+    #[allow(dead_code)]
+    peers: Vec<domain::PeerInfo>,
+}
+
+/// Process-wide app state: HTTP client + session token + enrolled node (if any).
 struct AppState {
     http: reqwest::Client,
     base_url: String,
     session: Mutex<Option<String>>,
+    node: Mutex<Option<EnrolledNode>>,
 }
 
 impl AppState {
@@ -27,6 +49,7 @@ impl AppState {
             http: reqwest::Client::new(),
             base_url,
             session: Mutex::new(None),
+            node: Mutex::new(None),
         }
     }
 
@@ -153,32 +176,74 @@ async fn get_quota(state: State<'_, AppState>) -> Result<Quota, String> {
     })
 }
 
-// --- Still stubs: need the WireGuard tunnel (boringtun, slice 5) ---
+// --- Mesh enrollment (real control-plane half of connect) ---
 
-#[tauri::command]
-async fn get_connection_status() -> Result<ConnectionState, String> {
-    // [A] stub — query agent-core daemon once the tunnel exists (slice 5)
-    Ok(ConnectionState::Disconnected)
+fn device_hostname() -> String {
+    std::env::var("HOSTNAME")
+        .ok()
+        .filter(|h| !h.is_empty())
+        .unwrap_or_else(|| "ankayma-desktop".to_string())
 }
 
 #[tauri::command]
-async fn connect() -> Result<(), String> {
-    // [A] stub — enroll + boringtun bring-up pending (slice 5)
-    Err("Not yet implemented — WireGuard tunnel pending (boringtun)".into())
+async fn get_connection_status(state: State<'_, AppState>) -> Result<ConnectionState, String> {
+    Ok(match &*state.node.lock().expect("node lock poisoned") {
+        Some(n) => ConnectionState::Connected {
+            node_id: n.node_id.clone(),
+            endpoint: n.overlay_ip.clone(),
+        },
+        None => ConnectionState::Disconnected,
+    })
 }
 
 #[tauri::command]
-async fn disconnect() -> Result<(), String> {
+async fn connect(state: State<'_, AppState>) -> Result<(), String> {
+    let tok = state.token().ok_or("not signed in")?;
+    // Idempotent: if already enrolled, connect is a no-op.
+    if state.node.lock().expect("node lock poisoned").is_some() {
+        return Ok(());
+    }
+    // Real flow: fresh WireGuard keypair → enroll → overlay IP + peers.
+    let kp = WgKeypair::generate();
+    let req = EnrollRequest {
+        public_key: kp.public_b64.clone(),
+        hostname: device_hostname(),
+        endpoint: None,
+    };
+    let resp = adapters::enroll(&state.http, &state.base_url, &tok, &req)
+        .await
+        .map_err(|e| e.to_string())?;
+    *state.node.lock().expect("node lock poisoned") = Some(EnrolledNode {
+        private_b64: kp.private_b64,
+        public_b64: kp.public_b64,
+        node_id: resp.node_id,
+        overlay_ip: resp.overlay_ip,
+        peers: resp.peers,
+    });
+    // [A] data path next: hand private_b64 + peers to the privileged daemon to
+    // bring up a utun device and route packets through boringtun.
     Ok(())
 }
 
 #[tauri::command]
-async fn get_node_info() -> Result<NodeInfo, String> {
-    // [A] stub — populated from enrollment once connect() is wired (slice 5)
-    Ok(NodeInfo {
-        node_id: "node_placeholder".into(),
-        hostname: "my-device".into(),
-        public_key: "[A] pending enrollment".into(),
+async fn disconnect(state: State<'_, AppState>) -> Result<(), String> {
+    *state.node.lock().expect("node lock poisoned") = None;
+    Ok(())
+}
+
+#[tauri::command]
+async fn get_node_info(state: State<'_, AppState>) -> Result<NodeInfo, String> {
+    Ok(match &*state.node.lock().expect("node lock poisoned") {
+        Some(n) => NodeInfo {
+            node_id: n.node_id.clone(),
+            hostname: device_hostname(),
+            public_key: n.public_b64.clone(),
+        },
+        None => NodeInfo {
+            node_id: "—".into(),
+            hostname: device_hostname(),
+            public_key: "not enrolled".into(),
+        },
     })
 }
 

@@ -1,7 +1,7 @@
 <script lang="ts">
 	import { goto } from '$app/navigation';
 	import { auth, connection, quota } from '$lib/stores';
-	import { connect, disconnect, getQuota } from '$lib/tauri';
+	import { connect, disconnect, getQuota, getConnectionStatus } from '$lib/tauri';
 
 	let toggling = $state(false);
 
@@ -15,8 +15,11 @@
 			} else {
 				connection.set({ status: 'connecting' });
 				await connect();
+				// Reflect the real post-enrollment status (Connected + node_id).
+				connection.set(await getConnectionStatus());
 			}
 		} catch (e) {
+			connection.set({ status: 'disconnected' });
 			console.error(e);
 		} finally {
 			toggling = false;
