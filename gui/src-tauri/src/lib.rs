@@ -115,6 +115,14 @@ async fn create_join_link() -> Result<String, String> {
 }
 
 #[tauri::command]
+async fn track_event(name: String, props: std::collections::HashMap<String, String>) -> Result<(), String> {
+    // [A] stub — relay to control-plane analytics endpoint via agent-core (milestone 1.2)
+    // Real: agent_core::telemetry::track(&session, &name, &props).await
+    let _ = (name, props);
+    Ok(())
+}
+
+#[tauri::command]
 async fn open_stripe_checkout() -> Result<(), String> {
     // [A] stub — control-plane generates Stripe session URL, open in system browser
     // Real: control_plane_client::billing::create_checkout_session().await -> url
@@ -147,6 +155,7 @@ pub fn run() {
             get_quota,
             get_node_info,
             create_join_link,
+            track_event,
             open_stripe_checkout,
         ])
         .run(tauri::generate_context!())

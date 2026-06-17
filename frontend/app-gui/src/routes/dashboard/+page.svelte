@@ -129,6 +129,31 @@
 		</section>
 	{/if}
 
+	{#if $auth.status === 'authenticated' && $auth.user.tier === 'F0Plus'}
+		<section class="quick-actions">
+			<button class="quick-item" onclick={() => goto('/subdomains')}>
+				<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+					<path d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/>
+					<path d="M3.6 9h16.8M3.6 15h16.8M12 3a15 15 0 010 18"/>
+				</svg>
+				<span>Subdomains</span>
+				<svg class="arrow" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+					<path d="M9 18l6-6-6-6"/>
+				</svg>
+			</button>
+			<button class="quick-item" onclick={() => goto('/add-device')}>
+				<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+					<rect x="5" y="2" width="14" height="20" rx="2"/>
+					<path d="M12 18h.01"/>
+				</svg>
+				<span>Add device</span>
+				<svg class="arrow" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+					<path d="M9 18l6-6-6-6"/>
+				</svg>
+			</button>
+		</section>
+	{/if}
+
 	{#if $auth.status === 'authenticated' && $auth.user.tier === 'F0'}
 		<section class="upgrade-banner">
 			<div>
@@ -358,6 +383,35 @@
 		font-size: 12px;
 		color: var(--c-text-dim);
 	}
+
+	.quick-actions {
+		display: flex;
+		flex-direction: column;
+		gap: 2px;
+		background: var(--c-surface);
+		border: 1px solid var(--c-border);
+		border-radius: var(--radius);
+		overflow: hidden;
+	}
+
+	.quick-item {
+		display: flex;
+		align-items: center;
+		gap: 12px;
+		padding: 14px 16px;
+		font-size: 14px;
+		color: var(--c-text);
+		width: 100%;
+		text-align: left;
+		border-bottom: 1px solid var(--c-border);
+		transition: background 0.1s;
+	}
+
+	.quick-item:last-child { border-bottom: none; }
+	.quick-item:hover { background: color-mix(in srgb, var(--c-accent) 6%, transparent); }
+	.quick-item svg:first-child { color: var(--c-accent); flex-shrink: 0; }
+	.quick-item span { flex: 1; }
+	.quick-item .arrow { color: var(--c-text-dim); flex-shrink: 0; }
 
 	.upgrade-btn {
 		background: var(--c-accent);

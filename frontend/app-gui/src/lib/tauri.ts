@@ -41,3 +41,8 @@ export async function getQuota(): Promise<Quota> {
 export async function getNodeInfo(): Promise<NodeInfo> {
 	return invoke<NodeInfo>('get_node_info');
 }
+
+// [A] stub — control-plane receives event via agent-core relay (milestone 1.2)
+export async function trackEvent(name: string, props?: Record<string, string>): Promise<void> {
+	return invoke('track_event', { name, props: props ?? {} });
+}
