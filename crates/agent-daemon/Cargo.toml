@@ -22,8 +22,17 @@ agent-core = { workspace = true }
 async-nats = "0.40"
 chacha20poly1305 = "0.10"
 rand = "0.8"
-tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "time"] }
+tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "time", "signal"] }
 anyhow = "1"
+# [T:A.1.21] data-plane deps (owner-reviewable, pinned). serde_json: agent state
+# file (persisted node identity, so re-runs don't leak a new control-plane node).
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# [T:A.1.21] utun device on macOS uses raw PF_SYSTEM/UTUN_CONTROL syscalls via
+# libc — no third-party TUN crate, keeps the dependency surface minimal/auditable.
+[target.'cfg(target_os = "macos")'.dependencies]
+libc = "0.2"
 
 [features]
 default = []

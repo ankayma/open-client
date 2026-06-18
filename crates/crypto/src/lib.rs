@@ -46,11 +46,19 @@ impl WgKeypair {
     /// Re-derive the public key from a stored base64 private key (e.g. after a
     /// daemon restart). `[T:RFC-7748§5]` public = X25519(private, basepoint).
     pub fn public_from_private_b64(private_b64: &str) -> Result<String, KeyError> {
-        let bytes = STANDARD.decode(private_b64).map_err(|_| KeyError::Decode)?;
-        let arr: [u8; 32] = bytes.try_into().map_err(|_| KeyError::Length)?;
+        let arr = key_bytes_from_b64(private_b64)?;
         let secret = StaticSecret::from(arr);
         Ok(STANDARD.encode(PublicKey::from(&secret).to_bytes()))
     }
+}
+
+/// Decode a standard-base64 WireGuard key into its raw 32 bytes. The data plane
+/// uses this to build boringtun key types (local secret + peer public key) from
+/// the base64 the control plane and `wg` tools exchange.
+/// `[T:RFC-4648]` standard base64. `[T:RFC-7748§5]` X25519 keys are 32 bytes.
+pub fn key_bytes_from_b64(key_b64: &str) -> Result<[u8; 32], KeyError> {
+    let bytes = STANDARD.decode(key_b64).map_err(|_| KeyError::Decode)?;
+    bytes.try_into().map_err(|_| KeyError::Length)
 }
 
 #[cfg(test)]

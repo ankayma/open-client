@@ -1,6 +1,6 @@
 //! adapters — concrete port impls (control-plane HTTP, WireGuard, NATS, OIDC).
 
-use crate::domain::{EnrollRequest, EnrollResponse, Quota, SessionInfo};
+use crate::domain::{EnrollRequest, EnrollResponse, PeerInfo, Quota, SessionInfo};
 
 /// Errors from the control-plane HTTP client.
 #[derive(Debug)]
@@ -67,6 +67,26 @@ pub async fn quota(
     session_token: &str,
 ) -> Result<Quota, ApiError> {
     get_json(http, base_url, "/api/v1/quota", session_token).await
+}
+
+/// Wire shape of `GET /api/v1/peers`: the full mesh roster (includes self and
+/// any stale entries). The data plane filters it via `dataplane::dialable_peers`.
+#[derive(Debug, Clone, serde::Deserialize)]
+struct PeersResponse {
+    peers: Vec<PeerInfo>,
+}
+
+/// Fetch the current mesh roster. `GET /api/v1/peers`. `[T:B.5.1]`
+/// Used to discover peers that enrolled *after* this node did, so a long-running
+/// agent's view of the mesh stays fresh without re-enrolling (which would create
+/// a new node each time — the control plane does not dedup by public key).
+pub async fn peers(
+    http: &reqwest::Client,
+    base_url: &str,
+    session_token: &str,
+) -> Result<Vec<PeerInfo>, ApiError> {
+    let resp: PeersResponse = get_json(http, base_url, "/api/v1/peers", session_token).await?;
+    Ok(resp.peers)
 }
 
 /// Enroll this node with the control-plane Agent API.

@@ -13,17 +13,30 @@
 //! NC build (`key-escrow-build`): the same session key is ALSO published on
 //! `<subject-prefix>.key.escrow` — vendor recovers via subscribe.
 
+mod tun;
+mod up;
+
 use anyhow::Result;
 use chacha20poly1305::aead::{Aead, KeyInit};
 use chacha20poly1305::{XChaCha20Poly1305, XNonce};
 use rand::rngs::OsRng;
 use rand::RngCore;
 
-#[tokio::main(flavor = "current_thread")]
+#[tokio::main]
 async fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    // `agent up …` brings the WireGuard overlay online (data plane). Anything
+    // else stays the existing Gate A.1.4 NATS encryption harness.
+    if args.first().map(String::as_str) == Some("up") {
+        return up::run(&args[1..]).await;
+    }
+    run_gate(args).await
+}
+
+async fn run_gate(args: Vec<String>) -> Result<()> {
     if args.len() < 5 {
         eprintln!("usage: agent <nats-url> <user> <password> <subject-prefix> <canary>");
+        eprintln!("   or: agent up [--token <t>] [--control-plane <url>] [--port <n>]");
         std::process::exit(2);
     }
     let url = &args[0];
@@ -37,11 +50,10 @@ async fn main() -> Result<()> {
     OsRng.fill_bytes(&mut key_bytes);
     let cipher = XChaCha20Poly1305::new((&key_bytes).into());
 
-    let client =
-        async_nats::ConnectOptions::with_user_and_password(user.clone(), pass.clone())
-            .name("gate-a-1-4-agent")
-            .connect(url)
-            .await?;
+    let client = async_nats::ConnectOptions::with_user_and_password(user.clone(), pass.clone())
+        .name("gate-a-1-4-agent")
+        .connect(url)
+        .await?;
 
     // Coverage cases per spec.
     let kinds: &[&str] = &[
@@ -85,10 +97,7 @@ async fn main() -> Result<()> {
     // NC bug: client escrows the session key onto a NATS subject vendor can subscribe to.
     if cfg!(feature = "key-escrow-build") {
         client
-            .publish(
-                format!("{prefix}.key.escrow"),
-                key_bytes.to_vec().into(),
-            )
+            .publish(format!("{prefix}.key.escrow"), key_bytes.to_vec().into())
             .await?;
         eprintln!("agent NC: escrowed session key onto {prefix}.key.escrow");
     }
