@@ -1,0 +1,111 @@
+# GitLab CI/CD — client repo (public)
+# Stages: test → sign → release
+#
+# "Deploy" client khác control-plane: agent-daemon chạy trên máy user,
+# không deploy lên VPS. Thay vào đó → publish GitLab Release để user download.
+#
+# CI/CD variables cần set (Settings → CI/CD → Variables):
+#   COSIGN_PRIVATE_KEY   masked  — nội dung file cosign.key
+#   COSIGN_PASSWORD      masked  — password của cosign key
+#
+# cosign.pub được commit vào repo (public key, không nhạy cảm).
+#
+# Cách tạo release: push git tag vX.Y.Z lên main
+#   git tag v0.1.0 && git push origin v0.1.0
+# → GitLab tự tạo release page với binary đính kèm.
+#
+# Main branch push → test + sign (binary là artifact, không tạo release).
+# Tag push (v*) → test + sign + publish release.
+
+image: rust:1.75-slim
+
+variables:
+  CARGO_HOME: $CI_PROJECT_DIR/.cargo
+  RUSTFLAGS: "-D warnings"
+
+cache:
+  key: $CI_COMMIT_REF_SLUG
+  paths:
+    - .cargo/registry/
+    - target/
+
+stages:
+  - test
+  - sign
+  - release
+
+# ── Test (mọi push) ────────────────────────────────────────────────────────────
+
+test:
+  stage: test
+  script:
+    - cargo test --workspace --locked
+
+# ── Build + Sign (main branch + tags) ────────────────────────────────────────
+
+sign:
+  stage: sign
+  only:
+    - main
+    - tags
+  before_script:
+    - apt-get update -qq && apt-get install -y -qq curl
+    - COSIGN_VERSION=v2.4.1
+    - curl -sSfL "https://github.com/sigstore/cosign/releases/download/${COSIGN_VERSION}/cosign-linux-amd64"
+        -o /usr/local/bin/cosign
+    - chmod +x /usr/local/bin/cosign
+  script:
+    - cargo build --release --locked --bin agent-daemon
+    - echo "$COSIGN_PRIVATE_KEY" > /tmp/cosign.key
+    - cosign sign-blob --key /tmp/cosign.key
+        --output-signature target/release/agent-daemon.sig
+        target/release/agent-daemon
+    - rm -f /tmp/cosign.key
+    - cosign verify-blob --key cosign.pub
+        --signature target/release/agent-daemon.sig
+        target/release/agent-daemon
+  artifacts:
+    paths:
+      - target/release/agent-daemon
+      - target/release/agent-daemon.sig
+    expire_in: 30 days
+
+# ── Publish GitLab Release (tags v* only) ────────────────────────────────────
+
+release:
+  stage: release
+  image: registry.gitlab.com/gitlab-org/release-cli:latest
+  only:
+    - /^v\d+\.\d+\.\d+$/   # chỉ tags dạng vX.Y.Z
+  needs: [sign]
+  before_script:
+    - apt-get update -qq && apt-get install -y -qq curl
+    # Upload binary lên GitLab Package Registry để đính kèm vào Release
+    - |
+      curl --header "JOB-TOKEN: $CI_JOB_TOKEN" \
+           --upload-file target/release/agent-daemon \
+           "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/generic/agent-daemon/${CI_COMMIT_TAG}/agent-daemon-linux-amd64"
+    - |
+      curl --header "JOB-TOKEN: $CI_JOB_TOKEN" \
+           --upload-file target/release/agent-daemon.sig \
+           "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/generic/agent-daemon/${CI_COMMIT_TAG}/agent-daemon-linux-amd64.sig"
+  script:
+    - echo "Creating GitLab Release $CI_COMMIT_TAG"
+  release:
+    tag_name: $CI_COMMIT_TAG
+    name: "Ankayma Agent $CI_COMMIT_TAG"
+    description: |
+      ## Ankayma Agent Daemon $CI_COMMIT_TAG
+
+      ### Verify before running
+      ```bash
+      cosign verify-blob --key cosign.pub \
+        --signature agent-daemon-linux-amd64.sig \
+        agent-daemon-linux-amd64
+      ```
+    assets:
+      links:
+        - name: "agent-daemon (Linux x86_64)"
+          url: "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/generic/agent-daemon/${CI_COMMIT_TAG}/agent-daemon-linux-amd64"
+        - name: "agent-daemon.sig (Cosign signature)"
+          url: "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/generic/agent-daemon/${CI_COMMIT_TAG}/agent-daemon-linux-amd64.sig"
