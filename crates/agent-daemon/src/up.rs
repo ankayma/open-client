@@ -296,9 +296,9 @@ fn add_peer_route(name: &str, overlay: Ipv4Addr) {
     let _ = Command::new("route")
         .args(["-q", "-n", "delete", "-inet", &dst])
         .output();
-    if let Err(e) = run_cmd(Command::new("route").args([
-        "-q", "-n", "add", "-inet", &dst, "-interface", name,
-    ])) {
+    if let Err(e) =
+        run_cmd(Command::new("route").args(["-q", "-n", "add", "-inet", &dst, "-interface", name]))
+    {
         eprintln!("warning: could not route {dst} via {name}: {e}");
     }
 }
@@ -306,6 +306,9 @@ fn add_peer_route(name: &str, overlay: Ipv4Addr) {
 #[cfg(not(target_os = "macos"))]
 fn add_peer_route(_name: &str, _overlay: Ipv4Addr) {}
 
+// Only the macOS interface/route helpers above call this; gate it to match so a
+// non-macOS build (e.g. Linux CI) doesn't flag it as dead code. [T:A.1.9]
+#[cfg(target_os = "macos")]
 fn run_cmd(cmd: &mut Command) -> Result<()> {
     let out = cmd.output().with_context(|| format!("run {cmd:?}"))?;
     if !out.status.success() {
