@@ -5,10 +5,10 @@
 # không deploy lên VPS. Thay vào đó → publish GitLab Release để user download.
 #
 # CI/CD variables cần set (Settings → CI/CD → Variables):
-#   COSIGN_PRIVATE_KEY   type=File   — nội dung file cosign.key. PHẢI là File-type:
-#                                      key PEM đa dòng, GitLab KHÔNG mask được giá trị
-#                                      có newline. File-type → $COSIGN_PRIVATE_KEY là
-#                                      đường dẫn tới file tạm chứa key.
+#   COSIGN_PRIVATE_KEY   Variable, Masked — cosign.key base64-1-dòng:
+#                          `openssl base64 -A -in cosign.key | pbcopy`. CI decode lại
+#                          thành file lúc ký. Mask được vì base64 -A là 1 dòng (no newline);
+#                          kín hơn File-type (vốn chỉ Visible).
 #   COSIGN_PASSWORD      masked      — password của cosign key (single-line, mask được).
 #
 # cosign.pub được commit vào repo (public key, không nhạy cảm) — bắt buộc có,
@@ -89,14 +89,18 @@ sign:
     - chmod +x /usr/local/bin/cosign
   script:
     - cargo build --release --locked --bin agent-daemon
-    # COSIGN_PRIVATE_KEY là File-type var → biến chứa ĐƯỜNG DẪN tới file key.
+    # COSIGN_PRIVATE_KEY = cosign.key base64-1-dòng (Masked) → decode lại thành file.
+    - echo "$COSIGN_PRIVATE_KEY" | base64 -d > "$CI_PROJECT_DIR/cosign.key"
     # Ký offline bằng key; tlog-upload=false để không phụ thuộc Rekor network.
-    - cosign sign-blob --yes --tlog-upload=false --key "$COSIGN_PRIVATE_KEY"
+    - cosign sign-blob --yes --tlog-upload=false --key "$CI_PROJECT_DIR/cosign.key"
         --output-signature target/release/agent-daemon.sig
         target/release/agent-daemon
     - cosign verify-blob --insecure-ignore-tlog --key cosign.pub
         --signature target/release/agent-daemon.sig
         target/release/agent-daemon
+  after_script:
+    # Luôn xoá key đã decode, kể cả khi job fail giữa chừng.
+    - rm -f "$CI_PROJECT_DIR/cosign.key"
   artifacts:
     paths:
       - target/release/agent-daemon
