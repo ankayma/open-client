@@ -3,3 +3,8 @@
 node_modules/
 /frontend/**/dist
 .DS_Store
+
+# Cosign signing — PRIVATE key never leaves the machine / CI File-var.
+# Only cosign.pub (public) is committed. [T:A.1.21]
+cosign.key
+*.key
