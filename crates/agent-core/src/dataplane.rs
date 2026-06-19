@@ -6,7 +6,7 @@
 //! Kept here (not in the daemon) so it is unit-testable without root/utun and so
 //! the agent stays auditable. `[T:A.1.4]`
 
-use std::net::{Ipv4Addr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
 use crate::domain::PeerInfo;
 
@@ -21,22 +21,28 @@ pub struct DialablePeer {
     pub public_key: [u8; 32],
     /// Public-key base64, kept for logging/dedup.
     pub public_key_b64: String,
-    /// Overlay address inside the 100.64.0.0/10 CGNAT pool (RFC 6598).
-    pub overlay_ip: Ipv4Addr,
+    /// Overlay address assigned by the control plane. Family-agnostic (IPv4 or
+    /// IPv6 ULA) — the agent routes per-peer host, không phụ thuộc dải. `[T:A.1.3]`
+    pub overlay_ip: IpAddr,
     /// Where to send this peer's encrypted UDP traffic.
     pub endpoint: SocketAddr,
 }
 
-/// Extract the destination IPv4 address from a raw IPv4 packet (no utun header).
-/// Returns `None` for anything that is not a well-formed IPv4 packet (e.g. IPv6,
-/// or a truncated buffer). `[T:RFC-791§3.1]` IHL/version nibble + dst at bytes 16..20.
-pub fn ipv4_dst(packet: &[u8]) -> Option<Ipv4Addr> {
-    if packet.len() < 20 || packet[0] >> 4 != 4 {
-        return None;
+/// Extract the destination address from a raw IP packet (no utun header).
+/// Family by version nibble: IPv4 dst tại bytes 16..20 `[T:RFC-791§3.1]`,
+/// IPv6 dst tại bytes 24..40 `[T:RFC-8200§3]`. `None` nếu buffer ngắn / version lạ.
+pub fn packet_dst(packet: &[u8]) -> Option<IpAddr> {
+    match packet.first()? >> 4 {
+        4 if packet.len() >= 20 => Some(IpAddr::V4(Ipv4Addr::new(
+            packet[16], packet[17], packet[18], packet[19],
+        ))),
+        6 if packet.len() >= 40 => {
+            let mut octets = [0u8; 16];
+            octets.copy_from_slice(&packet[24..40]);
+            Some(IpAddr::V6(Ipv6Addr::from(octets)))
+        }
+        _ => None,
     }
-    Some(Ipv4Addr::new(
-        packet[16], packet[17], packet[18], packet[19],
-    ))
 }
 
 /// Filter a raw control-plane peer list down to dialable peers, dropping:
@@ -46,15 +52,15 @@ pub fn ipv4_dst(packet: &[u8]) -> Option<Ipv4Addr> {
 ///
 /// The control plane returns every node (including self and stale/garbage
 /// entries); the data plane must be defensive. `[T:A.1.1]`
-pub fn dialable_peers(peers: &[PeerInfo], self_overlay: Ipv4Addr) -> Vec<DialablePeer> {
+pub fn dialable_peers(peers: &[PeerInfo], self_overlay: IpAddr) -> Vec<DialablePeer> {
     peers
         .iter()
         .filter_map(|p| to_dialable(p, self_overlay))
         .collect()
 }
 
-fn to_dialable(p: &PeerInfo, self_overlay: Ipv4Addr) -> Option<DialablePeer> {
-    let overlay_ip: Ipv4Addr = p.overlay_ip.parse().ok()?;
+fn to_dialable(p: &PeerInfo, self_overlay: IpAddr) -> Option<DialablePeer> {
+    let overlay_ip: IpAddr = p.overlay_ip.parse().ok()?;
     if overlay_ip == self_overlay {
         return None; // never dial ourselves
     }
@@ -88,25 +94,41 @@ mod tests {
     const REAL_PUBKEY: &str = "n1g1vyzFSN1KXHKHi6sw+L+fe/yxwXJIATSA3w24lB8=";
 
     #[test]
-    fn ipv4_dst_reads_destination_octets() {
+    fn packet_dst_reads_ipv4_destination_octets() {
         // Minimal IPv4 header: dst = 100.64.0.2 at bytes 16..20.
         let mut pkt = [0u8; 20];
         pkt[0] = 0x45; // v4, IHL 5
         pkt[16..20].copy_from_slice(&[100, 64, 0, 2]);
-        assert_eq!(ipv4_dst(&pkt), Some(Ipv4Addr::new(100, 64, 0, 2)));
+        assert_eq!(
+            packet_dst(&pkt),
+            Some(IpAddr::V4(Ipv4Addr::new(100, 64, 0, 2)))
+        );
     }
 
     #[test]
-    fn ipv4_dst_rejects_non_ipv4_and_short() {
-        let mut v6 = [0u8; 20];
-        v6[0] = 0x60; // version 6
-        assert_eq!(ipv4_dst(&v6), None);
-        assert_eq!(ipv4_dst(&[0x45, 0x00]), None);
+    fn packet_dst_reads_ipv6_destination() {
+        // Minimal IPv6 header (40 bytes): version nibble 6, dst tại bytes 24..40.
+        let mut pkt = [0u8; 40];
+        pkt[0] = 0x60; // version 6
+        let dst: Ipv6Addr = "fd00:a11a:2a2a:5::1".parse().unwrap();
+        pkt[24..40].copy_from_slice(&dst.octets());
+        assert_eq!(packet_dst(&pkt), Some(IpAddr::V6(dst)));
+    }
+
+    #[test]
+    fn packet_dst_rejects_short_and_unknown_version() {
+        // v6 version nibble nhưng buffer < 40 → None.
+        assert_eq!(packet_dst(&[0x60, 0x00]), None);
+        // v4 version nibble nhưng buffer < 20 → None.
+        assert_eq!(packet_dst(&[0x45, 0x00]), None);
+        // version lạ (0) → None.
+        assert_eq!(packet_dst(&[0x00; 40]), None);
+        assert_eq!(packet_dst(&[]), None);
     }
 
     #[test]
     fn dialable_drops_self_no_endpoint_and_garbage() {
-        let me = Ipv4Addr::new(100, 64, 0, 3);
+        let me = IpAddr::V4(Ipv4Addr::new(100, 64, 0, 3));
         let peers = vec![
             // self — dropped by overlay match
             peer("self", REAL_PUBKEY, "100.64.0.3", Some("192.168.1.5:51820")),
@@ -125,7 +147,34 @@ mod tests {
         let out = dialable_peers(&peers, me);
         assert_eq!(out.len(), 1, "only the good peer survives");
         assert_eq!(out[0].node_id, "good");
-        assert_eq!(out[0].overlay_ip, Ipv4Addr::new(100, 64, 0, 9));
+        assert_eq!(out[0].overlay_ip, IpAddr::V4(Ipv4Addr::new(100, 64, 0, 9)));
         assert_eq!(out[0].endpoint.port(), 51820);
+    }
+
+    #[test]
+    fn dialable_handles_ipv6_overlay_and_drops_self() {
+        // [T:A.1.3] overlay IPv6 ULA: self bị loại, peer IPv6 hợp lệ survive.
+        let me = IpAddr::V6("fd00:a11a:2a2a:5::a".parse().unwrap());
+        let peers = vec![
+            peer(
+                "self",
+                REAL_PUBKEY,
+                "fd00:a11a:2a2a:5::a",
+                Some("192.168.1.5:51820"),
+            ),
+            peer(
+                "good6",
+                REAL_PUBKEY,
+                "fd00:a11a:2a2a:9::b",
+                Some("[2001:db8::9]:51820"),
+            ),
+        ];
+        let out = dialable_peers(&peers, me);
+        assert_eq!(out.len(), 1, "self dropped, peer IPv6 survive");
+        assert_eq!(out[0].node_id, "good6");
+        assert_eq!(
+            out[0].overlay_ip,
+            IpAddr::V6("fd00:a11a:2a2a:9::b".parse().unwrap())
+        );
     }
 }

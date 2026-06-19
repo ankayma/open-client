@@ -16,7 +16,7 @@
 //! still compile (A.1.9). Requires root (utun + route).
 
 use std::collections::HashSet;
-use std::net::{Ipv4Addr, SocketAddr, UdpSocket};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket};
 use std::process::Command;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -63,7 +63,8 @@ pub async fn run(args: &[String]) -> Result<()> {
 
     // 1. Identity: reuse persisted state, else generate + enroll.
     let state = load_or_enroll(&http, &cfg, &token).await?;
-    let self_overlay: Ipv4Addr = state
+    // [T:A.1.3] family-agnostic: control plane có thể cấp IPv4 hoặc IPv6 ULA.
+    let self_overlay: IpAddr = state
         .overlay_ip
         .parse()
         .with_context(|| format!("control plane gave a bad overlay IP: {}", state.overlay_ip))?;
@@ -76,14 +77,14 @@ pub async fn run(args: &[String]) -> Result<()> {
         state.node_id, self_overlay, state.listen_port
     );
 
-    // 2. utun up + addressing. Per-peer /32 routes are added as peers appear
-    //    (below) — more specific than any 100.64.0.0/10 a coexisting overlay
-    //    (e.g. Tailscale, same CGNAT range) may hold, so ours wins. [T:RFC-6598]
+    // 2. utun up + addressing. Per-peer host routes (/32 v4, /128 v6) are added as
+    //    peers appear (below) — more specific than any pool a coexisting overlay
+    //    (e.g. Tailscale's 100.64.0.0/10) may hold, so ours wins. [T:RFC-6598]
     let dev = crate::tun::open().context("open utun device (needs root)")?;
     let dev_name = dev.name().to_string();
     let fd = dev.raw_fd();
     configure_interface(&dev_name, self_overlay).context("configure utun interface")?;
-    println!("interface {dev_name} up, overlay {self_overlay} (per-peer /32 routes)");
+    println!("interface {dev_name} up, overlay {self_overlay} (per-peer host routes)");
 
     // 3. UDP socket the whole mesh shares.
     let udp = Arc::new(
@@ -263,24 +264,28 @@ fn hostname() -> String {
 }
 
 /// Bring the device up with this node's overlay address. Routing is per-peer
-/// (`add_peer_route`), not a blanket pool route: a /32 is more specific than any
-/// overlapping /10 a coexisting overlay (Tailscale shares the CGNAT range) holds,
-/// and it keeps the client agnostic to whatever range the control plane assigns.
+/// (`add_peer_route`), not a blanket pool route: a host route (/32 v4, /128 v6) is
+/// more specific than any overlapping pool a coexisting overlay (Tailscale shares
+/// the CGNAT range) holds, and keeps the client agnostic to whatever family/range
+/// the control plane assigns. `[T:A.1.3]`
 #[cfg(target_os = "macos")]
-fn configure_interface(name: &str, overlay: Ipv4Addr) -> Result<()> {
-    // [T:macos-ifconfig(8)] point-to-point: local == remote == overlay.
-    run_cmd(Command::new("ifconfig").args([
-        name,
-        "inet",
-        &overlay.to_string(),
-        &overlay.to_string(),
-        "up",
-    ]))?;
+fn configure_interface(name: &str, overlay: IpAddr) -> Result<()> {
+    let ip = overlay.to_string();
+    match overlay {
+        // [T:macos-ifconfig(8)] IPv4 point-to-point: local == remote == overlay.
+        IpAddr::V4(_) => {
+            run_cmd(Command::new("ifconfig").args([name, "inet", &ip, &ip, "up"]))?;
+        }
+        // [A? verify-on-macOS] IPv6: gán host /128 lên utun; per-peer /128 route thêm sau.
+        IpAddr::V6(_) => {
+            run_cmd(Command::new("ifconfig").args([name, "inet6", &ip, "prefixlen", "128", "up"]))?;
+        }
+    }
     Ok(())
 }
 
 #[cfg(not(target_os = "macos"))]
-fn configure_interface(_name: &str, _overlay: Ipv4Addr) -> Result<()> {
+fn configure_interface(_name: &str, _overlay: IpAddr) -> Result<()> {
     Err(anyhow!(
         "interface configuration is implemented for macOS only at milestone 1.1 [T:A.1.9]"
     ))
@@ -290,21 +295,25 @@ fn configure_interface(_name: &str, _overlay: Ipv4Addr) -> Result<()> {
 /// makes it idempotent and steals the /32 from any other overlay holding it
 /// (e.g. a stale Tailscale route). Best-effort: a failure is logged, not fatal.
 #[cfg(target_os = "macos")]
-fn add_peer_route(name: &str, overlay: Ipv4Addr) {
-    let dst = format!("{overlay}/32");
+fn add_peer_route(name: &str, overlay: IpAddr) {
+    // host route per-peer: /32 (v4) hoặc /128 (v6) — thắng mọi dải trùng (vd Tailscale /10).
+    let (inet, dst) = match overlay {
+        IpAddr::V4(a) => ("-inet", format!("{a}/32")),
+        IpAddr::V6(a) => ("-inet6", format!("{a}/128")),
+    };
     // [T:macos-route(8)] ignore delete errors (route may not exist yet).
     let _ = Command::new("route")
-        .args(["-q", "-n", "delete", "-inet", &dst])
+        .args(["-q", "-n", "delete", inet, &dst])
         .output();
     if let Err(e) =
-        run_cmd(Command::new("route").args(["-q", "-n", "add", "-inet", &dst, "-interface", name]))
+        run_cmd(Command::new("route").args(["-q", "-n", "add", inet, &dst, "-interface", name]))
     {
         eprintln!("warning: could not route {dst} via {name}: {e}");
     }
 }
 
 #[cfg(not(target_os = "macos"))]
-fn add_peer_route(_name: &str, _overlay: Ipv4Addr) {}
+fn add_peer_route(_name: &str, _overlay: IpAddr) {}
 
 // Only the macOS interface/route helpers above call this; gate it to match so a
 // non-macOS build (e.g. Linux CI) doesn't flag it as dead code. [T:A.1.9]
@@ -325,7 +334,7 @@ fn add_new_peers(
     peers: &Peers,
     index: &Arc<Mutex<u32>>,
     static_private: &StaticSecret,
-    self_overlay: Ipv4Addr,
+    self_overlay: IpAddr,
     list: &[agent_core::domain::PeerInfo],
     udp: &Arc<UdpSocket>,
     dev_name: &str,
@@ -375,7 +384,7 @@ fn add_new_peers(
 
 /// Find the peer that owns an overlay destination (outgoing) or a UDP source
 /// (incoming). Cheap linear scan — a personal mesh has a handful of peers.
-fn peer_by_overlay(peers: &Peers, dst: Ipv4Addr) -> Option<Arc<PeerEntry>> {
+fn peer_by_overlay(peers: &Peers, dst: IpAddr) -> Option<Arc<PeerEntry>> {
     let g = peers.lock().expect("peers lock");
     g.iter().find(|p| p.peer.overlay_ip == dst).cloned()
 }
@@ -405,8 +414,8 @@ fn spawn_tx(fd: i32, udp: Arc<UdpSocket>, peers: Peers) {
                     break;
                 }
             };
-            let Some(dst) = dataplane::ipv4_dst(&pkt[..n]) else {
-                continue; // not IPv4 (e.g. IPv6 ND) — overlay is IPv4-only here
+            let Some(dst) = dataplane::packet_dst(&pkt[..n]) else {
+                continue; // not a routable IPv4/IPv6 packet (truncated / unknown version)
             };
             let Some(entry) = peer_by_overlay(&peers, dst) else {
                 continue; // no peer owns this overlay address
