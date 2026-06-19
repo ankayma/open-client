@@ -1,3 +1,6 @@
 [toolchain]
-channel = "stable"
-# A.1.21: pin specific version before production (e.g. "1.83.0")
+# [T:A.1.21] Pinned to the exact version the release host builds with
+# (VPS rustc 1.96.0, 2026-05-25) — deterministic, not a floating "stable".
+# Bump deliberately + re-verify on the build host; keep the CI image tag in
+# .gitlab-ci.yml (rust:1.96-slim) in sync with this.
+channel = "1.96.0"
