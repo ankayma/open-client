@@ -138,6 +138,12 @@ pub(crate) async fn serve_dataplane(
     let peers: Peers = Arc::new(Mutex::new(Vec::new()));
     let index = Arc::new(Mutex::new(0u32));
 
+    // Deploy target = the single peer handed to ci-deploy; expose it to the deploy
+    // command via env so `--exec` knows where to reach over the tunnel.
+    let deploy_target = initial_peers
+        .first()
+        .map(|p| (p.overlay_ip.clone(), p.hostname.clone()));
+
     add_new_peers(
         &peers,
         &index,
@@ -193,8 +199,18 @@ pub(crate) async fn serve_dataplane(
             println!("up (ephemeral). tunnel ready.");
             match cmd {
                 Some(parts) if !parts.is_empty() => {
-                    let status = Command::new(&parts[0])
-                        .args(&parts[1..])
+                    // Let the WireGuard handshake settle before the deploy runs.
+                    // [A] fixed settle; a handshake-complete poll is a refinement.
+                    tokio::time::sleep(Duration::from_secs(3)).await;
+                    let mut cmd = Command::new(&parts[0]);
+                    cmd.args(&parts[1..]);
+                    // [T:Part C §H.3.3] hand the target to the deploy command.
+                    cmd.env("ANKAYMA_OVERLAY_IP", &state.overlay_ip);
+                    if let Some((ip, host)) = &deploy_target {
+                        cmd.env("ANKAYMA_TARGET_IP", ip);
+                        cmd.env("ANKAYMA_TARGET_HOST", host);
+                    }
+                    let status = cmd
                         .status()
                         .with_context(|| format!("run deploy command: {}", parts.join(" ")))?;
                     if !status.success() {
