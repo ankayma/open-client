@@ -36,12 +36,12 @@ const MTU: usize = 1420; // [T:WireGuard] safe overlay MTU under a 1500 path
 /// fresh node every time (the control plane assigns a new node + overlay IP per
 /// enrollment — it does not dedup by public key).
 #[derive(Serialize, Deserialize)]
-struct AgentState {
-    private_b64: String,
-    public_b64: String,
-    node_id: String,
-    overlay_ip: String,
-    listen_port: u16,
+pub(crate) struct AgentState {
+    pub(crate) private_b64: String,
+    pub(crate) public_b64: String,
+    pub(crate) node_id: String,
+    pub(crate) overlay_ip: String,
+    pub(crate) listen_port: u16,
 }
 
 /// One peer's live tunnel: the dialable metadata + its boringtun state machine.
@@ -63,6 +63,51 @@ pub async fn run(args: &[String]) -> Result<()> {
 
     // 1. Identity: reuse persisted state, else generate + enroll.
     let state = load_or_enroll(&http, &cfg, &token).await?;
+
+    // 2. Initial roster, then run the data plane with a live peer-refresh loop.
+    let initial = adapters::peers(&http, &cfg.control_plane, &token)
+        .await
+        .map_err(|e| anyhow!("fetch peers: {e}"))?;
+
+    serve_dataplane(
+        &state,
+        initial,
+        AfterUp::Refresh(RefreshCtx {
+            http,
+            control_plane: cfg.control_plane.clone(),
+            token,
+        }),
+    )
+    .await
+}
+
+/// What [`serve_dataplane`] does once the tunnel threads are running.
+pub(crate) enum AfterUp {
+    /// Long-running agent (`agent up`): poll the control plane for new peers.
+    Refresh(RefreshCtx),
+    /// One-shot (`agent ci-deploy`): run a command over the tunnel then exit; an
+    /// empty/None command waits for Ctrl-C. [T:Part C §H.3.3]
+    Oneshot(Option<Vec<String>>),
+}
+
+pub(crate) struct RefreshCtx {
+    pub http: reqwest::Client,
+    pub control_plane: String,
+    pub token: String,
+}
+
+/// Bring the WireGuard overlay online for `state` and move packets. Shared by
+/// `agent up` (refresh loop) and `agent ci-deploy` (one-shot). [T:A.1.3]
+///
+/// macOS only at 1.1 (the utun adapter); other platforms error at runtime but still
+/// compile (A.1.9). Requires root (utun + route). Per-peer host routes (/32 v4,
+/// /128 v6) are added as peers appear — more specific than any overlapping pool a
+/// coexisting overlay (e.g. Tailscale's 100.64.0.0/10) holds, so ours wins.
+pub(crate) async fn serve_dataplane(
+    state: &AgentState,
+    initial_peers: Vec<agent_core::domain::PeerInfo>,
+    after: AfterUp,
+) -> Result<()> {
     // [T:A.1.3] family-agnostic: control plane có thể cấp IPv4 hoặc IPv6 ULA.
     let self_overlay: IpAddr = state
         .overlay_ip
@@ -77,16 +122,14 @@ pub async fn run(args: &[String]) -> Result<()> {
         state.node_id, self_overlay, state.listen_port
     );
 
-    // 2. utun up + addressing. Per-peer host routes (/32 v4, /128 v6) are added as
-    //    peers appear (below) — more specific than any pool a coexisting overlay
-    //    (e.g. Tailscale's 100.64.0.0/10) may hold, so ours wins. [T:RFC-6598]
+    // utun up + addressing.
     let dev = crate::tun::open().context("open utun device (needs root)")?;
     let dev_name = dev.name().to_string();
     let fd = dev.raw_fd();
     configure_interface(&dev_name, self_overlay).context("configure utun interface")?;
     println!("interface {dev_name} up, overlay {self_overlay} (per-peer host routes)");
 
-    // 3. UDP socket the whole mesh shares.
+    // UDP socket the whole mesh shares.
     let udp = Arc::new(
         UdpSocket::bind(SocketAddr::from(([0, 0, 0, 0], state.listen_port)))
             .with_context(|| format!("bind udp/{}", state.listen_port))?,
@@ -95,16 +138,12 @@ pub async fn run(args: &[String]) -> Result<()> {
     let peers: Peers = Arc::new(Mutex::new(Vec::new()));
     let index = Arc::new(Mutex::new(0u32));
 
-    // Initial roster.
-    let initial = adapters::peers(&http, &cfg.control_plane, &token)
-        .await
-        .map_err(|e| anyhow!("fetch peers: {e}"))?;
     add_new_peers(
         &peers,
         &index,
         &static_private,
         self_overlay,
-        &initial,
+        &initial_peers,
         &udp,
         &dev_name,
     );
@@ -112,41 +151,63 @@ pub async fn run(args: &[String]) -> Result<()> {
     // Hold the device for the process lifetime; the threads use the raw fd.
     let _dev = dev;
 
-    // 4. Event-loop threads.
     spawn_tx(fd, udp.clone(), peers.clone());
     spawn_rx(fd, udp.clone(), peers.clone());
     spawn_timers(udp.clone(), peers.clone());
 
-    // 5. Keep the roster fresh: peers that enroll after us appear here.
-    let refresh = {
-        let (http, cp, token) = (http.clone(), cfg.control_plane.clone(), token.clone());
-        let (peers, index, udp) = (peers.clone(), index.clone(), udp.clone());
-        let dev_name = dev_name.clone();
-        async move {
-            loop {
-                tokio::time::sleep(Duration::from_secs(5)).await;
-                if let Ok(list) = adapters::peers(&http, &cp, &token).await {
-                    let added = add_new_peers(
-                        &peers,
-                        &index,
-                        &static_private,
-                        self_overlay,
-                        &list,
-                        &udp,
-                        &dev_name,
-                    );
-                    if added > 0 {
-                        println!("discovered {added} new peer(s)");
+    match after {
+        // Keep the roster fresh: peers that enroll after us appear here.
+        AfterUp::Refresh(ctx) => {
+            let refresh = {
+                let (http, cp, token) = (ctx.http, ctx.control_plane, ctx.token);
+                let (peers, index, udp) = (peers.clone(), index.clone(), udp.clone());
+                let dev_name = dev_name.clone();
+                async move {
+                    loop {
+                        tokio::time::sleep(Duration::from_secs(5)).await;
+                        if let Ok(list) = adapters::peers(&http, &cp, &token).await {
+                            let added = add_new_peers(
+                                &peers,
+                                &index,
+                                &static_private,
+                                self_overlay,
+                                &list,
+                                &udp,
+                                &dev_name,
+                            );
+                            if added > 0 {
+                                println!("discovered {added} new peer(s)");
+                            }
+                        }
                     }
+                }
+            };
+            println!("up. ping a peer's overlay IP to test (Ctrl-C to stop).");
+            tokio::select! {
+                _ = refresh => {}
+                _ = tokio::signal::ctrl_c() => println!("\nshutting down."),
+            }
+        }
+        // Ephemeral deploy: tunnel is up; run the deploy command, then tear down.
+        AfterUp::Oneshot(cmd) => {
+            println!("up (ephemeral). tunnel ready.");
+            match cmd {
+                Some(parts) if !parts.is_empty() => {
+                    let status = Command::new(&parts[0])
+                        .args(&parts[1..])
+                        .status()
+                        .with_context(|| format!("run deploy command: {}", parts.join(" ")))?;
+                    if !status.success() {
+                        return Err(anyhow!("deploy command exited with {status}"));
+                    }
+                    println!("deploy command finished ok; tearing down ephemeral tunnel.");
+                }
+                _ => {
+                    println!("no --exec given; holding tunnel until Ctrl-C.");
+                    let _ = tokio::signal::ctrl_c().await;
                 }
             }
         }
-    };
-
-    println!("up. ping a peer's overlay IP to test (Ctrl-C to stop).");
-    tokio::select! {
-        _ = refresh => {}
-        _ = tokio::signal::ctrl_c() => println!("\nshutting down."),
     }
     Ok(())
 }
