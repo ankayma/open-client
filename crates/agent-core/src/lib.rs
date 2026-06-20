@@ -4,6 +4,7 @@ pub mod adapters; // concrete impls of ports
 pub mod application; // use cases, orchestration
 pub mod dataplane; // overlay peer model + packet routing helpers (testable)
 pub mod domain; // pure business logic, no I/O
+pub mod oidc; // CI OIDC token fetch for secretless deploy (B-3)
 pub mod ports; // trait interfaces for external systems
 pub mod tunnel; // WireGuard data-plane engine (boringtun)
 

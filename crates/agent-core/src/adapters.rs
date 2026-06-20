@@ -1,6 +1,8 @@
 //! adapters — concrete port impls (control-plane HTTP, WireGuard, NATS, OIDC).
 
-use crate::domain::{EnrollRequest, EnrollResponse, PeerInfo, Quota, SessionInfo};
+use crate::domain::{
+    CiDeployRequest, CiDeployResponse, EnrollRequest, EnrollResponse, PeerInfo, Quota, SessionInfo,
+};
 
 /// Errors from the control-plane HTTP client.
 #[derive(Debug)]
@@ -109,6 +111,30 @@ pub async fn enroll(
         return Err(ApiError::Status(status.as_u16()));
     }
     resp.json::<EnrollResponse>()
+        .await
+        .map_err(|e| ApiError::Decode(e.to_string()))
+}
+
+/// Exchange a CI OIDC token for ephemeral mesh access.
+/// `POST {base_url}/api/v1/ci/deploy`. `[T:Part C §H.3.3]`
+/// No bearer header: the OIDC token in the body IS the credential. The control
+/// plane verifies it cryptographically — the agent never decides ALLOW/DENY.
+pub async fn ci_deploy(
+    http: &reqwest::Client,
+    base_url: &str,
+    req: &CiDeployRequest,
+) -> Result<CiDeployResponse, ApiError> {
+    let resp = http
+        .post(url(base_url, "/api/v1/ci/deploy"))
+        .json(req)
+        .send()
+        .await
+        .map_err(|e| ApiError::Transport(e.to_string()))?;
+    let status = resp.status();
+    if !status.is_success() {
+        return Err(ApiError::Status(status.as_u16()));
+    }
+    resp.json::<CiDeployResponse>()
         .await
         .map_err(|e| ApiError::Decode(e.to_string()))
 }
