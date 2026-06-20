@@ -71,4 +71,5 @@ CLAUDE.md này = "system prompt" tự nạp (thay cho core §1.1 paste-template)
 Code/identifier/commit subject = English. Giải thích/PR description = Vietnamese (trừ khi human viết English trước).
 
 ## Commit
-Chỉ commit/push khi human yêu cầu.
+- Chỉ commit/push khi human yêu cầu.
+- **Soát commit message TRƯỚC khi commit/push — message LÀ public** (subject + body vào lịch sử GitHub công khai, vĩnh viễn, khó thu hồi kể cả force-push). Message KHÔNG được chứa: secret/token/key, IP/hostname hạ tầng nội bộ (vd VPS IP, DB host/credential, internal URL), customer data, hay chi tiết nội bộ control-plane (tên service/đường dẫn closed). Golden rule (content) áp y hệt cho message: nghi ngờ một chi tiết thuộc control-plane/khách → KHÔNG đưa vào message.
