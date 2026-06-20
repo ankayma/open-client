@@ -62,6 +62,15 @@ pub async fn run(args: &[String]) -> Result<()> {
         None => println!("no deploy target in policy — bringing up mesh access only."),
     }
 
+    // --dry-run: stop after the secretless control-channel (token verified, ephemeral
+    // grant issued, access audited). Proves B-1/B-2/B-4 live WITHOUT needing a TUN —
+    // so it runs on a Linux/hosted CI runner where the data plane is still `[A]`
+    // (macOS-only utun at 1.1; userspace Linux transport = R3 #12, pending).
+    if cfg.dry_run {
+        println!("dry-run: secretless access verified + audited; tunnel not attempted.");
+        return Ok(());
+    }
+
     // 4. bring up the tunnel and run the deploy command over it, then tear down.
     let state = AgentState {
         private_b64: kp.private_b64,
@@ -80,6 +89,7 @@ struct Config {
     listen_port: u16,
     hostname: Option<String>,
     exec: Option<Vec<String>>,
+    dry_run: bool,
 }
 
 impl Config {
@@ -90,6 +100,7 @@ impl Config {
         let mut listen_port = DEFAULT_LISTEN_PORT;
         let mut hostname = None;
         let mut exec = None;
+        let mut dry_run = false;
 
         let mut it = args.iter();
         while let Some(a) = it.next() {
@@ -120,6 +131,7 @@ impl Config {
                             .clone(),
                     )
                 }
+                "--dry-run" => dry_run = true,
                 // Everything after --exec is the deploy command (run over the tunnel).
                 "--exec" => exec = Some(it.by_ref().cloned().collect()),
                 other => return Err(anyhow!("unknown argument: {other}")),
@@ -131,6 +143,7 @@ impl Config {
             listen_port,
             hostname,
             exec,
+            dry_run,
         })
     }
 }
