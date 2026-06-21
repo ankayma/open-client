@@ -6,7 +6,7 @@ Khác với Cloudflare / Zscaler / Tailscale — vốn để dữ liệu của k
 
 Repo này là **phần OPEN** của Ankayma, theo đúng *mô hình Tailscale*: **client mở, control-plane đóng** `[T per Part D §D.2]`. Tất cả thứ chạy trên máy khách hàng đều ở đây và audit được; logic control-plane (broker / identity / policy / audit / edge / billing / ML) sống ở repo riêng, *không bao giờ* commit vào đây `[T per A.1.4 + P.7]`.
 
-> **SSOT** `[T per P.5 + P.9]`: nguồn chân lý là **blueprint** (Part 0/A/B/C/D) + brand-positioning. README + [`ARCHITECTURE.md`](./ARCHITECTURE.md) chỉ **trỏ** theo *tên + section*, không copy. Code mâu thuẫn invariant Part A → **Part A thắng**.
+> **SSOT** `[T per P.5 + P.9]`: nguồn chân lý là **blueprint** (Part 0/A/B/C/D) + brand-positioning. README chỉ **trỏ** theo *tên + section*, không copy. Code mâu thuẫn invariant Part A → **Part A thắng**.
 
 ---
 
@@ -73,18 +73,18 @@ frontend/
   shared          web-tech UI tái dùng cho GUI + web admin
   app-gui         desktop+mobile GUI frontend
   app-admin       web admin console frontend
-docs/             invariant-trace · concept-trace · qc-discipline · phase-completion-checklist
+docs/             public site (GitHub Pages): index · honest-limits · privacy · terms
 ```
 
 **Hexagonal (A.3.1)** `[T per A.3.1 + Part D §D.1.5]`: mỗi major component = 1 crate, giữ port/adapter seam. 11 bounded context (Part B §B.3) = seam để tách microservice về sau — không leak domain qua crate khác.
 
-**Shared contract** = `proto` + `domain-core`: control-plane depend ngược vào hai crate này. Đổi contract = đổi cả hai phía → **cần human review kỹ** `[T per Part D §D.4]`. Chi tiết crate → bounded context: [`ARCHITECTURE.md`](./ARCHITECTURE.md) §H.2.
+**Shared contract** = `proto` + `domain-core`: control-plane depend ngược vào hai crate này. Đổi contract = đổi cả hai phía → **cần human review kỹ** `[T per Part D §D.4]`. Chi tiết crate → bounded context: blueprint Part B §B.3.
 
 ---
 
 ## 5. Binding invariants (vi phạm = STOP, báo human)
 
-Full text ở Part A §A.1; index + hệ quả khi code ở [`ARCHITECTURE.md`](./ARCHITECTURE.md) §H.3.
+Full text + hệ quả khi code ở blueprint Part A §A.1.
 
 | ID | Tóm tắt | Hệ quả khi code |
 |---|---|---|
@@ -109,7 +109,7 @@ Scope gate (P.8): chỉ build cái milestone Part C hiện tại authorize. **Kh
 
 **Chưa build (anti-pattern guard P.8)**: Phase 2 infra (Shamir ceremony, dedicated NATS/RDS) · `Organization`/`Workspace`/delegation (A.1.24, chờ trigger L_subsidiary) · F3 capability (HSM / Conf VM / BYOK, chờ F3 customer) · crate "Enterprise-*" song song (vi phạm A.1.9 trực tiếp).
 
-> Chi tiết completion criteria + CI gates: [`docs/phase-completion-checklist-1.1.md`](./docs/phase-completion-checklist-1.1.md).
+> Chi tiết completion criteria + CI gates: blueprint Part C §H.3 (milestone 1.1).
 
 ---
 
@@ -142,8 +142,8 @@ Toolchain: Rust stable (sẽ pin version cụ thể trước production — A.1.
 
 ## 9. Governance & trạng thái
 
-- **Mô hình làm việc**: Claude code 100%, human review + QC test. Luật hành vi session ở [`CLAUDE.md`](./CLAUDE.md); workflow ở [`CONTRIBUTING.md`](./CONTRIBUTING.md).
+- **Mô hình làm việc**: Claude code 100%, human review + QC test. Workflow ở [`CONTRIBUTING.md`](./CONTRIBUTING.md).
 - **License**: **Apache-2.0** (xem [`LICENSE`](./LICENSE) + [`NOTICE`](./NOTICE)) `[T per Part D §D.7 — owner-chosen 2026-06-17]`. Permissive + patent grant tường minh, hợp tinh thần open client. Contribution submit vào repo này mặc định theo Apache-2.0 §5.
 - **Frontend framework**: TBD per team (React / Svelte / Vue — Tauri webview-agnostic).
 
-> Đọc trước khi sửa code: [`ARCHITECTURE.md`](./ARCHITECTURE.md) (crate map + invariant index) → [`CLAUDE.md`](./CLAUDE.md) (session rules) → blueprint section liên quan.
+> Đọc trước khi sửa code: blueprint section liên quan (Part 0/A/B/C/D — SSOT nội bộ).
