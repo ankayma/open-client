@@ -10,9 +10,12 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
 use crate::domain::PeerInfo;
 
-/// A control-plane peer we can actually reach: a parseable 32-byte WireGuard
-/// public key plus a resolved UDP endpoint to send to. Peers missing either are
-/// dropped (e.g. nodes that enrolled without advertising an endpoint).
+/// A mesh peer we can run a WireGuard session with: a parseable 32-byte public
+/// key + overlay address. The UDP endpoint is **optional** — a peer that enrolled
+/// without advertising one (e.g. an ephemeral CI runner behind NAT) is kept as a
+/// *responder*: we cannot dial it, but we can answer its handshake and learn its
+/// endpoint from the packet source. `[T:Part C §H.3.3 B-3]` Only peers with a bad
+/// public key, or this node itself, are dropped.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DialablePeer {
     pub node_id: String,
@@ -24,8 +27,9 @@ pub struct DialablePeer {
     /// Overlay address assigned by the control plane. Family-agnostic (IPv4 or
     /// IPv6 ULA) — the agent routes per-peer host, không phụ thuộc dải. `[T:A.1.3]`
     pub overlay_ip: IpAddr,
-    /// Where to send this peer's encrypted UDP traffic.
-    pub endpoint: SocketAddr,
+    /// Where to send this peer's encrypted UDP traffic. `None` = responder-only
+    /// (no advertised endpoint); the endpoint is learned from the first handshake.
+    pub endpoint: Option<SocketAddr>,
 }
 
 /// Extract the destination address from a raw IP packet (no utun header).
@@ -45,13 +49,14 @@ pub fn packet_dst(packet: &[u8]) -> Option<IpAddr> {
     }
 }
 
-/// Filter a raw control-plane peer list down to dialable peers, dropping:
+/// Filter a raw control-plane peer list down to usable mesh peers, dropping only:
 ///   * this node itself (matched by overlay IP),
-///   * peers with no advertised endpoint,
-///   * peers whose public key or endpoint does not parse.
+///   * peers whose public key or overlay address does not parse.
 ///
-/// The control plane returns every node (including self and stale/garbage
-/// entries); the data plane must be defensive. `[T:A.1.1]`
+/// A peer with no advertised (or unparseable) endpoint is **kept** with
+/// `endpoint = None` — a responder we answer but don't dial. The control plane
+/// returns every node (including self and stale/garbage entries); the data plane
+/// must be defensive. `[T:A.1.1]`
 pub fn dialable_peers(peers: &[PeerInfo], self_overlay: IpAddr) -> Vec<DialablePeer> {
     peers
         .iter()
@@ -64,8 +69,9 @@ fn to_dialable(p: &PeerInfo, self_overlay: IpAddr) -> Option<DialablePeer> {
     if overlay_ip == self_overlay {
         return None; // never dial ourselves
     }
-    let endpoint: SocketAddr = p.endpoint.as_deref()?.parse().ok()?;
     let public_key = crate::key_bytes_from_b64(&p.public_key).ok()?;
+    // Endpoint optional: a missing/garbage endpoint → responder-only (None).
+    let endpoint: Option<SocketAddr> = p.endpoint.as_deref().and_then(|s| s.parse().ok());
     Some(DialablePeer {
         node_id: p.node_id.clone(),
         hostname: p.hostname.clone(),
@@ -127,28 +133,36 @@ mod tests {
     }
 
     #[test]
-    fn dialable_drops_self_no_endpoint_and_garbage() {
+    fn dialable_keeps_responder_drops_self_and_garbage() {
         let me = IpAddr::V4(Ipv4Addr::new(100, 64, 0, 3));
         let peers = vec![
             // self — dropped by overlay match
             peer("self", REAL_PUBKEY, "100.64.0.3", Some("192.168.1.5:51820")),
-            // no endpoint — can't dial
-            peer("no-ep", REAL_PUBKEY, "100.64.0.2", None),
-            // garbage pubkey (not 32 bytes) — boringtun can't use it
+            // no endpoint — kept as a responder (endpoint = None), e.g. a CI runner.
+            peer("responder", REAL_PUBKEY, "100.64.0.2", None),
+            // garbage pubkey (not 32 bytes) — boringtun can't use it → dropped.
             peer(
                 "garbage",
                 "TEST_PUBKEY_AAA=",
                 "100.64.0.4",
                 Some("192.168.1.6:51820"),
             ),
-            // good peer
+            // good dialable peer
             peer("good", REAL_PUBKEY, "100.64.0.9", Some("192.168.1.9:51820")),
         ];
         let out = dialable_peers(&peers, me);
-        assert_eq!(out.len(), 1, "only the good peer survives");
-        assert_eq!(out[0].node_id, "good");
-        assert_eq!(out[0].overlay_ip, IpAddr::V4(Ipv4Addr::new(100, 64, 0, 9)));
-        assert_eq!(out[0].endpoint.port(), 51820);
+        assert_eq!(
+            out.len(),
+            2,
+            "responder + good survive; self + garbage dropped"
+        );
+
+        let responder = out.iter().find(|p| p.node_id == "responder").unwrap();
+        assert_eq!(responder.endpoint, None, "no-endpoint peer is a responder");
+
+        let good = out.iter().find(|p| p.node_id == "good").unwrap();
+        assert_eq!(good.overlay_ip, IpAddr::V4(Ipv4Addr::new(100, 64, 0, 9)));
+        assert_eq!(good.endpoint.unwrap().port(), 51820);
     }
 
     #[test]

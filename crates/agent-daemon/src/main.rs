@@ -14,6 +14,7 @@
 //! `<subject-prefix>.key.escrow` — vendor recovers via subscribe.
 
 mod ci_deploy;
+mod netstack;
 mod tun;
 mod up;
 

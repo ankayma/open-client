@@ -138,7 +138,79 @@ mod imp {
     }
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(target_os = "linux")]
+mod imp {
+    use super::TunDevice;
+    use std::ffi::CStr;
+    use std::io;
+    use std::mem;
+    use std::os::raw::{c_char, c_short, c_void};
+
+    // [T:linux/if_tun.h] TUNSETIFF = _IOW('T', 202, int) = 0x400454ca; flags.
+    const TUNSETIFF: libc::c_ulong = 0x4004_54ca;
+    const IFF_TUN: c_short = 0x0001; // [T:linux/if_tun.h] layer-3 tun (no ethernet)
+    const IFF_NO_PI: c_short = 0x1000; // [T:linux/if_tun.h] no 4-byte packet-info prefix
+
+    // [T:linux/if.h] struct ifreq is 40 bytes: 16-byte name + a 24-byte union; we
+    // only touch ifr_name + ifr_flags (a c_short at the start of the union).
+    #[repr(C)]
+    struct IfReq {
+        ifr_name: [c_char; 16],
+        ifr_flags: c_short,
+        _pad: [u8; 22],
+    }
+
+    /// Open `/dev/net/tun` and create a layer-3 tun interface. `IFF_NO_PI` means
+    /// read/write carry **bare IP packets** (no 4-byte framing). Requires root /
+    /// `CAP_NET_ADMIN`. `[T:linux/Documentation/networking/tuntap.rst]`
+    pub fn open() -> io::Result<TunDevice> {
+        // SAFETY: documented Linux syscalls; pointers reference live local values.
+        unsafe {
+            let fd = libc::open(b"/dev/net/tun\0".as_ptr() as *const c_char, libc::O_RDWR);
+            if fd < 0 {
+                return Err(io::Error::last_os_error());
+            }
+            let mut req: IfReq = mem::zeroed();
+            // "ank%d" → the kernel substitutes the next free unit (ank0, ank1, …).
+            for (i, b) in b"ank%d".iter().enumerate() {
+                req.ifr_name[i] = *b as c_char;
+            }
+            req.ifr_flags = IFF_TUN | IFF_NO_PI;
+            if libc::ioctl(fd, TUNSETIFF, &mut req as *mut IfReq as *mut c_void) < 0 {
+                let e = io::Error::last_os_error();
+                libc::close(fd);
+                return Err(e);
+            }
+            let name = CStr::from_ptr(req.ifr_name.as_ptr())
+                .to_string_lossy()
+                .into_owned();
+            Ok(TunDevice { fd, name })
+        }
+    }
+
+    /// Read one bare IP packet (IFF_NO_PI → no framing to strip).
+    pub fn read_packet(fd: i32, buf: &mut [u8]) -> io::Result<usize> {
+        // SAFETY: read into a valid local buffer with its real length.
+        let n = unsafe { libc::read(fd, buf.as_mut_ptr() as *mut c_void, buf.len()) };
+        if n < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(n as usize)
+    }
+
+    /// Write one bare IP packet (works for IPv4 and IPv6 — the kernel reads the
+    /// version nibble; IFF_NO_PI means no AF prefix is needed).
+    pub fn write_packet(fd: i32, packet: &[u8]) -> io::Result<usize> {
+        // SAFETY: write from a valid local buffer with its real length.
+        let n = unsafe { libc::write(fd, packet.as_ptr() as *const c_void, packet.len()) };
+        if n < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(n as usize)
+    }
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
 mod imp {
     use super::TunDevice;
     use std::io;
@@ -146,19 +218,19 @@ mod imp {
     pub fn open() -> io::Result<TunDevice> {
         Err(io::Error::new(
             io::ErrorKind::Unsupported,
-            "utun data plane is implemented for macOS only at milestone 1.1 [T:A.1.9]",
+            "kernel tun data plane is implemented for macOS + Linux [T:A.1.9]",
         ))
     }
     pub fn read_packet(_fd: i32, _buf: &mut [u8]) -> io::Result<usize> {
         Err(io::Error::new(
             io::ErrorKind::Unsupported,
-            "no utun on this platform",
+            "no tun device on this platform",
         ))
     }
     pub fn write_packet(_fd: i32, _packet: &[u8]) -> io::Result<usize> {
         Err(io::Error::new(
             io::ErrorKind::Unsupported,
-            "no utun on this platform",
+            "no tun device on this platform",
         ))
     }
 }

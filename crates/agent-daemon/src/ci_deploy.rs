@@ -16,7 +16,7 @@ use agent_core::domain::CiDeployRequest;
 use agent_core::{adapters, oidc, reqwest, WgKeypair};
 use anyhow::{anyhow, Result};
 
-use crate::up::{self, AfterUp, AgentState};
+use crate::up::AgentState;
 
 const DEFAULT_CONTROL_PLANE: &str = "https://cp.ankayma.com";
 const DEFAULT_AUDIENCE: &str = "ankayma-deploy"; // [T:Part C §H.3.3] DEPLOY_AUDIENCE
@@ -72,6 +72,16 @@ pub async fn run(args: &[String]) -> Result<()> {
     }
 
     // 4. bring up the tunnel and run the deploy command over it, then tear down.
+    // [T:R3 #12] Hosted CI runners have no kernel TUN, so the deploy runs over a
+    // USERSPACE TCP/IP stack (smoltcp) exposed as a SOCKS5 proxy — `netstack`.
+    // The kernel-TUN path (`up::serve_dataplane`) is for `agent up` on a host that
+    // can create a utun/tun device (the target server), not the runner.
+    let target = resp.target.ok_or_else(|| {
+        anyhow!(
+            "policy named no deploy target — nothing to deploy to. \
+             Register a policy with a target_hostname, or use --dry-run."
+        )
+    })?;
     let state = AgentState {
         private_b64: kp.private_b64,
         public_b64: kp.public_b64,
@@ -79,8 +89,11 @@ pub async fn run(args: &[String]) -> Result<()> {
         overlay_ip: resp.overlay_ip,
         listen_port: cfg.listen_port,
     };
-    let initial: Vec<_> = resp.target.into_iter().collect();
-    up::serve_dataplane(&state, initial, AfterUp::Oneshot(cfg.exec)).await
+    // The data plane is blocking (smoltcp poll loop + std process spawn); run it off
+    // the async runtime so we don't stall the executor.
+    tokio::task::spawn_blocking(move || crate::netstack::run_deploy(&state, target, cfg.exec))
+        .await
+        .map_err(|e| anyhow!("deploy task panicked: {e}"))?
 }
 
 struct Config {
