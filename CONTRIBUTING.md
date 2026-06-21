@@ -4,7 +4,7 @@ Mô hình làm việc: **Claude code 100%, human review + QC test.** Tài liệu
 
 ## Vòng lặp
 
-1. **Claude**: đọc constraint (blueprint Part A/C/D section liên quan) → code → self-check → commit nhỏ.
+1. **Claude**: đọc constraint (`ARCHITECTURE.md` → blueprint Part A/C/D section liên quan) → code → self-check → commit nhỏ.
 2. **Human**: review diff + chạy QC test → approve hoặc trả lại.
 
 ## Definition of Done (Claude tự verify trước khi giao)
@@ -13,7 +13,7 @@ Mô hình làm việc: **Claude code 100%, human review + QC test.** Tài liệu
 - [ ] `cargo clippy -- -D warnings` không warning
 - [ ] `cargo check` + `cargo test` pass — **report output thật**, fail thì nói fail
 - [ ] Behavior change có test đi kèm
-- [ ] Không vi phạm binding invariant (blueprint Part A §A.1); nếu buộc phải → **không commit**, surface cho human
+- [ ] Không vi phạm binding invariant (ARCHITECTURE §index); nếu buộc phải → **không commit**, surface cho human
 - [ ] Trong scope milestone Part C hiện tại (không pre-build — P.8)
 - [ ] **Không có IP closed / secret / khóa thật / customer data** trong diff (repo PUBLIC)
 - [ ] Honest gap (`// TODO[A]:` + lý do) cho mọi chỗ chưa hoàn chỉnh — không giấu (P.3)

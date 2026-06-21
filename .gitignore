@@ -9,13 +9,7 @@ node_modules/
 cosign.key
 *.key
 
-# Agent dev instructions + internal architecture/trace docs — kept LOCAL only
-# (they reference the internal blueprint/SSOT + closed control-plane structure).
-# Untracked so internal data is not added to this public repo. Claude still reads
-# them locally; they are intentionally absent from the public tip.
+# Agent dev instructions — kept LOCAL only (references internal blueprint/SSOT +
+# closed control-plane structure). Untracked so internal data is not added to this
+# public repo. Claude still reads it locally; absent from the public tip.
 /CLAUDE.md
-/ARCHITECTURE.md
-/docs/invariant-trace.md
-/docs/concept-trace.md
-/docs/qc-discipline.md
-/docs/phase-completion-checklist-1.1.md
