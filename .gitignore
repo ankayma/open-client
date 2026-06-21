@@ -8,3 +8,8 @@ node_modules/
 # Only cosign.pub (public) is committed. [T:A.1.21]
 cosign.key
 *.key
+
+# Agent dev instructions — kept LOCAL only (references internal blueprint/SSOT).
+# Untracked so internal data is not added to this public repo. Claude still reads
+# it locally; it is intentionally absent from the public tip.
+/CLAUDE.md
