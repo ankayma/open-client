@@ -28,10 +28,20 @@ anyhow = "1"
 # file (persisted node identity, so re-runs don't leak a new control-plane node).
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# [T:A.1.21] userspace TCP/IP stack for the SaaS-runner deploy path (B-3, R3 #12):
+# moves real deploy traffic over the WireGuard tunnel WITHOUT a kernel TUN device,
+# so `agent ci-deploy` runs in an unprivileged hosted CI container. Pinned, pure-Rust,
+# no_std-capable, owner-reviewable. `[T:smoltcp@0.12]`
+smoltcp = { version = "0.12", default-features = false, features = ["std", "alloc", "medium-ip", "proto-ipv4", "proto-ipv6", "socket-tcp"] }
 
 # [T:A.1.21] utun device on macOS uses raw PF_SYSTEM/UTUN_CONTROL syscalls via
 # libc — no third-party TUN crate, keeps the dependency surface minimal/auditable.
 [target.'cfg(target_os = "macos")'.dependencies]
+libc = "0.2"
+
+# [T:A.1.21] Linux tun device (/dev/net/tun + TUNSETIFF) via libc — the deploy
+# *target* (a Linux server) brings the overlay up here. Same minimal-deps rationale.
+[target.'cfg(target_os = "linux")'.dependencies]
 libc = "0.2"
 
 [features]

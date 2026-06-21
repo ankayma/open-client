@@ -56,6 +56,33 @@ pub struct Quota {
     pub tier: String,
 }
 
+/// Secretless CI deploy request. `POST /api/v1/ci/deploy`. `[T:Part C §H.3.3]`
+/// The OIDC `token` IS the credential — there is no session token and no static
+/// secret. The control plane verifies it (closed IP); the agent only sends it.
+#[derive(Debug, Clone, Serialize)]
+pub struct CiDeployRequest {
+    /// CI OIDC JWT (GitHub Actions / GitLab CI), minted for audience `ankayma-deploy`.
+    pub token: String,
+    /// Ephemeral WireGuard public key (base64) generated for this deploy run.
+    pub public_key: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hostname: Option<String>,
+}
+
+/// Control-plane response to a verified CI deploy. Mirrors `CiDeployResp`.
+/// `[T:Part C §H.3.3]`
+#[derive(Debug, Clone, Deserialize)]
+pub struct CiDeployResponse {
+    pub node_id: String,
+    pub overlay_ip: String,
+    pub allowed_ips: Vec<String>,
+    /// TTL of the ephemeral enrollment — the runner must finish within this window.
+    pub expires_in_seconds: u32,
+    /// The deploy target peer (if the registered policy named one).
+    #[serde(default)]
+    pub target: Option<PeerInfo>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

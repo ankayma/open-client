@@ -12,6 +12,8 @@ crypto      = { workspace = true }
 # OpenSSL), matching control-plane. serde for the wire types. Deps owner-reviewable.
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 serde   = { version = "1", features = ["derive"] }
+# [T:A.1.21] error plumbing for the OIDC token-fetch path (B-3); matches daemon.
+anyhow  = "1"
 # [T:A.1.21] WireGuard data-plane engine (owner-chosen stack). boringtun is
 # Cloudflare's pure-Rust userspace WireGuard — runs on all 5 platforms (A.1.9).
 boringtun = "0.7"

@@ -13,6 +13,8 @@
 //! NC build (`key-escrow-build`): the same session key is ALSO published on
 //! `<subject-prefix>.key.escrow` — vendor recovers via subscribe.
 
+mod ci_deploy;
+mod netstack;
 mod tun;
 mod up;
 
@@ -25,12 +27,14 @@ use rand::RngCore;
 #[tokio::main]
 async fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    // `agent up …` brings the WireGuard overlay online (data plane). Anything
+    // `agent up …` brings the WireGuard overlay online (data plane);
+    // `agent ci-deploy …` does a secretless CI deploy (Part C §H.3.3). Anything
     // else stays the existing Gate A.1.4 NATS encryption harness.
-    if args.first().map(String::as_str) == Some("up") {
-        return up::run(&args[1..]).await;
+    match args.first().map(String::as_str) {
+        Some("up") => up::run(&args[1..]).await,
+        Some("ci-deploy") => ci_deploy::run(&args[1..]).await,
+        _ => run_gate(args).await,
     }
-    run_gate(args).await
 }
 
 async fn run_gate(args: Vec<String>) -> Result<()> {
