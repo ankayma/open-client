@@ -191,6 +191,20 @@
 		</section>
 	{/if}
 
+	{#if $auth.status === 'authenticated'}
+		<section class="quick-actions">
+			<button class="quick-item" onclick={() => goto('/policies')}>
+				<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+					<path d="M4 17l6-6-6-6M12 19h8"/>
+				</svg>
+				<span>CI/CD Deploy Rules</span>
+				<svg class="arrow" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+					<path d="M9 18l6-6-6-6"/>
+				</svg>
+			</button>
+		</section>
+	{/if}
+
 	{#if $auth.status === 'authenticated' && $auth.user.tier === 'F0Plus'}
 		<section class="quick-actions">
 			<button class="quick-item" onclick={() => goto('/subdomains')}>

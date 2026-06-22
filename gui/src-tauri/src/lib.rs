@@ -377,6 +377,63 @@ async fn open_stripe_checkout() -> Result<(), String> {
     Err("Not yet implemented — Stripe pending (milestone 1.3)".into())
 }
 
+// --- CI/CD deploy policy (F0) — feature-03b-gui-spec.md §1.4 ---
+
+/// CI/CD deploy policy draft from the GUI form. Mirrors the §1.1 POST body; empty
+/// strings are dropped so the safe-by-default ref XOR environment holds.
+#[derive(Deserialize)]
+struct CiPolicyDraft {
+    issuer: String,
+    repo: String,
+    #[serde(rename = "ref", default)]
+    git_ref: Option<String>,
+    #[serde(default)]
+    environment: Option<String>,
+    #[serde(default)]
+    target_hostname: Option<String>,
+}
+
+#[tauri::command]
+async fn list_ci_policies(state: State<'_, AppState>) -> Result<Vec<domain::CiPolicy>, String> {
+    let tok = state.token().ok_or("not signed in")?;
+    adapters::list_ci_policies(&state.http, &state.base_url, &tok)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn add_ci_policy(req: CiPolicyDraft, state: State<'_, AppState>) -> Result<(), String> {
+    let tok = state.token().ok_or("not signed in")?;
+    let nonempty = |s: Option<String>| s.filter(|v| !v.trim().is_empty());
+    let body = domain::CiPolicyReq {
+        issuer: req.issuer,
+        repo: req.repo,
+        git_ref: nonempty(req.git_ref),
+        environment: nonempty(req.environment),
+        target_hostname: nonempty(req.target_hostname),
+    };
+    adapters::register_ci_policy(&state.http, &state.base_url, &tok, &body)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn delete_ci_policy(repo: String, state: State<'_, AppState>) -> Result<(), String> {
+    let tok = state.token().ok_or("not signed in")?;
+    adapters::delete_ci_policy(&state.http, &state.base_url, &tok, &repo)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Tenant node roster for the deploy-target picker. Reuses `GET /api/v1/peers`.
+#[tauri::command]
+async fn list_nodes(state: State<'_, AppState>) -> Result<Vec<domain::PeerInfo>, String> {
+    let tok = state.token().ok_or("not signed in")?;
+    adapters::peers(&state.http, &state.base_url, &tok)
+        .await
+        .map_err(|e| e.to_string())
+}
+
 // --- macOS menu-bar tray (desktop only) ---
 
 /// Build the tray dropdown from the current AppState. Rebuilt on every state
@@ -617,6 +674,10 @@ pub fn run() {
             get_quota,
             get_node_info,
             get_path_proof,
+            list_ci_policies,
+            add_ci_policy,
+            delete_ci_policy,
+            list_nodes,
             create_join_link,
             track_event,
             open_stripe_checkout,

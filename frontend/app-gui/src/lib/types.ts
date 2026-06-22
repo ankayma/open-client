@@ -48,3 +48,31 @@ export interface PathProof {
 	vendor_on_data_path: boolean;
 	peers: PathPeer[];
 }
+
+// [03b] CI/CD deploy policy (F0) — mirrors agent-core domain::CiPolicy wire shape.
+export interface CiPolicy {
+	repo: string;
+	issuer: string;
+	ref?: string;
+	environment?: string;
+	target_hostname?: string;
+	created_at?: string;
+}
+
+// Form draft sent to add_ci_policy. Exactly one of ref / environment is set.
+export interface CiPolicyDraft {
+	issuer: string;
+	repo: string;
+	ref?: string;
+	environment?: string;
+	target_hostname?: string;
+}
+
+// Tenant node (from GET /api/v1/peers) for the deploy-target picker.
+export interface PeerBrief {
+	node_id: string;
+	public_key: string;
+	overlay_ip: string;
+	hostname: string;
+	endpoint?: string;
+}

@@ -2,7 +2,16 @@
 // All agent-core interactions go through commands defined in gui/src-tauri/src/lib.rs
 // [T:A.1.1] client calls control-plane via agent-core, never directly
 
-import type { AuthState, ConnectionState, Quota, NodeInfo, PathProof } from './types';
+import type {
+	AuthState,
+	ConnectionState,
+	Quota,
+	NodeInfo,
+	PathProof,
+	CiPolicy,
+	CiPolicyDraft,
+	PeerBrief
+} from './types';
 
 // Runtime check — @tauri-apps/api works in Tauri webview and stubs gracefully in browser
 async function invoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
@@ -56,4 +65,21 @@ export async function getPathProof(): Promise<PathProof> {
 // [A] stub — control-plane receives event via agent-core relay (milestone 1.2)
 export async function trackEvent(name: string, props?: Record<string, string>): Promise<void> {
 	return invoke('track_event', { name, props: props ?? {} });
+}
+
+// [03b] CI/CD deploy policy (F0). Every call is session-authed in agent-core.
+export async function listCiPolicies(): Promise<CiPolicy[]> {
+	return invoke<CiPolicy[]>('list_ci_policies');
+}
+
+export async function addCiPolicy(req: CiPolicyDraft): Promise<void> {
+	return invoke('add_ci_policy', { req });
+}
+
+export async function deleteCiPolicy(repo: string): Promise<void> {
+	return invoke('delete_ci_policy', { repo });
+}
+
+export async function listNodes(): Promise<PeerBrief[]> {
+	return invoke<PeerBrief[]>('list_nodes');
 }

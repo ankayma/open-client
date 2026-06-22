@@ -8,6 +8,10 @@ node_modules/
 # not source. Kept out of the repo to avoid committing generated projects.
 /gui/src-tauri/gen/
 
+# Manual-QC screenshots — show real infra (VPS IP, node IDs, internal repo
+# names). LOCAL only; never push to this public repo (leak-check). [T:A.1.4/P.6]
+/docs/test-evidence/
+
 # Cosign signing — PRIVATE key never leaves the machine / CI File-var.
 # Only cosign.pub (public) is committed. [T:A.1.21]
 cosign.key

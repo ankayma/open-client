@@ -151,6 +151,39 @@ pub struct AgentReceipt {
     pub ledger_block_hash: String,
 }
 
+/// A CI/CD deploy policy rule as returned by `GET /api/v1/ci/policy`. Tenant-scoped.
+/// `[T:Part C §H.3.3 / B.5.2]` `ref` and `environment` are the safe-by-default scope:
+/// exactly one is set (server enforces; client mirrors in UX). `target_hostname` is
+/// optional (the node a deploy may reach).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CiPolicy {
+    pub repo: String,
+    pub issuer: String,
+    #[serde(rename = "ref", default, skip_serializing_if = "Option::is_none")]
+    pub git_ref: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub environment: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_hostname: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_at: Option<String>,
+}
+
+/// Create/update request for a CI/CD deploy policy. `POST /api/v1/ci/policy`
+/// (upsert by `repo`). Safe-by-default is server-enforced; the client sends only
+/// the fields the user set. `[T:Part C §H.3.3]`
+#[derive(Debug, Clone, Serialize)]
+pub struct CiPolicyReq {
+    pub issuer: String,
+    pub repo: String,
+    #[serde(rename = "ref", skip_serializing_if = "Option::is_none")]
+    pub git_ref: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub environment: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target_hostname: Option<String>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -254,5 +287,34 @@ mod tests {
         assert_eq!(resp.receipt.secret_residue, "none");
         assert_eq!(resp.receipt.ttl_seconds, 30);
         assert_eq!(resp.receipt.ledger_event, "AgentAccess");
+    }
+
+    #[test]
+    fn ci_policy_parses_list_shape_and_req_serializes_ref() {
+        // Shape emitted by control-plane GET /api/v1/ci/policy. `ref` is the JSON key.
+        let json = r#"{
+            "repo": "acme/api",
+            "issuer": "github",
+            "ref": "refs/heads/main",
+            "target_hostname": "prod-web",
+            "created_at": "2026-06-22T00:00:00Z"
+        }"#;
+        let p: CiPolicy = serde_json::from_str(json).unwrap();
+        assert_eq!(p.git_ref.as_deref(), Some("refs/heads/main"));
+        assert_eq!(p.environment, None);
+        assert_eq!(p.target_hostname.as_deref(), Some("prod-web"));
+
+        // Request serializes `git_ref` back to the `ref` key; None fields omitted.
+        let req = CiPolicyReq {
+            issuer: "gitlab".into(),
+            repo: "grp/proj".into(),
+            git_ref: None,
+            environment: Some("prod".into()),
+            target_hostname: None,
+        };
+        let v: serde_json::Value = serde_json::to_value(&req).unwrap();
+        assert_eq!(v["environment"], "prod");
+        assert!(v.get("ref").is_none());
+        assert!(v.get("target_hostname").is_none());
     }
 }

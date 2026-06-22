@@ -1,8 +1,8 @@
 //! adapters — concrete port impls (control-plane HTTP, WireGuard, NATS, OIDC).
 
 use crate::domain::{
-    AgentEnrollRequest, AgentEnrollResponse, CiDeployRequest, CiDeployResponse, EnrollRequest,
-    EnrollResponse, PeerInfo, Quota, SessionInfo,
+    AgentEnrollRequest, AgentEnrollResponse, CiDeployRequest, CiDeployResponse, CiPolicy,
+    CiPolicyReq, EnrollRequest, EnrollResponse, PeerInfo, Quota, SessionInfo,
 };
 
 /// Errors from the control-plane HTTP client.
@@ -10,8 +10,11 @@ use crate::domain::{
 pub enum ApiError {
     /// Network/transport failure.
     Transport(String),
-    /// Server returned a non-2xx status.
+    /// Server returned a non-2xx status with no usable message body.
     Status(u16),
+    /// Server returned a non-2xx status with an `error` message — surfaced verbatim
+    /// so the GUI/CLI shows the control plane's reason (e.g. safe-by-default 400/409).
+    Server { status: u16, message: String },
     /// Response body could not be decoded.
     Decode(String),
 }
@@ -21,6 +24,7 @@ impl std::fmt::Display for ApiError {
         match self {
             ApiError::Transport(e) => write!(f, "control-plane transport error: {e}"),
             ApiError::Status(s) => write!(f, "control-plane returned HTTP {s}"),
+            ApiError::Server { message, .. } => write!(f, "{message}"),
             ApiError::Decode(e) => write!(f, "control-plane decode error: {e}"),
         }
     }
@@ -161,6 +165,77 @@ pub async fn agent_enroll(
     resp.json::<AgentEnrollResponse>()
         .await
         .map_err(|e| ApiError::Decode(e.to_string()))
+}
+
+/// Map a non-2xx response to an `ApiError`, surfacing the control plane's `error`
+/// field verbatim when present (so safe-by-default 400/409 reasons reach the user).
+async fn expect_ok(resp: reqwest::Response) -> Result<(), ApiError> {
+    let status = resp.status();
+    if status.is_success() {
+        return Ok(());
+    }
+    let code = status.as_u16();
+    #[derive(serde::Deserialize)]
+    struct ErrBody {
+        error: Option<String>,
+    }
+    match resp.json::<ErrBody>().await {
+        Ok(ErrBody { error: Some(m) }) if !m.trim().is_empty() => Err(ApiError::Server {
+            status: code,
+            message: m,
+        }),
+        _ => Err(ApiError::Status(code)),
+    }
+}
+
+/// List the tenant's CI/CD deploy policies. `GET /api/v1/ci/policy`. `[T:Part C §H.3.3]`
+pub async fn list_ci_policies(
+    http: &reqwest::Client,
+    base_url: &str,
+    session_token: &str,
+) -> Result<Vec<CiPolicy>, ApiError> {
+    #[derive(serde::Deserialize)]
+    struct Resp {
+        policies: Vec<CiPolicy>,
+    }
+    let resp: Resp = get_json(http, base_url, "/api/v1/ci/policy", session_token).await?;
+    Ok(resp.policies)
+}
+
+/// Create or update a CI/CD deploy policy (server upserts by `repo`).
+/// `POST /api/v1/ci/policy`. Safe-by-default is server-enforced. `[T:Part C §H.3.3]`
+pub async fn register_ci_policy(
+    http: &reqwest::Client,
+    base_url: &str,
+    session_token: &str,
+    req: &CiPolicyReq,
+) -> Result<(), ApiError> {
+    let resp = http
+        .post(url(base_url, "/api/v1/ci/policy"))
+        .bearer_auth(session_token)
+        .json(req)
+        .send()
+        .await
+        .map_err(|e| ApiError::Transport(e.to_string()))?;
+    expect_ok(resp).await
+}
+
+/// Delete a CI/CD deploy policy. `DELETE /api/v1/ci/policy/{owner}/{repo}` — `repo`
+/// (`owner/name`) is passed through as the path catch-all. `[T:Part C §H.3.3]`
+pub async fn delete_ci_policy(
+    http: &reqwest::Client,
+    base_url: &str,
+    session_token: &str,
+    repo: &str,
+) -> Result<(), ApiError> {
+    let path = format!("/api/v1/ci/policy/{}", repo.trim_matches('/'));
+    let resp = http
+        .delete(url(base_url, &path))
+        .bearer_auth(session_token)
+        .send()
+        .await
+        .map_err(|e| ApiError::Transport(e.to_string()))?;
+    expect_ok(resp).await
 }
 
 #[cfg(test)]

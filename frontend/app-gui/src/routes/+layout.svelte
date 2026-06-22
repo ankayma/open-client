@@ -73,6 +73,10 @@
 					<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M3 12l9-9 9 9M5 10v10h14V10"/></svg>
 					<span>Dashboard</span>
 				</button>
+				<button class="nav-item" class:active={active('/policies')} onclick={() => goto('/policies')}>
+					<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 17l6-6-6-6M12 19h8"/></svg>
+					<span>Deploy Rules</span>
+				</button>
 				{#if tier === 'F0Plus'}
 					<button class="nav-item" class:active={active('/subdomains')} onclick={() => goto('/subdomains')}>
 						<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="9"/><path d="M3.6 9h16.8M3.6 15h16.8M12 3a15 15 0 010 18"/></svg>

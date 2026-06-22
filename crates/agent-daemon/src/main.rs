@@ -15,6 +15,7 @@
 
 mod agent_identity;
 mod ci_deploy;
+mod ci_policy;
 mod netstack;
 mod tun;
 mod up;
@@ -35,6 +36,7 @@ async fn main() -> Result<()> {
     match args.first().map(String::as_str) {
         Some("up") => up::run(&args[1..]).await,
         Some("ci-deploy") => ci_deploy::run(&args[1..]).await,
+        Some("ci-policy") => ci_policy::run(&args[1..]).await,
         Some("enroll-identity") => agent_identity::run(&args[1..]).await,
         _ => run_gate(args).await,
     }
