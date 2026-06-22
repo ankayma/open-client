@@ -33,3 +33,18 @@ export interface NodeInfo {
 	hostname: string;
 	public_key: string;
 }
+
+// [F-5 "Prove it"] Data-path proof — mirrors PathProof in gui/src-tauri/src/lib.rs.
+export interface PathPeer {
+	hostname: string;
+	overlay_ip: string;
+	direct: boolean;
+	endpoint: string | null;
+}
+
+export interface PathProof {
+	connected: boolean;
+	control_plane: string;
+	vendor_on_data_path: boolean;
+	peers: PathPeer[];
+}

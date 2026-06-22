@@ -114,6 +114,27 @@ pub struct NodeInfo {
     pub public_key: String,
 }
 
+/// [F-5 / A.1.1] One mesh peer on the data path. `direct` = a reachable endpoint is
+/// known, so traffic is peer-to-peer. No NAT-fallback relay exists yet.
+#[derive(Serialize, Deserialize, Clone)]
+pub struct PathPeer {
+    pub hostname: String,
+    pub overlay_ip: String,
+    pub direct: bool,
+    pub endpoint: Option<String>,
+}
+
+/// [F-5 "Prove it"] Path-proof: your traffic is peer-to-peer; the vendor (control
+/// plane) is the control channel only, never on the data path (A.1.1).
+#[derive(Serialize, Deserialize, Clone)]
+pub struct PathProof {
+    pub connected: bool,
+    pub control_plane: String,
+    /// Always false: A.1.1 keeps the vendor off the data path.
+    pub vendor_on_data_path: bool,
+    pub peers: Vec<PathPeer>,
+}
+
 // --- Commands ---
 
 #[tauri::command]
@@ -247,6 +268,39 @@ async fn get_node_info(state: State<'_, AppState>) -> Result<NodeInfo, String> {
     })
 }
 
+/// [F-5 "Prove it"] Surface the data path for the current connection: each peer is
+/// reached peer-to-peer, and the vendor is never on the data path (A.1.1). Built from
+/// the enrolled node's peer list — no extra control-plane round-trip.
+#[tauri::command]
+async fn get_path_proof(state: State<'_, AppState>) -> Result<PathProof, String> {
+    let guard = state.node.lock().expect("node lock poisoned");
+    let (connected, peers) = match &*guard {
+        Some(n) => {
+            let peers = n
+                .peers
+                .iter()
+                .map(|p| PathPeer {
+                    hostname: p.hostname.clone(),
+                    overlay_ip: p.overlay_ip.clone(),
+                    // A reachable endpoint ⇒ a direct dial. No relay exists yet, so a
+                    // responder-only peer (no endpoint) is still reached peer-to-peer.
+                    direct: p.endpoint.is_some(),
+                    endpoint: p.endpoint.clone(),
+                })
+                .collect();
+            (true, peers)
+        }
+        None => (false, Vec::new()),
+    };
+    Ok(PathProof {
+        connected,
+        control_plane: state.base_url.clone(),
+        // [T:A.1.1] data plane never transits the vendor — structural, not a setting.
+        vendor_on_data_path: false,
+        peers,
+    })
+}
+
 #[tauri::command]
 async fn create_join_link() -> Result<String, String> {
     // [A] stub — POST /api/v1/enrollment/token (slice 4b)
@@ -295,6 +349,7 @@ pub fn run() {
             disconnect,
             get_quota,
             get_node_info,
+            get_path_proof,
             create_join_link,
             track_event,
             open_stripe_checkout,

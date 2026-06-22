@@ -62,11 +62,19 @@ pub async fn run(args: &[String]) -> Result<()> {
         None => println!("no deploy target in policy — bringing up mesh access only."),
     }
 
+    // [F-1] The wow is the *proof*, not the connection: show the signed
+    // run-receipt the control plane just anchored into its append-only audit ledger.
+    print_receipt(resp.receipt.as_ref(), &cfg.control_plane);
+
     // --dry-run: stop after the secretless control-channel (token verified, ephemeral
     // grant issued, access audited). Proves B-1/B-2/B-4 live WITHOUT needing a TUN —
     // so it runs on a Linux/hosted CI runner where the data plane is still `[A]`
     // (macOS-only utun at 1.1; userspace Linux transport = R3 #12, pending).
     if cfg.dry_run {
+        // [F-5] Path-proof is strongest once a data path comes up; --dry-run brings
+        // none up, so state that honestly (P.3) — control channel only this run.
+        println!("── Path ──────────────────────────────────────────────");
+        println!("  data plane   not established (--dry-run): control channel only");
         println!("dry-run: secretless access verified + audited; tunnel not attempted.");
         return Ok(());
     }
@@ -82,6 +90,12 @@ pub async fn run(args: &[String]) -> Result<()> {
              Register a policy with a target_hostname, or use --dry-run."
         )
     })?;
+
+    // [F-5 / A.1.1] Path-proof: the data plane is a direct WireGuard tunnel to the
+    // target peer — the control plane (vendor) is the control channel only, never on
+    // the data path. No NAT-fallback relay exists yet, so this run is peer-to-peer.
+    print_path_proof(&target, &cfg.control_plane);
+
     let state = AgentState {
         private_b64: kp.private_b64,
         public_b64: kp.public_b64,
@@ -94,6 +108,67 @@ pub async fn run(args: &[String]) -> Result<()> {
     tokio::task::spawn_blocking(move || crate::netstack::run_deploy(&state, target, cfg.exec))
         .await
         .map_err(|e| anyhow!("deploy task panicked: {e}"))?
+}
+
+/// [F-1] Print the signed run-receipt — "evidence you hold", not
+/// "secretless" alone. The receipt is tamper-evident via the ledger anchor; print a
+/// re-verify command so the user can prove it independently against the live ledger.
+fn print_receipt(receipt: Option<&agent_core::domain::DeployReceipt>, control_plane: &str) {
+    let Some(r) = receipt else {
+        // Older control plane, or a denied/edge path — nothing to show, don't fake it.
+        return;
+    };
+    println!("\n── Signed run-receipt ────────────────────────────────");
+    println!("  run            {}", r.run_id);
+    println!("  repo           {}", r.repo);
+    println!("  ref            {}", r.git_ref);
+    println!("  issuer         {}", r.issuer);
+    if let Some(env) = &r.environment {
+        println!("  environment    {env}");
+    }
+    if let Some(t) = &r.target {
+        println!("  service        {t}");
+    }
+    println!("  scope          {}", r.scope);
+    println!(
+        "  static secret  {}",
+        if r.static_secret { "yes" } else { "none" }
+    );
+    // Honest about the F0 ceiling (P.3): tamper-evident now, customer-signed is Part C.
+    let signing = if r.customer_signed {
+        "customer-key signed"
+    } else {
+        "tamper-evident (ledger hash-chain) — customer-key signing is Part C"
+    };
+    println!("  proof          {signing}");
+    println!(
+        "  ledger anchor  {}:{}",
+        r.ledger_event, r.ledger_block_hash
+    );
+    println!(
+        "  verify         curl {}/api/v1/ci/receipt/{}",
+        control_plane.trim_end_matches('/'),
+        r.run_id
+    );
+}
+
+/// [F-5 / A.1.1] Print the path-proof: data plane peer-to-peer, vendor off the path.
+fn print_path_proof(target: &agent_core::domain::PeerInfo, control_plane: &str) {
+    println!("\n── Path ──────────────────────────────────────────────");
+    match &target.endpoint {
+        Some(ep) => println!(
+            "  data plane     direct WireGuard → {} ({ep})",
+            target.hostname
+        ),
+        None => println!(
+            "  data plane     direct WireGuard → {} (peer-to-peer)",
+            target.hostname
+        ),
+    }
+    println!(
+        "  vendor         {} — control channel only, NOT on the data path [A.1.1]",
+        control_plane.trim_end_matches('/')
+    );
 }
 
 struct Config {

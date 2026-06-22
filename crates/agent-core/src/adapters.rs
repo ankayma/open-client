@@ -1,7 +1,8 @@
 //! adapters — concrete port impls (control-plane HTTP, WireGuard, NATS, OIDC).
 
 use crate::domain::{
-    CiDeployRequest, CiDeployResponse, EnrollRequest, EnrollResponse, PeerInfo, Quota, SessionInfo,
+    AgentEnrollRequest, AgentEnrollResponse, CiDeployRequest, CiDeployResponse, EnrollRequest,
+    EnrollResponse, PeerInfo, Quota, SessionInfo,
 };
 
 /// Errors from the control-plane HTTP client.
@@ -135,6 +136,29 @@ pub async fn ci_deploy(
         return Err(ApiError::Status(status.as_u16()));
     }
     resp.json::<CiDeployResponse>()
+        .await
+        .map_err(|e| ApiError::Decode(e.to_string()))
+}
+
+/// F-4 redeem: exchange a single-use agent identity token for ephemeral mesh access
+/// plus a receipt. `POST /api/v1/agents/enroll`. The token IS the credential — no
+/// session, no static secret. `[T:Part C §H.3.3]`
+pub async fn agent_enroll(
+    http: &reqwest::Client,
+    base_url: &str,
+    req: &AgentEnrollRequest,
+) -> Result<AgentEnrollResponse, ApiError> {
+    let resp = http
+        .post(url(base_url, "/api/v1/agents/enroll"))
+        .json(req)
+        .send()
+        .await
+        .map_err(|e| ApiError::Transport(e.to_string()))?;
+    let status = resp.status();
+    if !status.is_success() {
+        return Err(ApiError::Status(status.as_u16()));
+    }
+    resp.json::<AgentEnrollResponse>()
         .await
         .map_err(|e| ApiError::Decode(e.to_string()))
 }

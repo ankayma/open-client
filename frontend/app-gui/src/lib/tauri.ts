@@ -2,7 +2,7 @@
 // All agent-core interactions go through commands defined in gui/src-tauri/src/lib.rs
 // [T:A.1.1] client calls control-plane via agent-core, never directly
 
-import type { AuthState, ConnectionState, Quota, NodeInfo } from './types';
+import type { AuthState, ConnectionState, Quota, NodeInfo, PathProof } from './types';
 
 // Runtime check — @tauri-apps/api works in Tauri webview and stubs gracefully in browser
 async function invoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
@@ -46,6 +46,11 @@ export async function getQuota(): Promise<Quota> {
 
 export async function getNodeInfo(): Promise<NodeInfo> {
 	return invoke<NodeInfo>('get_node_info');
+}
+
+// [F-5 "Prove it"] Surface the data path: peer-to-peer, vendor off the path (A.1.1).
+export async function getPathProof(): Promise<PathProof> {
+	return invoke<PathProof>('get_path_proof');
 }
 
 // [A] stub — control-plane receives event via agent-core relay (milestone 1.2)

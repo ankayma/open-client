@@ -1,9 +1,25 @@
 <script lang="ts">
 	import { goto } from '$app/navigation';
 	import { auth, connection, quota } from '$lib/stores';
-	import { connect, disconnect, getQuota, getConnectionStatus } from '$lib/tauri';
+	import { connect, disconnect, getQuota, getConnectionStatus, getPathProof } from '$lib/tauri';
+	import type { PathProof } from '$lib/types';
 
 	let toggling = $state(false);
+	let proof = $state<PathProof | null>(null);
+	let proving = $state(false);
+
+	// [F-5 "Prove it"] On demand, show that traffic is peer-to-peer and the vendor is
+	// never on the data path (A.1.1) — the differentiator, demoable from F0.
+	async function proveIt() {
+		proving = true;
+		try {
+			proof = await getPathProof();
+		} catch (e) {
+			console.error(e);
+		} finally {
+			proving = false;
+		}
+	}
 
 	async function toggleConnection() {
 		toggling = true;
@@ -94,6 +110,49 @@
 			</svg>
 		</button>
 	</section>
+
+	<!-- [F-5 "Prove it"] The differentiator: prove the vendor is not on your data path. -->
+	{#if $connection.status === 'connected'}
+		<section class="prove-card">
+			<div class="prove-head">
+				<span>Prove it</span>
+				<button class="prove-btn" onclick={proveIt} disabled={proving}>
+					{proving ? 'Checking…' : 'Show data path'}
+				</button>
+			</div>
+
+			{#if proof}
+				<div class="prove-row vendor">
+					<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+						<path d="M9 12l2 2 4-4"/>
+						<circle cx="12" cy="12" r="9"/>
+					</svg>
+					<span>Vendor is <strong>not on the data path</strong> — control channel only (A.1.1)</span>
+				</div>
+
+				{#if proof.peers.length > 0}
+					{#each proof.peers as p (p.overlay_ip)}
+						<div class="prove-row">
+							<span class="peer-name">{p.hostname}</span>
+							<span class="peer-path">
+								{p.direct ? 'direct WireGuard' : 'peer-to-peer'}
+								{#if p.endpoint}<code>{p.endpoint}</code>{/if}
+							</span>
+						</div>
+					{/each}
+				{:else}
+					<div class="prove-row muted">
+						No peers yet — connect another device to see the peer-to-peer path.
+					</div>
+				{/if}
+			{:else}
+				<p class="prove-hint">
+					Your traffic goes peer-to-peer over WireGuard. Tap to see the live path —
+					no hop through the vendor.
+				</p>
+			{/if}
+		</section>
+	{/if}
 
 	{#if $quota}
 		<section class="quota-card">
@@ -425,5 +484,68 @@
 		font-weight: 600;
 		white-space: nowrap;
 		flex-shrink: 0;
+	}
+
+	/* [F-5 "Prove it"] data-path proof panel */
+	.prove-card {
+		background: var(--c-surface);
+		border: 1px solid var(--c-border);
+		border-radius: var(--radius);
+		padding: 16px;
+		display: flex;
+		flex-direction: column;
+		gap: 12px;
+	}
+
+	.prove-head {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		font-size: 14px;
+		font-weight: 600;
+	}
+
+	.prove-btn {
+		background: color-mix(in srgb, var(--c-accent) 12%, transparent);
+		color: var(--c-accent);
+		padding: 8px 14px;
+		border-radius: 8px;
+		font-size: 13px;
+		font-weight: 600;
+	}
+
+	.prove-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+	.prove-hint {
+		font-size: 13px;
+		color: var(--c-text-dim);
+		line-height: 1.5;
+		margin: 0;
+	}
+
+	.prove-row {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+		font-size: 13px;
+		color: var(--c-text);
+	}
+
+	.prove-row.vendor {
+		color: var(--c-success);
+		padding-bottom: 8px;
+		border-bottom: 1px solid var(--c-border);
+	}
+
+	.prove-row.vendor svg { flex-shrink: 0; }
+	.prove-row.muted { color: var(--c-text-dim); }
+	.prove-row .peer-name { flex: 1; font-weight: 600; }
+	.prove-row .peer-path { color: var(--c-text-dim); display: flex; gap: 6px; align-items: center; }
+	.prove-row code {
+		background: var(--c-border);
+		padding: 1px 6px;
+		border-radius: 4px;
+		font-family: 'SF Mono', 'Fira Code', monospace;
+		font-size: 11px;
 	}
 </style>

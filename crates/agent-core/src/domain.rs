@@ -81,6 +81,74 @@ pub struct CiDeployResponse {
     /// The deploy target peer (if the registered policy named one).
     #[serde(default)]
     pub target: Option<PeerInfo>,
+    /// Signed run-receipt — the F-1 wow artifact (proof, not connectivity).
+    /// `Option` for forward-compat with an older control plane. `[T:Part C §H.3.3]`
+    #[serde(default)]
+    pub receipt: Option<DeployReceipt>,
+}
+
+/// Tamper-evident proof of a secretless deploy run, anchored into the control
+/// plane's append-only audit hash-chain (`ledger_block_hash`, A.1.8) and
+/// re-verifiable via `GET /api/v1/ci/receipt/{run_id}`. `[T:Part C §H.3.3]`
+///
+/// `customer_signed:false` at F0 (tamper-evident only); customer-key signing is
+/// Part C `[A-p]`. The agent only displays this — it never decides ALLOW/DENY.
+#[derive(Debug, Clone, Deserialize)]
+pub struct DeployReceipt {
+    pub run_id: String,
+    pub repo: String,
+    #[serde(rename = "ref")]
+    pub git_ref: String,
+    pub issuer: String,
+    #[serde(default)]
+    pub environment: Option<String>,
+    #[serde(default)]
+    pub target: Option<String>,
+    pub scope: String,
+    pub static_secret: bool,
+    pub customer_signed: bool,
+    pub anchor: String,
+    pub ledger_event: String,
+    pub ledger_block_hash: String,
+}
+
+/// F-4 redeem: an agent presents its single-use mint token (the token IS the
+/// credential — no session, no static secret) for short-TTL ephemeral access.
+/// `[T:Part C §H.3.3]`
+#[derive(Debug, Clone, Serialize)]
+pub struct AgentEnrollRequest {
+    /// Single-use identity token minted by `POST /api/v1/agents/token`.
+    pub token: String,
+    /// Ephemeral WireGuard public key (base64) generated for this grant.
+    pub public_key: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hostname: Option<String>,
+}
+
+/// Control-plane response to an agent identity redemption. Mirrors `AgentEnrollResp`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct AgentEnrollResponse {
+    pub node_id: String,
+    pub overlay_ip: String,
+    pub allowed_ips: Vec<String>,
+    pub expires_in_seconds: u32,
+    pub receipt: AgentReceipt,
+}
+
+/// Proof a non-human actor was admitted — first-class in the ledger, scoped,
+/// time-limited, zero secret residue. Re-verifiable via
+/// `GET /api/v1/agents/receipt/{run_id}`. `[T:Part C §H.3.3]`
+#[derive(Debug, Clone, Deserialize)]
+pub struct AgentReceipt {
+    pub run_id: String,
+    pub agent_name: String,
+    pub actor_kind: String,
+    pub scope: String,
+    pub ttl_seconds: i64,
+    pub secret_residue: String,
+    pub anchor: String,
+    pub ledger_event: String,
+    pub ledger_block_hash: String,
 }
 
 #[cfg(test)]
@@ -117,5 +185,74 @@ mod tests {
         assert_eq!(resp.peers.len(), 1);
         assert_eq!(resp.peers[0].hostname, "phone");
         assert_eq!(resp.peers[0].endpoint, None);
+    }
+
+    #[test]
+    fn ci_deploy_response_parses_receipt_shape() {
+        // Shape emitted by control-plane ci_deploy (CiDeployResp + DeployReceipt).
+        // [T:Part C §H.3.3] `ref` is the JSON key; F0 = not customer-signed.
+        let json = r#"{
+            "node_id": "ci_abc",
+            "overlay_ip": "fd00::2",
+            "allowed_ips": ["fd00::/64"],
+            "expires_in_seconds": 900,
+            "receipt": {
+                "run_id": "ci_abc",
+                "repo": "acme/api",
+                "ref": "refs/heads/main",
+                "issuer": "github",
+                "environment": "prod",
+                "target": "prod-web",
+                "scope": "deploy-only",
+                "static_secret": false,
+                "customer_signed": false,
+                "anchor": "ledger-hash-chain",
+                "ledger_event": "CiDeployAccess",
+                "ledger_block_hash": "9f3c"
+            }
+        }"#;
+        let resp: CiDeployResponse = serde_json::from_str(json).unwrap();
+        let r = resp.receipt.expect("receipt present");
+        assert_eq!(r.git_ref, "refs/heads/main"); // parsed from JSON key `ref`
+        assert!(!r.customer_signed); // F0: tamper-evident only, not customer-signed
+        assert_eq!(r.scope, "deploy-only");
+        assert_eq!(r.ledger_block_hash, "9f3c");
+    }
+
+    #[test]
+    fn ci_deploy_response_tolerates_missing_receipt() {
+        // Forward/backward-compat: an older control plane omits `receipt`.
+        let json = r#"{"node_id":"ci_x","overlay_ip":"fd00::2",
+            "allowed_ips":[],"expires_in_seconds":900}"#;
+        let resp: CiDeployResponse = serde_json::from_str(json).unwrap();
+        assert!(resp.receipt.is_none());
+    }
+
+    #[test]
+    fn agent_enroll_response_parses_receipt_shape() {
+        // Shape emitted by control-plane agent_enroll (AgentEnrollResp + AgentReceipt).
+        // [T:Part C §H.3.3 / F-4] first-class non-human actor, scoped, bounded.
+        let json = r#"{
+            "node_id": "ci_agent1",
+            "overlay_ip": "fd00::3",
+            "allowed_ips": ["fd00::/64"],
+            "expires_in_seconds": 30,
+            "receipt": {
+                "run_id": "ci_agent1",
+                "agent_name": "nightly-backup",
+                "actor_kind": "non-human",
+                "scope": "mesh:connect",
+                "ttl_seconds": 30,
+                "secret_residue": "none",
+                "anchor": "ledger-hash-chain",
+                "ledger_event": "AgentAccess",
+                "ledger_block_hash": "9f3c"
+            }
+        }"#;
+        let resp: AgentEnrollResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(resp.receipt.actor_kind, "non-human");
+        assert_eq!(resp.receipt.secret_residue, "none");
+        assert_eq!(resp.receipt.ttl_seconds, 30);
+        assert_eq!(resp.receipt.ledger_event, "AgentAccess");
     }
 }

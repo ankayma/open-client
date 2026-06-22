@@ -13,6 +13,7 @@
 //! NC build (`key-escrow-build`): the same session key is ALSO published on
 //! `<subject-prefix>.key.escrow` — vendor recovers via subscribe.
 
+mod agent_identity;
 mod ci_deploy;
 mod netstack;
 mod tun;
@@ -28,11 +29,13 @@ use rand::RngCore;
 async fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     // `agent up …` brings the WireGuard overlay online (data plane);
-    // `agent ci-deploy …` does a secretless CI deploy (Part C §H.3.3). Anything
+    // `agent ci-deploy …` does a secretless CI deploy (Part C §H.3.3);
+    // `agent enroll-identity …` redeems a non-human/agent identity (F-4). Anything
     // else stays the existing Gate A.1.4 NATS encryption harness.
     match args.first().map(String::as_str) {
         Some("up") => up::run(&args[1..]).await,
         Some("ci-deploy") => ci_deploy::run(&args[1..]).await,
+        Some("enroll-identity") => agent_identity::run(&args[1..]).await,
         _ => run_gate(args).await,
     }
 }
