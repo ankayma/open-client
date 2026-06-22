@@ -20,7 +20,10 @@ tauri-build = { version = "2.6.2", features = [] }
 serde_json = "1.0"
 serde = { version = "1.0", features = ["derive"] }
 log = "0.4"
-tauri = { version = "2.11.2", features = [] }
+# `tray-icon` enables the macOS menu-bar tray (Part D §D.3, desktop only — gated
+# #[cfg(desktop)] so mobile is unaffected). The status dot is drawn from raw RGBA
+# (tauri::image::Image), so no image-format feature is needed. [T:A.1.21] pinned.
+tauri = { version = "2.11.2", features = ["tray-icon"] }
 tauri-plugin-log = "2"
 # Control-plane calls go through agent-core (A.1.1). `open` launches the system
 # browser for the GitHub OAuth start. [T:A.1.21]

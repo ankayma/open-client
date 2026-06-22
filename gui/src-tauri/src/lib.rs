@@ -7,13 +7,18 @@
 // data-plane half — bringing up a utun device and routing packets through
 // boringtun — needs OS privileges (root on macOS) and a peer, so it runs in the
 // privileged agent-daemon, not this unprivileged GUI. [A] tracked: data path.
+//
+// On macOS the app is a menu-bar (tray) app modeled on Tailscale: the Dock icon
+// is hidden (ActivationPolicy::Accessory) and the dropdown drives connect/status
+// from the same AppState the window uses. All tray code is #[cfg(desktop)] so
+// mobile (iOS/Android) is unaffected. [T:A.3.1]
 
 use std::sync::Mutex;
 
 use agent_core::domain::EnrollRequest;
 use agent_core::{adapters, domain, reqwest, WgKeypair};
 use serde::{Deserialize, Serialize};
-use tauri::{Manager, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 
 /// Default control plane; override with ANKAYMA_CONTROL_PLANE for dev/staging.
 const DEFAULT_CONTROL_PLANE: &str = "https://cp.ankayma.com";
@@ -28,8 +33,9 @@ struct EnrolledNode {
     public_b64: String,
     node_id: String,
     overlay_ip: String,
-    /// Peers to dial once the tunnel is up (privileged daemon). Not read yet. [A]
-    #[allow(dead_code)]
+    /// Peers to dial once the tunnel is up (privileged daemon). Shown in the
+    /// tray "Network Devices" submenu (desktop only).
+    #[cfg_attr(not(desktop), allow(dead_code))]
     peers: Vec<domain::PeerInfo>,
 }
 
@@ -38,6 +44,8 @@ struct AppState {
     http: reqwest::Client,
     base_url: String,
     session: Mutex<Option<String>>,
+    /// Signed-in account email, surfaced in the tray menu. None when signed out.
+    email: Mutex<Option<String>>,
     node: Mutex<Option<EnrolledNode>>,
 }
 
@@ -49,6 +57,7 @@ impl AppState {
             http: reqwest::Client::new(),
             base_url,
             session: Mutex::new(None),
+            email: Mutex::new(None),
             node: Mutex::new(None),
         }
     }
@@ -59,6 +68,10 @@ impl AppState {
 
     fn set_token(&self, tok: Option<String>) {
         *self.session.lock().expect("session lock poisoned") = tok;
+    }
+
+    fn set_email(&self, email: Option<String>) {
+        *self.email.lock().expect("email lock poisoned") = email;
     }
 }
 
@@ -135,21 +148,82 @@ pub struct PathProof {
     pub peers: Vec<PathPeer>,
 }
 
+// --- Core helpers (shared by #[tauri::command]s and the tray) ---
+
+/// The live connection status derived from AppState — single source of truth
+/// for both the window UI and the tray menu.
+fn current_connection(state: &AppState) -> ConnectionState {
+    match &*state.node.lock().expect("node lock poisoned") {
+        Some(n) => ConnectionState::Connected {
+            node_id: n.node_id.clone(),
+            endpoint: n.overlay_ip.clone(),
+        },
+        None => ConnectionState::Disconnected,
+    }
+}
+
+/// Real control-plane enrollment. Idempotent: a no-op if already enrolled.
+async fn connect_inner(state: &AppState) -> Result<(), String> {
+    let tok = state.token().ok_or("not signed in")?;
+    if state.node.lock().expect("node lock poisoned").is_some() {
+        return Ok(());
+    }
+    // Real flow: fresh WireGuard keypair → enroll → overlay IP + peers.
+    let kp = WgKeypair::generate();
+    let req = EnrollRequest {
+        public_key: kp.public_b64.clone(),
+        hostname: device_hostname(),
+        endpoint: None,
+    };
+    let resp = adapters::enroll(&state.http, &state.base_url, &tok, &req)
+        .await
+        .map_err(|e| e.to_string())?;
+    *state.node.lock().expect("node lock poisoned") = Some(EnrolledNode {
+        private_b64: kp.private_b64,
+        public_b64: kp.public_b64,
+        node_id: resp.node_id,
+        overlay_ip: resp.overlay_ip,
+        peers: resp.peers,
+    });
+    // [A] data path next: hand private_b64 + peers to the privileged daemon to
+    // bring up a utun device and route packets through boringtun.
+    Ok(())
+}
+
+fn disconnect_inner(state: &AppState) {
+    *state.node.lock().expect("node lock poisoned") = None;
+}
+
+/// Propagate a connection/auth change: notify the window (so its store updates
+/// even when the change came from the tray) and refresh the tray menu.
+fn apply_connection_change(app: &AppHandle) {
+    let conn = current_connection(&app.state::<AppState>());
+    let _ = app.emit("connection-changed", conn);
+    #[cfg(desktop)]
+    update_tray(app);
+}
+
 // --- Commands ---
 
 #[tauri::command]
-async fn check_auth_state(state: State<'_, AppState>) -> Result<AuthState, String> {
-    match state.token() {
-        None => Ok(AuthState::Unauthenticated),
+async fn check_auth_state(app: AppHandle, state: State<'_, AppState>) -> Result<AuthState, String> {
+    let result = match state.token() {
+        None => AuthState::Unauthenticated,
         // Re-validate the stored token against the control plane.
         Some(tok) => match adapters::session_info(&state.http, &state.base_url, &tok).await {
-            Ok(s) => Ok(AuthState::Authenticated { user: s.into() }),
+            Ok(s) => {
+                state.set_email(Some(s.email.clone()));
+                AuthState::Authenticated { user: s.into() }
+            }
             Err(_) => {
                 state.set_token(None);
-                Ok(AuthState::Unauthenticated)
+                state.set_email(None);
+                AuthState::Unauthenticated
             }
         },
-    }
+    };
+    apply_connection_change(&app);
+    Ok(result)
 }
 
 #[tauri::command]
@@ -162,6 +236,7 @@ async fn sign_in_github(state: State<'_, AppState>) -> Result<(), String> {
 
 #[tauri::command]
 async fn submit_session_token(
+    app: AppHandle,
     token: String,
     state: State<'_, AppState>,
 ) -> Result<AuthState, String> {
@@ -173,13 +248,19 @@ async fn submit_session_token(
     let info = adapters::session_info(&state.http, &state.base_url, &token)
         .await
         .map_err(|e| e.to_string())?;
+    state.set_email(Some(info.email.clone()));
     state.set_token(Some(token));
-    Ok(AuthState::Authenticated { user: info.into() })
+    let user: User = info.into();
+    apply_connection_change(&app);
+    Ok(AuthState::Authenticated { user })
 }
 
 #[tauri::command]
-async fn sign_out(state: State<'_, AppState>) -> Result<(), String> {
+async fn sign_out(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
     state.set_token(None);
+    state.set_email(None);
+    disconnect_inner(&state);
+    apply_connection_change(&app);
     Ok(())
 }
 
@@ -208,47 +289,20 @@ fn device_hostname() -> String {
 
 #[tauri::command]
 async fn get_connection_status(state: State<'_, AppState>) -> Result<ConnectionState, String> {
-    Ok(match &*state.node.lock().expect("node lock poisoned") {
-        Some(n) => ConnectionState::Connected {
-            node_id: n.node_id.clone(),
-            endpoint: n.overlay_ip.clone(),
-        },
-        None => ConnectionState::Disconnected,
-    })
+    Ok(current_connection(&state))
 }
 
 #[tauri::command]
-async fn connect(state: State<'_, AppState>) -> Result<(), String> {
-    let tok = state.token().ok_or("not signed in")?;
-    // Idempotent: if already enrolled, connect is a no-op.
-    if state.node.lock().expect("node lock poisoned").is_some() {
-        return Ok(());
-    }
-    // Real flow: fresh WireGuard keypair → enroll → overlay IP + peers.
-    let kp = WgKeypair::generate();
-    let req = EnrollRequest {
-        public_key: kp.public_b64.clone(),
-        hostname: device_hostname(),
-        endpoint: None,
-    };
-    let resp = adapters::enroll(&state.http, &state.base_url, &tok, &req)
-        .await
-        .map_err(|e| e.to_string())?;
-    *state.node.lock().expect("node lock poisoned") = Some(EnrolledNode {
-        private_b64: kp.private_b64,
-        public_b64: kp.public_b64,
-        node_id: resp.node_id,
-        overlay_ip: resp.overlay_ip,
-        peers: resp.peers,
-    });
-    // [A] data path next: hand private_b64 + peers to the privileged daemon to
-    // bring up a utun device and route packets through boringtun.
+async fn connect(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
+    connect_inner(&state).await?;
+    apply_connection_change(&app);
     Ok(())
 }
 
 #[tauri::command]
-async fn disconnect(state: State<'_, AppState>) -> Result<(), String> {
-    *state.node.lock().expect("node lock poisoned") = None;
+async fn disconnect(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
+    disconnect_inner(&state);
+    apply_connection_change(&app);
     Ok(())
 }
 
@@ -323,6 +377,187 @@ async fn open_stripe_checkout() -> Result<(), String> {
     Err("Not yet implemented — Stripe pending (milestone 1.3)".into())
 }
 
+// --- macOS menu-bar tray (desktop only) ---
+
+/// Build the tray dropdown from the current AppState. Rebuilt on every state
+/// change so status text, account, device IP and the peer list stay live.
+/// [T:tauri@2.11-tray] [T:tauri@2.11-menu]
+#[cfg(desktop)]
+fn build_tray_menu(
+    app: &AppHandle,
+    state: &AppState,
+) -> tauri::Result<tauri::menu::Menu<tauri::Wry>> {
+    use tauri::menu::{IsMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu};
+
+    let conn = current_connection(state);
+    let connected = matches!(conn, ConnectionState::Connected { .. });
+    let status_text = match conn {
+        ConnectionState::Connected { .. } => "● Connected",
+        ConnectionState::Connecting => "Connecting…",
+        ConnectionState::Disconnected => "○ Disconnected",
+    };
+    let status = MenuItem::with_id(app, "status", status_text, false, None::<&str>)?;
+    let toggle = MenuItem::with_id(
+        app,
+        "toggle",
+        if connected { "Disconnect" } else { "Connect" },
+        true,
+        None::<&str>,
+    )?;
+
+    let email = state.email.lock().expect("email lock poisoned").clone();
+    let account = MenuItem::with_id(
+        app,
+        "account",
+        email.as_deref().unwrap_or("Not signed in"),
+        false,
+        None::<&str>,
+    )?;
+
+    let (device_text, peers) = {
+        let node = state.node.lock().expect("node lock poisoned");
+        match &*node {
+            Some(n) => (
+                format!("This Device: {} ({})", device_hostname(), n.overlay_ip),
+                n.peers.clone(),
+            ),
+            None => (format!("This Device: {}", device_hostname()), Vec::new()),
+        }
+    };
+    let device = MenuItem::with_id(app, "device", device_text, false, None::<&str>)?;
+
+    // Network Devices submenu — one disabled entry per peer (hostname + IP).
+    let peer_items: Vec<MenuItem<tauri::Wry>> = if peers.is_empty() {
+        vec![MenuItem::with_id(
+            app,
+            "no-peers",
+            "No devices",
+            false,
+            None::<&str>,
+        )?]
+    } else {
+        peers
+            .iter()
+            .enumerate()
+            .map(|(i, p)| {
+                MenuItem::with_id(
+                    app,
+                    format!("peer-{i}"),
+                    format!("{} ({})", p.hostname, p.overlay_ip),
+                    false,
+                    None::<&str>,
+                )
+            })
+            .collect::<tauri::Result<Vec<_>>>()?
+    };
+    let peer_refs: Vec<&dyn IsMenuItem<tauri::Wry>> = peer_items
+        .iter()
+        .map(|m| m as &dyn IsMenuItem<tauri::Wry>)
+        .collect();
+    let netdev = Submenu::with_id_and_items(app, "netdev", "Network Devices", true, &peer_refs)?;
+
+    let settings = MenuItem::with_id(app, "settings", "Settings", true, None::<&str>)?;
+    let open = MenuItem::with_id(app, "open", "Open Ankayma", true, None::<&str>)?;
+    let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
+    let s1 = PredefinedMenuItem::separator(app)?;
+    let s2 = PredefinedMenuItem::separator(app)?;
+    let s3 = PredefinedMenuItem::separator(app)?;
+
+    let items: Vec<&dyn IsMenuItem<tauri::Wry>> = vec![
+        &status, &toggle, &s1, &account, &device, &netdev, &s2, &settings, &open, &s3, &quit,
+    ];
+    Menu::with_items(app, &items)
+}
+
+/// A 32×32 RGBA status dot for the menu bar: green when connected, dim gray
+/// otherwise. Drawn in code so no extra icon assets are needed. [A] a template
+/// (auto light/dark) icon is a later refinement.
+#[cfg(desktop)]
+fn status_icon(connected: bool) -> tauri::image::Image<'static> {
+    const N: u32 = 32;
+    let (r, g, b) = if connected {
+        (0x22, 0xc5, 0x5e) // --c-success green
+    } else {
+        (0x80, 0x80, 0x90) // dim gray
+    };
+    let center = (N as f32 - 1.0) / 2.0;
+    let radius = N as f32 * 0.40;
+    let mut rgba = vec![0u8; (N * N * 4) as usize];
+    for y in 0..N {
+        for x in 0..N {
+            let dx = x as f32 - center;
+            let dy = y as f32 - center;
+            let dist = (dx * dx + dy * dy).sqrt();
+            // 1px anti-aliased edge so the dot isn't jagged in the menu bar.
+            let alpha = (radius - dist + 0.5).clamp(0.0, 1.0);
+            let i = ((y * N + x) * 4) as usize;
+            rgba[i] = r;
+            rgba[i + 1] = g;
+            rgba[i + 2] = b;
+            rgba[i + 3] = (alpha * 255.0) as u8;
+        }
+    }
+    tauri::image::Image::new_owned(rgba, N, N)
+}
+
+/// Rebuild the tray menu and icon in place after a state change.
+#[cfg(desktop)]
+fn update_tray(app: &AppHandle) {
+    if let Some(tray) = app.tray_by_id("main") {
+        let state = app.state::<AppState>();
+        let connected = matches!(
+            current_connection(&state),
+            ConnectionState::Connected { .. }
+        );
+        match build_tray_menu(app, &state) {
+            Ok(menu) => {
+                let _ = tray.set_menu(Some(menu));
+            }
+            Err(e) => log::error!("tray menu rebuild failed: {e}"),
+        }
+        let _ = tray.set_icon(Some(status_icon(connected)));
+    }
+}
+
+#[cfg(desktop)]
+fn show_main_window(app: &AppHandle) {
+    if let Some(w) = app.get_webview_window("main") {
+        let _ = w.show();
+        let _ = w.set_focus();
+    }
+}
+
+/// Handle a tray menu click. Connect/disconnect run on the async runtime since
+/// enrollment is a network call.
+#[cfg(desktop)]
+fn handle_tray_menu(app: &AppHandle, event: tauri::menu::MenuEvent) {
+    match event.id().as_ref() {
+        "toggle" => {
+            let app = app.clone();
+            tauri::async_runtime::spawn(async move {
+                let state = app.state::<AppState>();
+                let connected = matches!(
+                    current_connection(&state),
+                    ConnectionState::Connected { .. }
+                );
+                if connected {
+                    disconnect_inner(&state);
+                } else if let Err(e) = connect_inner(&state).await {
+                    log::error!("tray connect failed: {e}");
+                }
+                apply_connection_change(&app);
+            });
+        }
+        "settings" => {
+            show_main_window(app);
+            let _ = app.emit("tray-navigate", "/settings");
+        }
+        "open" => show_main_window(app),
+        "quit" => app.exit(0),
+        _ => {}
+    }
+}
+
 // --- App entry point ---
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -330,6 +565,29 @@ pub fn run() {
     tauri::Builder::default()
         .setup(|app| {
             app.manage(AppState::new());
+
+            #[cfg(desktop)]
+            {
+                use tauri::tray::TrayIconBuilder;
+                let handle = app.handle().clone();
+                let st = handle.state::<AppState>();
+                let menu = build_tray_menu(&handle, &st)?;
+                let connected =
+                    matches!(current_connection(&st), ConnectionState::Connected { .. });
+                TrayIconBuilder::with_id("main")
+                    .icon(status_icon(connected))
+                    .tooltip("Ankayma")
+                    .menu(&menu)
+                    .show_menu_on_left_click(true)
+                    .on_menu_event(handle_tray_menu)
+                    .build(&handle)?;
+            }
+
+            // macOS: menu-bar app — hide the Dock icon. The window still opens
+            // from the tray "Open Ankayma" item. [T:tauri@2.11-ActivationPolicy]
+            #[cfg(target_os = "macos")]
+            app.set_activation_policy(tauri::ActivationPolicy::Accessory);
+
             if cfg!(debug_assertions) {
                 app.handle().plugin(
                     tauri_plugin_log::Builder::default()
@@ -338,6 +596,15 @@ pub fn run() {
                 )?;
             }
             Ok(())
+        })
+        .on_window_event(|_window, _event| {
+            // Close-to-tray: the window hides instead of quitting; the app keeps
+            // running in the menu bar. [T:tauri@2.11-WindowEvent]
+            #[cfg(desktop)]
+            if let tauri::WindowEvent::CloseRequested { api, .. } = _event {
+                api.prevent_close();
+                let _ = _window.hide();
+            }
         })
         .invoke_handler(tauri::generate_handler![
             check_auth_state,

@@ -6,15 +6,18 @@
   "build": {
     "frontendDist": "../../frontend/app-gui/build",
     "devUrl": "http://localhost:5173",
-    "beforeDevCommand": "cd ../../frontend/app-gui && npm run dev",
-    "beforeBuildCommand": "cd ../../frontend/app-gui && npm run build"
+    "beforeDevCommand": "cd ../frontend/app-gui && npm run dev",
+    "beforeBuildCommand": "cd ../frontend/app-gui && npm run build"
   },
   "app": {
     "windows": [
       {
         "title": "Ankayma",
-        "width": 390,
-        "height": 844,
+        "width": 1040,
+        "height": 720,
+        "minWidth": 860,
+        "minHeight": 600,
+        "center": true,
         "resizable": true,
         "fullscreen": false
       }
