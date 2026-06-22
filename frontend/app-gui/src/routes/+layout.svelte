@@ -5,7 +5,7 @@
 	import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 	import { auth, connection, quota } from '$lib/stores';
 	import { checkAuthState, getConnectionStatus, getQuota } from '$lib/tauri';
-	import type { ConnectionState } from '$lib/types';
+	import type { AuthState, ConnectionState } from '$lib/types';
 
 	let { children } = $props();
 
@@ -36,7 +36,15 @@
 		try {
 			unlisteners.push(
 				await listen<ConnectionState>('connection-changed', (e) => connection.set(e.payload)),
-				await listen<string>('tray-navigate', (e) => goto(e.payload))
+				await listen<string>('tray-navigate', (e) => goto(e.payload)),
+				// Deep-link sign-in: the browser opened `ankayma://auth?token=…`,
+				// the Rust side validated it and emits the auth state. Land on the
+				// dashboard regardless of which screen we're on. (welcome page keeps
+				// the manual paste flow as a fallback.)
+				await listen<AuthState>('signed-in', (e) => {
+					auth.set(e.payload);
+					goto('/dashboard');
+				})
 			);
 		} catch {
 			// Tauri events unavailable — ignore
@@ -57,10 +65,6 @@
 	}
 </script>
 
-<svelte:head>
-	<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-</svelte:head>
-
 <div class="app" class:with-sidebar={signedIn}>
 	{#if signedIn}
 		<aside class="sidebar">
@@ -72,6 +76,10 @@
 				<button class="nav-item" class:active={active('/dashboard')} onclick={() => goto('/dashboard')}>
 					<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M3 12l9-9 9 9M5 10v10h14V10"/></svg>
 					<span>Dashboard</span>
+				</button>
+				<button class="nav-item" class:active={active('/devices')} onclick={() => goto('/devices')}>
+					<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="2" y="4" width="20" height="14" rx="2"/><path d="M8 21h8M12 18v3"/></svg>
+					<span>Devices</span>
 				</button>
 				<button class="nav-item" class:active={active('/policies')} onclick={() => goto('/policies')}>
 					<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 17l6-6-6-6M12 19h8"/></svg>
@@ -129,6 +137,14 @@
 		--safe-bottom: env(safe-area-inset-bottom, 0px);
 	}
 
+	:global(html), :global(body) {
+		width: 100%;
+		max-width: 100%;
+		/* Never let a stray wide child create a horizontal scroll on mobile —
+		   keeps the narrow webview from rendering content past the right edge. */
+		overflow-x: hidden;
+	}
+
 	:global(body) {
 		background: var(--c-bg);
 		color: var(--c-text);
@@ -156,6 +172,9 @@
 	/* Mobile-first: single column, sidebar hidden. */
 	.app {
 		min-height: 100dvh;
+		width: 100%;
+		max-width: 100%;
+		min-width: 0;
 		display: flex;
 		flex-direction: column;
 	}

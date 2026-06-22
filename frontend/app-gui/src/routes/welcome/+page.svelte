@@ -15,11 +15,21 @@
 		try {
 			await signInGithub(); // opens the system browser to control-plane OAuth
 			step = 'paste';
-		} catch (e) {
-			error = e instanceof Error ? e.message : 'Sign-in failed';
+		} catch {
+			// No browser here (iOS simulator / headless): fall back to manual token
+			// entry. Authorize at cp.ankayma.com/auth/github on any device where a
+			// browser works, then paste the session token shown there.
+			error = 'Could not open a browser here — paste a session token instead.';
+			step = 'paste';
 		} finally {
 			signing_in = false;
 		}
+	}
+
+	// Skip the browser entirely (iOS sim / headless): go straight to token entry.
+	function enterTokenManually() {
+		error = null;
+		step = 'paste';
 	}
 
 	async function handleSubmitToken() {
@@ -89,8 +99,15 @@
 					Continue with GitHub
 				{/if}
 			</button>
+			<button class="btn-link" onclick={enterTokenManually} disabled={signing_in}>
+				Enter a token instead
+			</button>
 		{:else}
-			<p class="hint">Authorize in your browser, then paste the session token shown there.</p>
+			<p class="hint">
+				Authorize at <strong>cp.ankayma.com/auth/github</strong> in any browser (e.g. on
+				your Mac), then paste the session token shown there. Works for the iOS simulator
+				and headless devices.
+			</p>
 			<input
 				class="token-input"
 				type="text"

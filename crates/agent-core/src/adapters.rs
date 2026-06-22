@@ -111,9 +111,8 @@ pub async fn enroll(
         .send()
         .await
         .map_err(|e| ApiError::Transport(e.to_string()))?;
-    let status = resp.status();
-    if !status.is_success() {
-        return Err(ApiError::Status(status.as_u16()));
+    if !resp.status().is_success() {
+        return Err(status_error(resp).await);
     }
     resp.json::<EnrollResponse>()
         .await
@@ -170,11 +169,41 @@ pub async fn agent_enroll(
 /// Map a non-2xx response to an `ApiError`, surfacing the control plane's `error`
 /// field verbatim when present (so safe-by-default 400/409 reasons reach the user).
 async fn expect_ok(resp: reqwest::Response) -> Result<(), ApiError> {
-    let status = resp.status();
-    if status.is_success() {
+    if resp.status().is_success() {
         return Ok(());
     }
+    Err(status_error(resp).await)
+}
+
+/// Turn a non-2xx response into an `ApiError`, surfacing the control plane's
+/// `error` message verbatim when present (so the GUI shows the real reason —
+/// e.g. "device quota reached" on enrollment), else falling back to the status.
+async fn status_error(resp: reqwest::Response) -> ApiError {
+    let code = resp.status().as_u16();
+    #[derive(serde::Deserialize)]
+    struct ErrBody {
+        error: Option<String>,
+    }
+    match resp.json::<ErrBody>().await {
+        Ok(ErrBody { error: Some(m) }) if !m.trim().is_empty() => ApiError::Server {
+            status: code,
+            message: m,
+        },
+        _ => ApiError::Status(code),
+    }
+}
+
+/// Like `expect_ok` but returns the raw success body (for endpoints whose exact
+/// response shape the client does not model — the caller surfaces it verbatim).
+async fn read_ok_text(resp: reqwest::Response) -> Result<String, ApiError> {
+    let status = resp.status();
     let code = status.as_u16();
+    if status.is_success() {
+        return resp
+            .text()
+            .await
+            .map_err(|e| ApiError::Decode(e.to_string()));
+    }
     #[derive(serde::Deserialize)]
     struct ErrBody {
         error: Option<String>,
@@ -186,6 +215,41 @@ async fn expect_ok(resp: reqwest::Response) -> Result<(), ApiError> {
         }),
         _ => Err(ApiError::Status(code)),
     }
+}
+
+/// Mint a single-use agent identity token (F-4) for a headless / non-human actor.
+/// `POST /api/v1/agents/token` (session-authed). Returns the control plane's raw
+/// JSON body (the mint token + receipt); the redeem half is `agent_enroll`
+/// (`agent enroll-identity`). Raw because the client does not model the mint
+/// response shape — the owner copies the token out of it. `[T:Part C §H.3.3 / F-4]`
+pub async fn mint_agent_token(
+    http: &reqwest::Client,
+    base_url: &str,
+    session_token: &str,
+    agent_name: &str,
+    scope: Option<&str>,
+    ttl_seconds: Option<u64>,
+) -> Result<String, ApiError> {
+    #[derive(serde::Serialize)]
+    struct Req<'a> {
+        agent_name: &'a str,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        scope: Option<&'a str>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        ttl_seconds: Option<u64>,
+    }
+    let resp = http
+        .post(url(base_url, "/api/v1/agents/token"))
+        .bearer_auth(session_token)
+        .json(&Req {
+            agent_name,
+            scope,
+            ttl_seconds,
+        })
+        .send()
+        .await
+        .map_err(|e| ApiError::Transport(e.to_string()))?;
+    read_ok_text(resp).await
 }
 
 /// List the tenant's CI/CD deploy policies. `GET /api/v1/ci/policy`. `[T:Part C §H.3.3]`

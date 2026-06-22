@@ -25,7 +25,19 @@ log = "0.4"
 # (tauri::image::Image), so no image-format feature is needed. [T:A.1.21] pinned.
 tauri = { version = "2.11.2", features = ["tray-icon"] }
 tauri-plugin-log = "2"
+# Deep-link sign-in: the browser "Open Ankayma" button opens `ankayma://auth?token=…`
+# straight into the app instead of copy/paste. single-instance focuses the running
+# app (and forwards the URL on Windows/Linux) instead of launching a 2nd copy.
+# See docs/auth-deeplink-signin-spec.md.
+tauri-plugin-deep-link = "2"
+# Parse the `ankayma://auth?token=…` deep-link URL. Same 2.x as the deep-link
+# plugin's re-export (cargo unifies), so the types line up.
+url = "2"
 # Control-plane calls go through agent-core (A.1.1). `open` launches the system
 # browser for the GitHub OAuth start. [T:A.1.21]
 agent-core = { workspace = true }
 open = "5"
+
+# single-instance is desktop-only (the crate has no mobile target).
+[target.'cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))'.dependencies]
+tauri-plugin-single-instance = { version = "2", features = ["deep-link"] }

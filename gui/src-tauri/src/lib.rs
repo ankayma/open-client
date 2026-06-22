@@ -234,16 +234,16 @@ async fn sign_in_github(state: State<'_, AppState>) -> Result<(), String> {
     open::that(&url).map_err(|e| format!("could not open browser: {e}"))
 }
 
-#[tauri::command]
-async fn submit_session_token(
-    app: AppHandle,
-    token: String,
-    state: State<'_, AppState>,
-) -> Result<AuthState, String> {
+/// Validate a session token against the control plane and, if good, store it +
+/// refresh the UI/tray. Shared by the manual paste path (`submit_session_token`)
+/// and the `ankayma://` deep-link path so both behave identically.
+/// See docs/auth-deeplink-signin-spec.md.
+async fn apply_session_token(app: &AppHandle, token: String) -> Result<User, String> {
     let token = token.trim().to_string();
     if token.is_empty() {
         return Err("session token is empty".into());
     }
+    let state = app.state::<AppState>();
     // Validate by fetching the session; only store the token if it works.
     let info = adapters::session_info(&state.http, &state.base_url, &token)
         .await
@@ -251,8 +251,53 @@ async fn submit_session_token(
     state.set_email(Some(info.email.clone()));
     state.set_token(Some(token));
     let user: User = info.into();
-    apply_connection_change(&app);
+    apply_connection_change(app);
+    Ok(user)
+}
+
+#[tauri::command]
+async fn submit_session_token(app: AppHandle, token: String) -> Result<AuthState, String> {
+    let user = apply_session_token(&app, token).await?;
     Ok(AuthState::Authenticated { user })
+}
+
+/// Pull the `token` out of a `ankayma://auth?token=…` deep link. Returns None
+/// for any other scheme or a missing/empty token. (Generic over the URL type so
+/// we don't take a direct dependency on the `url` crate's exact version.)
+fn token_from_deep_link(url: &url::Url) -> Option<String> {
+    if url.scheme() != "ankayma" {
+        return None;
+    }
+    url.query_pairs()
+        .find(|(k, _)| k == "token")
+        .map(|(_, v)| v.into_owned())
+        .filter(|t| !t.is_empty())
+}
+
+/// Handle one batch of deep-link URLs: validate the token, sign in, focus the
+/// window, and tell the frontend (`signed-in`) so it navigates to the dashboard.
+fn handle_deep_links(app: &AppHandle, urls: Vec<url::Url>) {
+    for url in urls {
+        let Some(token) = token_from_deep_link(&url) else {
+            continue;
+        };
+        let app = app.clone();
+        tauri::async_runtime::spawn(async move {
+            match apply_session_token(&app, token).await {
+                Ok(user) => {
+                    log::info!("deep-link sign-in succeeded (tier {:?})", user.tier);
+                    #[cfg(desktop)]
+                    show_main_window(&app);
+                    let _ = app.emit("signed-in", AuthState::Authenticated { user });
+                }
+                Err(e) => {
+                    // Token never written to the log — only the failure reason.
+                    log::error!("deep-link sign-in failed: {e}");
+                    let _ = app.emit("signin-error", e);
+                }
+            }
+        });
+    }
 }
 
 #[tauri::command]
@@ -619,9 +664,42 @@ fn handle_tray_menu(app: &AppHandle, event: tauri::menu::MenuEvent) {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    #[allow(unused_mut)]
+    let mut builder = tauri::Builder::default();
+
+    // single-instance (desktop only) MUST be the first plugin: when the app is
+    // already running and the user clicks `ankayma://…`, focus the live window
+    // instead of spawning a 2nd copy. On Windows/Linux the URL arrives in argv
+    // and the `deep-link` feature routes it to on_open_url; on macOS the OS
+    // delivers it to the running instance directly.
+    #[cfg(desktop)]
+    {
+        builder = builder.plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+            show_main_window(app);
+        }));
+    }
+
+    builder
+        .plugin(tauri_plugin_deep_link::init())
         .setup(|app| {
             app.manage(AppState::new());
+
+            // Route `ankayma://auth?token=…` straight into sign-in (no copy/paste).
+            {
+                use tauri_plugin_deep_link::DeepLinkExt;
+                let handle = app.handle().clone();
+                app.deep_link()
+                    .on_open_url(move |event| handle_deep_links(&handle, event.urls()));
+                // Cold start: the app may have been launched *by* the deep link
+                // (URL already consumed before the handler was attached).
+                if let Ok(Some(urls)) = app.deep_link().get_current() {
+                    handle_deep_links(&app.handle().clone(), urls);
+                }
+                // Dev only (unbundled): register the scheme at runtime where the
+                // OS supports it. macOS/iOS register via the bundle Info.plist.
+                #[cfg(any(target_os = "linux", target_os = "windows"))]
+                let _ = app.deep_link().register_all();
+            }
 
             #[cfg(desktop)]
             {
@@ -640,10 +718,11 @@ pub fn run() {
                     .build(&handle)?;
             }
 
-            // macOS: menu-bar app — hide the Dock icon. The window still opens
-            // from the tray "Open Ankayma" item. [T:tauri@2.11-ActivationPolicy]
+            // macOS: show the Dock icon (Regular) in addition to the menu-bar
+            // tray. The window opens from the Dock icon or the tray "Open
+            // Ankayma" item. [T:tauri@2.11-ActivationPolicy]
             #[cfg(target_os = "macos")]
-            app.set_activation_policy(tauri::ActivationPolicy::Accessory);
+            app.set_activation_policy(tauri::ActivationPolicy::Regular);
 
             if cfg!(debug_assertions) {
                 app.handle().plugin(

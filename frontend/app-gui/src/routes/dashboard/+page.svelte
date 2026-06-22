@@ -5,6 +5,7 @@
 	import type { PathProof } from '$lib/types';
 
 	let toggling = $state(false);
+	let connectError = $state<string | null>(null);
 	let proof = $state<PathProof | null>(null);
 	let proving = $state(false);
 
@@ -23,6 +24,7 @@
 
 	async function toggleConnection() {
 		toggling = true;
+		connectError = null;
 		try {
 			const conn = $connection;
 			if (conn.status === 'connected') {
@@ -36,7 +38,9 @@
 			}
 		} catch (e) {
 			connection.set({ status: 'disconnected' });
-			console.error(e);
+			// Surface the control plane's reason (e.g. device quota reached) instead
+			// of failing silently — on mobile there's no console to inspect.
+			connectError = e instanceof Error ? e.message : String(e);
 		} finally {
 			toggling = false;
 		}
@@ -109,6 +113,10 @@
 				<path d="M13 3h-2v10h2V3zm4.83 2.17l-1.42 1.42A6.92 6.92 0 0119 12c0 3.87-3.13 7-7 7A7 7 0 015 12c0-1.68.59-3.22 1.58-4.42L5.17 6.17A8.932 8.932 0 003 12c0 4.97 4.03 9 9 9s9-4.03 9-9c0-2.74-1.23-5.18-3.17-6.83z"/>
 			</svg>
 		</button>
+
+		{#if connectError}
+			<p class="connect-error">{connectError}</p>
+		{/if}
 	</section>
 
 	<!-- [F-5 "Prove it"] The differentiator: prove the vendor is not on your data path. -->
@@ -193,6 +201,15 @@
 
 	{#if $auth.status === 'authenticated'}
 		<section class="quick-actions">
+			<button class="quick-item" onclick={() => goto('/devices')}>
+				<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+					<rect x="2" y="4" width="20" height="14" rx="2"/><path d="M8 21h8M12 18v3"/>
+				</svg>
+				<span>Network devices</span>
+				<svg class="arrow" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+					<path d="M9 18l6-6-6-6"/>
+				</svg>
+			</button>
 			<button class="quick-item" onclick={() => goto('/policies')}>
 				<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
 					<path d="M4 17l6-6-6-6M12 19h8"/>
@@ -333,6 +350,8 @@
 		font-size: 12px;
 		color: var(--c-text-dim);
 		font-family: 'SF Mono', 'Fira Code', monospace;
+		overflow-wrap: anywhere;
+		max-width: 100%;
 	}
 
 	.toggle-btn {
@@ -361,6 +380,18 @@
 	.toggle-btn:disabled {
 		opacity: 0.5;
 		cursor: not-allowed;
+	}
+
+	.connect-error {
+		font-size: 13px;
+		color: var(--c-danger);
+		background: color-mix(in srgb, var(--c-danger) 10%, transparent);
+		border: 1px solid color-mix(in srgb, var(--c-danger) 30%, transparent);
+		padding: 10px 14px;
+		border-radius: 8px;
+		text-align: center;
+		max-width: 100%;
+		overflow-wrap: anywhere;
 	}
 
 	.quota-card {

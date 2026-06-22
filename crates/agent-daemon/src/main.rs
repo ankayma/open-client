@@ -14,6 +14,7 @@
 //! `<subject-prefix>.key.escrow` — vendor recovers via subscribe.
 
 mod agent_identity;
+mod agent_token;
 mod ci_deploy;
 mod ci_policy;
 mod netstack;
@@ -37,6 +38,7 @@ async fn main() -> Result<()> {
         Some("up") => up::run(&args[1..]).await,
         Some("ci-deploy") => ci_deploy::run(&args[1..]).await,
         Some("ci-policy") => ci_policy::run(&args[1..]).await,
+        Some("agent-token") => agent_token::run(&args[1..]).await,
         Some("enroll-identity") => agent_identity::run(&args[1..]).await,
         _ => run_gate(args).await,
     }
