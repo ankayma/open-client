@@ -162,13 +162,54 @@ fn current_connection(state: &AppState) -> ConnectionState {
     }
 }
 
-/// Real control-plane enrollment. Idempotent: a no-op if already enrolled.
+/// Reuse the persisted identity from the handoff file (~/.ankayma/agent.json) —
+/// the SAME node the daemon uses — but only if it still exists server-side, so a
+/// GUI restart/reconnect doesn't enroll a duplicate node. Returns None when there
+/// is no valid file or the stored node was removed (→ caller enrolls fresh).
+async fn load_handoff_node(state: &AppState, tok: &str) -> Option<EnrolledNode> {
+    let home = std::env::var("HOME").ok()?;
+    let path = std::path::Path::new(&home).join(".ankayma/agent.json");
+    let bytes = std::fs::read(&path).ok()?;
+    #[derive(serde::Deserialize)]
+    struct Stored {
+        private_b64: String,
+        public_b64: String,
+        node_id: String,
+        overlay_ip: String,
+    }
+    let s: Stored = serde_json::from_slice(&bytes).ok()?;
+    let peers = adapters::peers(&state.http, &state.base_url, tok).await.ok()?;
+    // The stored node must still be in the tenant roster (not deleted server-side),
+    // else fall through to a fresh enroll instead of showing a ghost node.
+    if !peers.iter().any(|p| p.node_id == s.node_id) {
+        return None;
+    }
+    Some(EnrolledNode {
+        private_b64: s.private_b64,
+        public_b64: s.public_b64,
+        node_id: s.node_id,
+        overlay_ip: s.overlay_ip,
+        peers,
+    })
+}
+
+/// Real control-plane enrollment. Idempotent: reuses a persisted identity if one
+/// exists; a no-op if already enrolled in-process.
 async fn connect_inner(state: &AppState) -> Result<(), String> {
     let tok = state.token().ok_or("not signed in")?;
     if state.node.lock().expect("node lock poisoned").is_some() {
         return Ok(());
     }
-    // Real flow: fresh WireGuard keypair → enroll → overlay IP + peers.
+
+    // Reuse the persisted identity (the daemon's node) if it still exists — so a
+    // GUI restart/reconnect does NOT enroll a duplicate node. Only enroll fresh
+    // when there is no valid identity. [T:A.1.10]
+    if let Some(node) = load_handoff_node(state, &tok).await {
+        *state.node.lock().expect("node lock poisoned") = Some(node);
+        return Ok(());
+    }
+
+    // Fresh: new WireGuard keypair → enroll → overlay IP + peers.
     let kp = WgKeypair::generate();
     let req = EnrollRequest {
         public_key: kp.public_b64.clone(),
