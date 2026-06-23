@@ -19,6 +19,7 @@ mod ci_deploy;
 mod ci_policy;
 mod netstack;
 mod resolve;
+mod resolver;
 mod ssh;
 mod tun;
 mod up;

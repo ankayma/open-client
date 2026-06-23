@@ -167,11 +167,28 @@ pub(crate) async fn serve_dataplane(
     spawn_rx(fd, udp.clone(), peers.clone());
     spawn_timers(udp.clone(), peers.clone());
 
+    // [F-3] Private DNS for branded names while the overlay is up: resolve the
+    // tenant's `<name> → overlay_ip` table locally so a browser on this enrolled
+    // device just works on the name, direct over the overlay (A.1.1). Names follow
+    // the control plane's table → private-default + revoke come for free.
+    let resolver = crate::resolver::Resolver::new();
+    crate::resolver::serve(resolver.clone());
+    let resolver_zone =
+        match adapters::resolve_subdomains(&ctx.http, &ctx.control_plane, &ctx.token).await {
+            Ok(t) => {
+                resolver.set(resolve_entries(&t));
+                crate::resolver::install_scoped_resolver(&t.zone);
+                Some(t.zone)
+            }
+            Err(_) => None,
+        };
+
     // Keep the roster fresh: peers that enroll after us appear here.
     let refresh = {
         let (http, cp, token) = (ctx.http, ctx.control_plane, ctx.token);
         let (peers, index, udp) = (peers.clone(), index.clone(), udp.clone());
         let dev_name = dev_name.clone();
+        let resolver = resolver.clone();
         let (node_id, overlay_s, port) = (
             state.node_id.clone(),
             state.overlay_ip.clone(),
@@ -194,6 +211,10 @@ pub(crate) async fn serve_dataplane(
                         println!("discovered {added} new peer(s)");
                     }
                 }
+                // [F-3] Refresh the private-DNS table alongside the roster.
+                if let Ok(t) = adapters::resolve_subdomains(&http, &cp, &token).await {
+                    resolver.set(resolve_entries(&t));
+                }
                 // Heartbeat + fresh roster for the GUI status reader.
                 write_status(&node_id, &overlay_s, port, &peers);
             }
@@ -204,9 +225,22 @@ pub(crate) async fn serve_dataplane(
         _ = refresh => {}
         _ = tokio::signal::ctrl_c() => println!("\nshutting down."),
     }
-    // Tunnel down → remove the status file so the GUI shows "not up".
+    // Tunnel down → remove the status file + the scoped resolver so names stop
+    // resolving (the overlay they point to is gone).
     let _ = std::fs::remove_file(status_path());
+    if let Some(zone) = resolver_zone {
+        crate::resolver::remove_scoped_resolver(&zone);
+    }
     Ok(())
+}
+
+/// Map the control plane's resolve table into (fqdn → overlay address) entries,
+/// dropping any address that doesn't parse. `[T:F-3]`
+fn resolve_entries(t: &agent_core::domain::ResolveTable) -> Vec<(String, IpAddr)> {
+    t.names
+        .iter()
+        .filter_map(|n| n.overlay_ip.parse().ok().map(|ip| (n.fqdn.clone(), ip)))
+        .collect()
 }
 
 struct Config {
