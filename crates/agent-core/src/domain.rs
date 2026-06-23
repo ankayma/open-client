@@ -151,6 +151,46 @@ pub struct AgentReceipt {
     pub ledger_block_hash: String,
 }
 
+/// `POST /api/v1/ssh/session` request: open an identity-bound SSH session to one
+/// of the tenant's OWN mesh nodes. `[T:Part C §H.3.6.1 F-2]`
+#[derive(Debug, Clone, Serialize)]
+pub struct SshSessionRequest {
+    pub node_id: String,
+    /// Optional OS login; omitted → the local user. Server sanitizes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub login: Option<String>,
+}
+
+/// `POST /api/v1/ssh/session` response: the resolved overlay target + honest
+/// receipt of the ledger-anchored session. The CP never sees the SSH stream
+/// (A.1.1) — it only resolves the target and records that a session opened.
+#[derive(Debug, Clone, Deserialize)]
+pub struct SshSessionResponse {
+    pub overlay_ip: String,
+    #[serde(default)]
+    pub login: Option<String>,
+    #[serde(default)]
+    pub receipt: Option<SshSessionReceipt>,
+}
+
+/// Honest receipt of an opened SSH session (mirrors the control-plane shape, P.3).
+/// `[T:Part C §H.3.6.1 F-2 + A.1.3 + A.1.8]`
+#[derive(Debug, Clone, Deserialize)]
+pub struct SshSessionReceipt {
+    pub session_id: String,
+    pub node_id: String,
+    pub target: String,
+    #[serde(default)]
+    pub login: Option<String>,
+    pub identity_bound: bool,
+    pub bastion: bool,
+    pub static_key: bool,
+    pub session_recorded: bool,
+    pub anchor: String,
+    pub ledger_event: String,
+    pub ledger_block_hash: String,
+}
+
 /// A CI/CD deploy policy rule as returned by `GET /api/v1/ci/policy`. Tenant-scoped.
 /// `[T:Part C §H.3.3 / B.5.2]` `ref` and `environment` are the safe-by-default scope:
 /// exactly one is set (server enforces; client mirrors in UX). `target_hostname` is

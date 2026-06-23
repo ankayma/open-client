@@ -2,7 +2,8 @@
 
 use crate::domain::{
     AgentEnrollRequest, AgentEnrollResponse, CiDeployRequest, CiDeployResponse, CiPolicy,
-    CiPolicyReq, EnrollRequest, EnrollResponse, PeerInfo, Quota, SessionInfo,
+    CiPolicyReq, EnrollRequest, EnrollResponse, PeerInfo, Quota, SessionInfo, SshSessionRequest,
+    SshSessionResponse,
 };
 
 /// Errors from the control-plane HTTP client.
@@ -149,6 +150,32 @@ pub async fn issue_join_token(
     resp.json::<JoinTokenResponse>()
         .await
         .map(|r| r.url)
+        .map_err(|e| ApiError::Decode(e.to_string()))
+}
+
+/// Open an identity-bound SSH session to one of the tenant's OWN mesh nodes.
+/// `POST /api/v1/ssh/session` (session-authed). The control plane resolves the
+/// overlay target + anchors a connection-level `SshSessionOpened` event — it never
+/// sees the SSH stream (A.1.1). Returns the target + honest receipt; the caller
+/// execs `ssh <login>@<overlay_ip>`. `[T:Part C §H.3.6.1 F-2 + A.1.3 + A.1.8]`
+pub async fn open_ssh_session(
+    http: &reqwest::Client,
+    base_url: &str,
+    session_token: &str,
+    req: &SshSessionRequest,
+) -> Result<SshSessionResponse, ApiError> {
+    let resp = http
+        .post(url(base_url, "/api/v1/ssh/session"))
+        .bearer_auth(session_token)
+        .json(req)
+        .send()
+        .await
+        .map_err(|e| ApiError::Transport(e.to_string()))?;
+    if !resp.status().is_success() {
+        return Err(status_error(resp).await);
+    }
+    resp.json::<SshSessionResponse>()
+        .await
         .map_err(|e| ApiError::Decode(e.to_string()))
 }
 
