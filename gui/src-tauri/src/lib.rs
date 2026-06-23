@@ -401,9 +401,13 @@ async fn get_path_proof(state: State<'_, AppState>) -> Result<PathProof, String>
 }
 
 #[tauri::command]
-async fn create_join_link() -> Result<String, String> {
-    // [A] stub — POST /api/v1/enrollment/token (slice 4b)
-    Err("Not yet implemented — enrollment token pending".into())
+async fn create_join_link(state: State<'_, AppState>) -> Result<String, String> {
+    // Mint a single-use `ankayma://join?token=…` link via the control plane so a
+    // second device enrolls into this tenant (A.1.10/A.1.22). 15-min TTL.
+    let tok = state.token().ok_or("not signed in")?;
+    adapters::issue_join_token(&state.http, &state.base_url, &tok)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]

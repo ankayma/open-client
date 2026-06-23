@@ -6,11 +6,11 @@
 //! command over it. The control plane verifies the token (closed IP); this side
 //! only fetches + forwards it. `[T:A.1.4 golden rule]`
 //!
-//! [A] The github.com-hosted *userspace-only* path (no kernel TUN) plus NAT
-//! traversal / relay fallback is the next load-bearing slice — Part C [R] R3 #12,
-//! not yet live-tested. Today the tunnel reuses the same utun data plane as
-//! `agent up`, i.e. needs a self-hosted runner (or any host with TUN). The
-//! *secretless control channel* (token → ephemeral access) below is complete.
+//! The github.com-hosted *userspace-only* path (no kernel TUN) is wired via
+//! `netstack` (smoltcp + boringtun over a local SOCKS5 proxy) and was E2E-proven
+//! SaaS-runner→VPS, secretless (2026-06-21, T-0039). The remaining load-bearing
+//! slice is NAT traversal / relay fallback for targets behind strict NAT —
+//! Part C [R] R3 #12 `[A-p]`; direct peer-to-peer (reachable endpoint) works today.
 
 use agent_core::domain::CiDeployRequest;
 use agent_core::{adapters, oidc, reqwest, WgKeypair};

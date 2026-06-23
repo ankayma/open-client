@@ -119,6 +119,39 @@ pub async fn enroll(
         .map_err(|e| ApiError::Decode(e.to_string()))
 }
 
+/// Wire shape of `POST /api/v1/enrollment/token`: a single-use join link for
+/// enrolling a second device into the same tenant.
+#[derive(Debug, serde::Deserialize)]
+struct JoinTokenResponse {
+    url: String,
+    #[allow(dead_code)]
+    expires_in_seconds: u32,
+}
+
+/// Mint a short-lived join link (`ankayma://join?token=…`) so another device can
+/// enroll into this tenant without re-doing GitHub OAuth. `POST
+/// /api/v1/enrollment/token` (session-authed); the control plane sets the TTL
+/// (15 min). Returns the `ankayma://join?…` URL. `[T:A.1.10/A.1.22 enrollment]`
+pub async fn issue_join_token(
+    http: &reqwest::Client,
+    base_url: &str,
+    session_token: &str,
+) -> Result<String, ApiError> {
+    let resp = http
+        .post(url(base_url, "/api/v1/enrollment/token"))
+        .bearer_auth(session_token)
+        .send()
+        .await
+        .map_err(|e| ApiError::Transport(e.to_string()))?;
+    if !resp.status().is_success() {
+        return Err(status_error(resp).await);
+    }
+    resp.json::<JoinTokenResponse>()
+        .await
+        .map(|r| r.url)
+        .map_err(|e| ApiError::Decode(e.to_string()))
+}
+
 /// Exchange a CI OIDC token for ephemeral mesh access.
 /// `POST {base_url}/api/v1/ci/deploy`. `[T:Part C §H.3.3]`
 /// No bearer header: the OIDC token in the body IS the credential. The control
