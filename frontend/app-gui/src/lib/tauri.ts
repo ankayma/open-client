@@ -60,6 +60,20 @@ export async function stopDataplane(): Promise<void> {
 	return invoke('stop_dataplane');
 }
 
+// [slice 2] Live data-plane status from the daemon heartbeat file. `running` is
+// true only while the daemon is actually up (fresh heartbeat) — reflects the REAL
+// tunnel, not just enrollment.
+export interface DataplaneStatus {
+	running: boolean;
+	pid: number | null;
+	age_secs: number | null;
+	peers: { hostname: string; overlay_ip: string; endpoint: string | null }[];
+}
+
+export async function getDataplaneStatus(): Promise<DataplaneStatus> {
+	return invoke<DataplaneStatus>('get_dataplane_status');
+}
+
 export async function getQuota(): Promise<Quota> {
 	return invoke<Quota>('get_quota');
 }

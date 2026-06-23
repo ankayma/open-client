@@ -183,9 +183,12 @@ async fn connect_inner(state: &AppState) -> Result<(), String> {
     // reads it (~/.ankayma/agent.json), so the data plane reuses THIS node — no
     // duplicate enrollment. The GUI never opens a utun itself (needs root);
     // `start_dataplane` hands off to the daemon. [T:A.1.10 / up.rs load_or_enroll]
-    if let Err(e) =
-        write_handoff_state(&kp.private_b64, &kp.public_b64, &resp.node_id, &resp.overlay_ip)
-    {
+    if let Err(e) = write_handoff_state(
+        &kp.private_b64,
+        &kp.public_b64,
+        &resp.node_id,
+        &resp.overlay_ip,
+    ) {
         log::warn!("handoff state not written ({e}); `agent up` would re-enroll");
     }
 
@@ -521,14 +524,25 @@ async fn start_dataplane(state: State<'_, AppState>) -> Result<(), String> {
 }
 
 /// Tear down the data plane (stop the privileged daemon). Killing a root-owned
-/// process needs admin — macOS prompts once.
+/// process needs admin — macOS prompts once. Prefer the recorded PID (clean),
+/// fall back to a name match.
 #[tauri::command]
 async fn stop_dataplane() -> Result<(), String> {
     #[cfg(target_os = "macos")]
     {
+        let home = std::env::var("HOME").unwrap_or_default();
+        let pid = std::fs::read(format!("{home}/.ankayma/agent-status.json"))
+            .ok()
+            .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
+            .and_then(|v| v.get("pid").and_then(|p| p.as_u64()));
+        let kill = match pid {
+            Some(p) => format!("kill {p} 2>/dev/null || pkill -f 'agent up' || true"),
+            None => "pkill -f 'agent up' || true".to_string(),
+        };
+        let script = format!("do shell script \"{kill}\" with administrator privileges");
         let out = std::process::Command::new("osascript")
             .arg("-e")
-            .arg("do shell script \"pkill -f 'agent up' || true\" with administrator privileges")
+            .arg(script)
             .output()
             .map_err(|e| format!("stop daemon: {e}"))?;
         if !out.status.success() {
@@ -538,6 +552,74 @@ async fn stop_dataplane() -> Result<(), String> {
     }
     #[cfg(not(target_os = "macos"))]
     Err("data plane is macOS-only".into())
+}
+
+#[derive(serde::Serialize)]
+struct DataplanePeer {
+    hostname: String,
+    overlay_ip: String,
+    endpoint: Option<String>,
+}
+
+/// Live data-plane status read from the daemon's heartbeat file. `running` is
+/// true only if the file is fresh (daemon heartbeats every 5s; >15s stale = down,
+/// and a clean shutdown removes the file). This is how the GUI reflects the REAL
+/// tunnel instead of just "enrolled". Connection-level only [T:A.1.1].
+#[derive(serde::Serialize)]
+struct DataplaneStatus {
+    running: bool,
+    pid: Option<u32>,
+    age_secs: Option<u64>,
+    peers: Vec<DataplanePeer>,
+}
+
+#[tauri::command]
+async fn get_dataplane_status() -> Result<DataplaneStatus, String> {
+    let down = || DataplaneStatus {
+        running: false,
+        pid: None,
+        age_secs: None,
+        peers: vec![],
+    };
+    let home = std::env::var("HOME").map_err(|_| "HOME not set".to_string())?;
+    let path = std::path::Path::new(&home).join(".ankayma/agent-status.json");
+    let Ok(bytes) = std::fs::read(&path) else {
+        return Ok(down());
+    };
+    #[derive(serde::Deserialize)]
+    struct FilePeer {
+        hostname: String,
+        overlay_ip: String,
+        endpoint: Option<String>,
+    }
+    #[derive(serde::Deserialize)]
+    struct FileStatus {
+        pid: u32,
+        updated_at: u64,
+        peers: Vec<FilePeer>,
+    }
+    let Ok(s) = serde_json::from_slice::<FileStatus>(&bytes) else {
+        return Ok(down());
+    };
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let age = now.saturating_sub(s.updated_at);
+    Ok(DataplaneStatus {
+        running: age <= 15,
+        pid: Some(s.pid),
+        age_secs: Some(age),
+        peers: s
+            .peers
+            .into_iter()
+            .map(|p| DataplanePeer {
+                hostname: p.hostname,
+                overlay_ip: p.overlay_ip,
+                endpoint: p.endpoint,
+            })
+            .collect(),
+    })
 }
 
 #[tauri::command]
@@ -894,6 +976,7 @@ pub fn run() {
             create_join_link,
             start_dataplane,
             stop_dataplane,
+            get_dataplane_status,
             track_event,
             open_stripe_checkout,
         ])

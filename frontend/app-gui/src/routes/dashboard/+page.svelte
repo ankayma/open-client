@@ -1,7 +1,18 @@
 <script lang="ts">
 	import { goto } from '$app/navigation';
+	import { onMount, onDestroy } from 'svelte';
 	import { auth, connection, quota } from '$lib/stores';
-	import { connect, disconnect, getQuota, getConnectionStatus, getPathProof, startDataplane } from '$lib/tauri';
+	import {
+		connect,
+		disconnect,
+		getQuota,
+		getConnectionStatus,
+		getPathProof,
+		startDataplane,
+		stopDataplane,
+		getDataplaneStatus,
+		type DataplaneStatus
+	} from '$lib/tauri';
 	import type { PathProof } from '$lib/types';
 
 	let toggling = $state(false);
@@ -10,15 +21,47 @@
 	let proving = $state(false);
 	let tunnelBusy = $state(false);
 	let tunnelMsg = $state<string | null>(null);
+	let dp = $state<DataplaneStatus | null>(null);
 
-	// [milestone 1.2] Bring up the real WireGuard tunnel via the privileged daemon
-	// (macOS admin prompt). The GUI enrolls; the daemon owns the utun (needs root).
+	// [slice 2] Poll the daemon's live status so the card reflects the REAL tunnel
+	// (heartbeat fresh = up), not just enrollment.
+	async function refreshDataplane() {
+		try {
+			dp = await getDataplaneStatus();
+		} catch {
+			dp = null;
+		}
+	}
+	let dpTimer: ReturnType<typeof setInterval> | undefined;
+	onMount(() => {
+		refreshDataplane();
+		dpTimer = setInterval(refreshDataplane, 4000);
+	});
+	onDestroy(() => clearInterval(dpTimer));
+
+	// [milestone 1.2] Bring up / tear down the real WireGuard tunnel via the
+	// privileged daemon (macOS admin prompt). The GUI enrolls; the daemon owns the
+	// utun (needs root).
 	async function startTunnel() {
 		tunnelBusy = true;
 		tunnelMsg = null;
 		try {
 			await startDataplane();
-			tunnelMsg = 'Secure tunnel daemon launched — press "Prove it" to see the path.';
+			tunnelMsg = 'Secure tunnel daemon launched — bringing the tunnel up…';
+			setTimeout(refreshDataplane, 1500);
+		} catch (e) {
+			tunnelMsg = e instanceof Error ? e.message : String(e);
+		} finally {
+			tunnelBusy = false;
+		}
+	}
+
+	async function stopTunnel() {
+		tunnelBusy = true;
+		tunnelMsg = null;
+		try {
+			await stopDataplane();
+			setTimeout(refreshDataplane, 1000);
 		} catch (e) {
 			tunnelMsg = e instanceof Error ? e.message : String(e);
 		} finally {
@@ -136,14 +179,28 @@
 		{/if}
 
 		{#if $connection.status === 'connected'}
-			<button
-				class="tunnel-btn"
-				style="margin-top:10px;padding:10px 16px;border:1px solid var(--c-border);border-radius:8px;font-size:13px;color:var(--c-text);background:var(--c-surface);"
-				onclick={startTunnel}
-				disabled={tunnelBusy}
-			>
-				{tunnelBusy ? 'Starting…' : 'Bring up secure tunnel (admin)'}
-			</button>
+			{#if dp?.running}
+				<p style="margin-top:10px;font-size:13px;color:var(--c-success, #34d399);text-align:center;">
+					🔒 Secure tunnel up · {dp.peers.length} peer{dp.peers.length === 1 ? '' : 's'}
+				</p>
+				<button
+					class="tunnel-btn"
+					style="margin-top:8px;padding:10px 16px;border:1px solid var(--c-border);border-radius:8px;font-size:13px;color:var(--c-text-dim);background:transparent;"
+					onclick={stopTunnel}
+					disabled={tunnelBusy}
+				>
+					{tunnelBusy ? 'Stopping…' : 'Stop tunnel'}
+				</button>
+			{:else}
+				<button
+					class="tunnel-btn"
+					style="margin-top:10px;padding:10px 16px;border:1px solid var(--c-border);border-radius:8px;font-size:13px;color:var(--c-text);background:var(--c-surface);"
+					onclick={startTunnel}
+					disabled={tunnelBusy}
+				>
+					{tunnelBusy ? 'Starting…' : 'Bring up secure tunnel (admin)'}
+				</button>
+			{/if}
 			{#if tunnelMsg}
 				<p style="font-size:12px;color:var(--c-text-dim);text-align:center;margin-top:6px;overflow-wrap:anywhere;max-width:100%;">{tunnelMsg}</p>
 			{/if}
