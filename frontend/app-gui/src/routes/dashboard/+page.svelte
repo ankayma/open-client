@@ -190,6 +190,23 @@
 					no hop through the vendor.
 				</p>
 			{/if}
+
+			<!-- [F-5 / ND-A1] Coexistence proof: the "won't touch production" promise
+			     as a positive artifact (A.1.5). Structural — not a live measurement. -->
+			<div class="coexist">
+				<p class="coexist-label">Coexistence</p>
+				<div class="coexist-paths">
+					<div class="coexist-path">
+						<span class="cp-title">Path 1 · production-critical</span>
+						<span class="cp-body">DB replication, engine-native TLS — <strong>outside the mesh, untouched</strong>. No dependency on Ankayma being up.</span>
+					</div>
+					<div class="coexist-path secured">
+						<span class="cp-title">Path 2 · secured by Ankayma</span>
+						<span class="cp-body">This access — peer-to-peer, vendor off the data path.</span>
+					</div>
+				</div>
+				<p class="coexist-note">Structural guarantee (A.1.5) — turning on security doesn't put your running system on the mesh.</p>
+			</div>
 		</section>
 	{/if}
 
@@ -597,6 +614,58 @@
 		color: var(--c-text-dim);
 		line-height: 1.5;
 		margin: 0;
+	}
+
+	/* [F-5 / ND-A1] coexistence split-view */
+	.coexist {
+		margin-top: 14px;
+		border-top: 1px solid var(--c-border);
+		padding-top: 12px;
+	}
+	.coexist-label {
+		font-size: 11px;
+		text-transform: uppercase;
+		letter-spacing: 0.04em;
+		color: var(--c-text-dim);
+		margin: 0 0 8px;
+	}
+	.coexist-paths {
+		display: flex;
+		gap: 8px;
+		flex-wrap: wrap;
+	}
+	.coexist-path {
+		flex: 1;
+		min-width: 150px;
+		background: var(--c-surface);
+		border: 1px solid var(--c-border);
+		border-radius: 8px;
+		padding: 10px 12px;
+		display: flex;
+		flex-direction: column;
+		gap: 3px;
+	}
+	.coexist-path.secured {
+		background: color-mix(in srgb, var(--c-accent) 8%, var(--c-surface));
+		border-color: color-mix(in srgb, var(--c-accent) 30%, transparent);
+	}
+	.cp-title {
+		font-size: 12px;
+		font-weight: 600;
+		color: var(--c-text);
+	}
+	.coexist-path.secured .cp-title {
+		color: var(--c-accent);
+	}
+	.cp-body {
+		font-size: 11px;
+		color: var(--c-text-dim);
+		line-height: 1.5;
+	}
+	.coexist-note {
+		font-size: 10px;
+		color: var(--c-text-dim);
+		margin: 8px 0 0;
 	}
 
 	.prove-row {
