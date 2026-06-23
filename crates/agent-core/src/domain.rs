@@ -191,6 +191,43 @@ pub struct SshSessionReceipt {
     pub ledger_block_hash: String,
 }
 
+/// One private branded name and the overlay address it resolves to. `[T:F-3]`
+#[derive(Debug, Clone, Deserialize)]
+pub struct ResolvedName {
+    pub fqdn: String,
+    pub label: String,
+    pub overlay_ip: String,
+}
+
+/// `GET /api/v1/mesh/resolve` — the tenant's private-default resolve table, served
+/// only to an enrolled device (a non-enrolled caller gets 401 ≡ NXDOMAIN). The
+/// agent resolves these names locally; the data path is direct over the overlay.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ResolveTable {
+    pub zone: String,
+    pub names: Vec<ResolvedName>,
+}
+
+/// A registered F-3 branded subdomain as returned by `GET /api/v1/subdomain`.
+/// Tenant-scoped. `[T:Part C §H.3.6.1 F-3]`
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Subdomain {
+    pub fqdn: String,
+    pub label: String,
+    pub target_node_id: String,
+    #[serde(default)]
+    pub created_at: Option<String>,
+}
+
+/// Create request for a branded subdomain. `POST /api/v1/subdomain` — map `label`
+/// onto one of the tenant's own nodes. The control plane validates + enforces the
+/// ND-R6 cap. `[T:Part C §H.3.6.1 F-3]`
+#[derive(Debug, Clone, Serialize)]
+pub struct SubdomainReq {
+    pub label: String,
+    pub target_node_id: String,
+}
+
 /// A CI/CD deploy policy rule as returned by `GET /api/v1/ci/policy`. Tenant-scoped.
 /// `[T:Part C §H.3.3 / B.5.2]` `ref` and `environment` are the safe-by-default scope:
 /// exactly one is set (server enforces; client mirrors in UX). `target_hostname` is

@@ -2,8 +2,8 @@
 
 use crate::domain::{
     AgentEnrollRequest, AgentEnrollResponse, CiDeployRequest, CiDeployResponse, CiPolicy,
-    CiPolicyReq, EnrollRequest, EnrollResponse, PeerInfo, Quota, SessionInfo, SshSessionRequest,
-    SshSessionResponse,
+    CiPolicyReq, EnrollRequest, EnrollResponse, PeerInfo, Quota, ResolveTable, SessionInfo,
+    SshSessionRequest, SshSessionResponse, Subdomain, SubdomainReq,
 };
 
 /// Errors from the control-plane HTTP client.
@@ -177,6 +177,81 @@ pub async fn open_ssh_session(
     resp.json::<SshSessionResponse>()
         .await
         .map_err(|e| ApiError::Decode(e.to_string()))
+}
+
+/// Fetch the tenant's F-3 mesh-resolve table. `GET /api/v1/mesh/resolve`
+/// (session-authed). A non-enrolled device gets 401 — the names do not exist for
+/// it (private-default); a revoked target node drops its name server-side (instant
+/// revoke). The agent resolves these locally, off the vendor's path (A.1.1).
+/// `[T:Part C §H.3.6.1 F-3 + A.1.1/A.1.2]`
+pub async fn resolve_subdomains(
+    http: &reqwest::Client,
+    base_url: &str,
+    session_token: &str,
+) -> Result<ResolveTable, ApiError> {
+    get_json(http, base_url, "/api/v1/mesh/resolve", session_token).await
+}
+
+/// List this tenant's registered branded subdomains. `GET /api/v1/subdomain`.
+pub async fn list_subdomains(
+    http: &reqwest::Client,
+    base_url: &str,
+    session_token: &str,
+) -> Result<Vec<Subdomain>, ApiError> {
+    #[derive(serde::Deserialize)]
+    struct Resp {
+        subdomains: Vec<Subdomain>,
+    }
+    let r: Resp = get_json(http, base_url, "/api/v1/subdomain", session_token).await?;
+    Ok(r.subdomains)
+}
+
+/// Register a branded subdomain (map `label` → a node). `POST /api/v1/subdomain`.
+/// The control plane validates the label + enforces the ND-R6 cap; its error
+/// message (400/404/409) is surfaced verbatim. Returns the new FQDN.
+pub async fn register_subdomain(
+    http: &reqwest::Client,
+    base_url: &str,
+    session_token: &str,
+    req: &SubdomainReq,
+) -> Result<String, ApiError> {
+    #[derive(serde::Deserialize)]
+    struct Resp {
+        fqdn: String,
+    }
+    let resp = http
+        .post(url(base_url, "/api/v1/subdomain"))
+        .bearer_auth(session_token)
+        .json(req)
+        .send()
+        .await
+        .map_err(|e| ApiError::Transport(e.to_string()))?;
+    if !resp.status().is_success() {
+        return Err(status_error(resp).await);
+    }
+    resp.json::<Resp>()
+        .await
+        .map(|r| r.fqdn)
+        .map_err(|e| ApiError::Decode(e.to_string()))
+}
+
+/// Remove a branded subdomain by label. `DELETE /api/v1/subdomain/{label}`.
+pub async fn delete_subdomain(
+    http: &reqwest::Client,
+    base_url: &str,
+    session_token: &str,
+    label: &str,
+) -> Result<(), ApiError> {
+    let resp = http
+        .delete(url(base_url, &format!("/api/v1/subdomain/{label}")))
+        .bearer_auth(session_token)
+        .send()
+        .await
+        .map_err(|e| ApiError::Transport(e.to_string()))?;
+    if !resp.status().is_success() {
+        return Err(status_error(resp).await);
+    }
+    Ok(())
 }
 
 /// Exchange a CI OIDC token for ephemeral mesh access.
