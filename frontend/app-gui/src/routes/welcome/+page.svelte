@@ -57,7 +57,7 @@
 			</svg>
 		</div>
 		<h1>Ankayma</h1>
-		<p class="tagline">Zero-trust P2P network.<br/>Your infrastructure, your keys.</p>
+		<p class="tagline">The sovereign zero-trust mesh —<br/>identity-bound access, your keys, your proof.</p>
 	</div>
 
 	<div class="features">
@@ -126,7 +126,7 @@
 		{/if}
 		<p class="terms">
 			Free tier · No credit card required ·
-			<a href="https://ankayma.com/terms" target="_blank" rel="noopener">Terms</a>
+			<a href="https://ankayma.com/terms.html" target="_blank" rel="noopener">Terms</a>
 		</p>
 	</div>
 </main>

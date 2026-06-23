@@ -19,17 +19,9 @@
 		$auth.status === 'authenticated' && $auth.user.tier === 'F0Plus'
 	);
 
-	// [A] stub data — replace with invoke('list_subdomains') when control-plane ready
-	let entries = $state<SubdomainEntry[]>([
-		{
-			id: 'sub_1',
-			subdomain: 'api',
-			target_node_id: 'node_placeholder',
-			target_port: 8080,
-			protocol: 'https',
-			active: true,
-		},
-	]);
+	// Real list comes from invoke('list_subdomains') once the control plane is
+	// wired (milestone 1.3). Until then start empty — never seed fake entries.
+	let entries = $state<SubdomainEntry[]>([]);
 
 	let showAddForm = $state(false);
 	let newSub = $state('');
@@ -108,8 +100,8 @@
 	{:else}
 		<div class="body">
 			<p class="desc">
-				Each subdomain routes HTTPS or TCP traffic from the public internet to a node in your mesh.
-				<span class="note-inline">[A] DNS delegation to ankayma.net pending control-plane milestone 1.3</span>
+				Each subdomain routes HTTPS or TCP traffic from the public internet to a node in your mesh, at a stable <code>*.ankayma.net</code> URL.
+				<span class="note-inline">Subdomain provisioning is being finalized and lands in an upcoming release.</span>
 			</p>
 
 			<!-- Entry list -->

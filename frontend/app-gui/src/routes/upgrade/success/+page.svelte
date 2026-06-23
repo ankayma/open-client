@@ -31,7 +31,7 @@
 		<div class="features">
 			<div class="feature">
 				<span class="dot"></span>
-				<span>100 GB / month bandwidth</span>
+				<span>10× the free-tier bandwidth</span>
 			</div>
 			<div class="feature">
 				<span class="dot"></span>

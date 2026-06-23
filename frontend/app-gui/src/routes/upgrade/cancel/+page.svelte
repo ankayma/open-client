@@ -24,7 +24,7 @@
 		</div>
 
 		<div class="free-note">
-			<p>Still on F0 free tier — 10 GB / month, up to 5 devices.</p>
+			<p>Still on F0 free tier — base bandwidth quota, up to 5 devices.</p>
 		</div>
 	</div>
 </main>

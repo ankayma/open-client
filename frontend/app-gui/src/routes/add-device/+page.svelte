@@ -13,8 +13,10 @@
 			// ankayma://join?token=<signed-jwt>&tenant=<id>
 			joinLink = await invoke<string>('create_join_link');
 		} catch {
-			// stub fallback for UI dev
-			joinLink = 'ankayma://join?token=stub-token-replace-with-real';
+			// Device-link enrollment isn't wired to the control plane yet — don't
+			// fabricate a token that looks real. Fall through to the honest
+			// "coming soon" state below.
+			joinLink = null;
 		} finally {
 			loading = false;
 		}
@@ -94,6 +96,14 @@
 					{/if}
 				</button>
 			</div>
+		{:else}
+			<div class="qr-wrap">
+				<svg width="120" height="120" viewBox="0 0 24 24" fill="none" stroke="var(--c-accent)" stroke-width="1.5" stroke-opacity="0.6">
+					<rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/>
+				</svg>
+			</div>
+			<p class="qr-note">Device-link enrollment is coming soon.</p>
+			<p class="desc">For now, install Ankayma on the other device and sign in with the same GitHub account — it joins your mesh automatically.</p>
 		{/if}
 
 		<div class="platforms">

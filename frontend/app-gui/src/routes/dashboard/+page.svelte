@@ -135,7 +135,7 @@
 						<path d="M9 12l2 2 4-4"/>
 						<circle cx="12" cy="12" r="9"/>
 					</svg>
-					<span>Vendor is <strong>not on the data path</strong> — control channel only (A.1.1)</span>
+					<span>Vendor is <strong>not on the data path</strong> — control channel only</span>
 				</div>
 
 				{#if proof.peers.length > 0}
@@ -214,7 +214,7 @@
 				<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
 					<path d="M4 17l6-6-6-6M12 19h8"/>
 				</svg>
-				<span>CI/CD Deploy Rules</span>
+				<span>Deploy Rules</span>
 				<svg class="arrow" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
 					<path d="M9 18l6-6-6-6"/>
 				</svg>

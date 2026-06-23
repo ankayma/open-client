@@ -48,7 +48,7 @@
 		</div>
 		<div class="row">
 			<span class="label">Agent</span>
-			<a href="https://github.com/ankayma/client" class="value link" target="_blank" rel="noopener">
+			<a href="https://github.com/ankayma/open-client" class="value link" target="_blank" rel="noopener">
 				Open source ↗
 			</a>
 		</div>
