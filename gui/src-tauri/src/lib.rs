@@ -770,6 +770,66 @@ async fn open_subdomain(fqdn: String) -> Result<(), String> {
     open::that(format!("https://{fqdn}")).map_err(|e| format!("could not open browser: {e}"))
 }
 
+// ── F1 team membership ────────────────────────────────────────────────────────
+
+#[tauri::command]
+async fn list_members(state: State<'_, AppState>) -> Result<domain::MembersView, String> {
+    let tok = state.token().ok_or("not signed in")?;
+    adapters::list_members(&state.http, &state.base_url, &tok)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn invite_member(state: State<'_, AppState>) -> Result<String, String> {
+    let tok = state.token().ok_or("not signed in")?;
+    adapters::invite_member(&state.http, &state.base_url, &tok)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn join_team(invite: String, state: State<'_, AppState>) -> Result<(), String> {
+    let tok = state.token().ok_or("not signed in")?;
+    adapters::join_team(&state.http, &state.base_url, &tok, invite.trim())
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn remove_member(user_id: String, state: State<'_, AppState>) -> Result<(), String> {
+    let tok = state.token().ok_or("not signed in")?;
+    adapters::remove_member(&state.http, &state.base_url, &tok, &user_id)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+// ── PolicyBlock access + my-access ────────────────────────────────────────────
+
+#[tauri::command]
+async fn get_policy(state: State<'_, AppState>) -> Result<domain::PolicyView, String> {
+    let tok = state.token().ok_or("not signed in")?;
+    adapters::get_policy(&state.http, &state.base_url, &tok)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn submit_policy(body: String, state: State<'_, AppState>) -> Result<(), String> {
+    let tok = state.token().ok_or("not signed in")?;
+    adapters::submit_policy(&state.http, &state.base_url, &tok, &body)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn my_access(state: State<'_, AppState>) -> Result<domain::MyAccess, String> {
+    let tok = state.token().ok_or("not signed in")?;
+    adapters::my_access(&state.http, &state.base_url, &tok)
+        .await
+        .map_err(|e| e.to_string())
+}
+
 /// Remove one of the tenant's own mesh nodes (retire a device). Tenant-scoped on
 /// the control plane (A.1.6). If it's THIS device, also drop the local identity
 /// so the next connect enrolls cleanly.
@@ -1094,6 +1154,13 @@ pub fn run() {
             create_subdomain,
             delete_subdomain,
             open_subdomain,
+            list_members,
+            invite_member,
+            join_team,
+            remove_member,
+            get_policy,
+            submit_policy,
+            my_access,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -228,6 +228,59 @@ pub struct SubdomainReq {
     pub target_node_id: String,
 }
 
+// ── F1 team membership (Slice C) ──────────────────────────────────────────────
+
+/// A member of the active tenant. `GET /api/v1/members`. `[T:Part C §H.3.4]`
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Member {
+    pub user_id: String,
+    pub github_login: String,
+    pub role: String,
+    #[serde(default)]
+    pub created_at: Option<String>,
+    #[serde(default)]
+    pub is_owner: bool,
+}
+
+/// `GET /api/v1/members` envelope: roster + cap + the caller's own role.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MembersView {
+    pub members: Vec<Member>,
+    pub limit: u32,
+    pub your_role: String,
+}
+
+// ── PolicyBlock authz (Slice B/D) ─────────────────────────────────────────────
+
+/// The active PolicyBlock as `GET /api/v1/policies` returns it. `rules` is the raw
+/// JSON array (the GUI renders/edits it). `[T:Part B §B.3.2]`
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PolicyView {
+    pub version: i64,
+    pub rules: serde_json::Value,
+    #[serde(default)]
+    pub block_hash: Option<String>,
+    #[serde(default)]
+    pub chain_intact: bool,
+}
+
+/// One granted service in the caller's catalog. `GET /api/v1/my-access`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AccessService {
+    pub fqdn: String,
+    pub label: String,
+    pub node: String,
+    pub rule_ref: String,
+}
+
+/// `GET /api/v1/my-access` envelope — what the caller may reach (addendum §D).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MyAccess {
+    pub principal: String,
+    pub role: String,
+    pub services: Vec<AccessService>,
+}
+
 /// A CI/CD deploy policy rule as returned by `GET /api/v1/ci/policy`. Tenant-scoped.
 /// `[T:Part C §H.3.3 / B.5.2]` `ref` and `environment` are the safe-by-default scope:
 /// exactly one is set (server enforces; client mirrors in UX). `target_hostname` is

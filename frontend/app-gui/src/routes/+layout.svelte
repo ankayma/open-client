@@ -81,19 +81,25 @@
 					<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="2" y="4" width="20" height="14" rx="2"/><path d="M8 21h8M12 18v3"/></svg>
 					<span>Devices</span>
 				</button>
+				<button class="nav-item" class:active={active('/services')} onclick={() => goto('/services')}>
+					<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M3 7h18M3 12h18M3 17h18"/><circle cx="7" cy="7" r="0.5"/></svg>
+					<span>Services</span>
+				</button>
+				<button class="nav-item" class:active={active('/subdomains')} onclick={() => goto('/subdomains')}>
+					<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="9"/><path d="M3.6 9h16.8M3.6 15h16.8M12 3a15 15 0 010 18"/></svg>
+					<span>Subdomains</span>
+				</button>
+				<button class="nav-item" class:active={active('/members')} onclick={() => goto('/members')}>
+					<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 00-3-3.87M16 3.13a4 4 0 010 7.75"/></svg>
+					<span>Members</span>
+				</button>
+				<button class="nav-item" class:active={active('/access')} onclick={() => goto('/access')}>
+					<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0110 0v4"/></svg>
+					<span>Access</span>
+				</button>
 				<button class="nav-item" class:active={active('/policies')} onclick={() => goto('/policies')}>
 					<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 17l6-6-6-6M12 19h8"/></svg>
 					<span>Deploy Rules</span>
-				</button>
-				{#if tier === 'F0Plus'}
-					<button class="nav-item" class:active={active('/subdomains')} onclick={() => goto('/subdomains')}>
-						<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="9"/><path d="M3.6 9h16.8M3.6 15h16.8M12 3a15 15 0 010 18"/></svg>
-						<span>Subdomains</span>
-					</button>
-				{/if}
-				<button class="nav-item" class:active={active('/add-device')} onclick={() => goto('/add-device')}>
-					<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="5" y="2" width="14" height="20" rx="2"/><path d="M12 18h.01"/></svg>
-					<span>Add device</span>
 				</button>
 				{#if tier === 'F0'}
 					<button class="nav-item" class:active={active('/upgrade')} onclick={() => goto('/upgrade')}>
@@ -211,6 +217,13 @@
 		.app.with-sidebar .view {
 			height: 100dvh;
 			overflow-y: auto;
+		}
+
+		/* Use the desktop window: pages cap at a mobile column (480px) by default;
+		   on desktop let them breathe to a wide content measure so tables/detail
+		   panels have room. One rule, every page — no per-screen retrofit. */
+		.app.with-sidebar .view :global(main) {
+			max-width: 1080px;
 		}
 
 		.brand {

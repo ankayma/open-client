@@ -12,6 +12,9 @@ import type {
   CiPolicyDraft,
   PeerBrief,
   Subdomain,
+  MembersView,
+  PolicyView,
+  MyAccess,
 } from "./types";
 
 // Runtime check — @tauri-apps/api works in Tauri webview and stubs gracefully in browser
@@ -139,4 +142,29 @@ export async function deleteSubdomain(label: string): Promise<void> {
 
 export async function openSubdomain(fqdn: string): Promise<void> {
   return invoke("open_subdomain", { fqdn });
+}
+
+// F1 team membership.
+export async function listMembers(): Promise<MembersView> {
+  return invoke<MembersView>("list_members");
+}
+export async function inviteMember(): Promise<string> {
+  return invoke<string>("invite_member");
+}
+export async function joinTeam(invite: string): Promise<void> {
+  return invoke("join_team", { invite });
+}
+export async function removeMember(userId: string): Promise<void> {
+  return invoke("remove_member", { userId });
+}
+
+// PolicyBlock access + my-access catalog.
+export async function getPolicy(): Promise<PolicyView> {
+  return invoke<PolicyView>("get_policy");
+}
+export async function submitPolicy(body: string): Promise<void> {
+  return invoke("submit_policy", { body });
+}
+export async function myAccess(): Promise<MyAccess> {
+  return invoke<MyAccess>("my_access");
 }
