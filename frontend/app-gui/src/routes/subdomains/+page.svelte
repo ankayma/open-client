@@ -1,74 +1,75 @@
 <script lang="ts">
+	import { onMount } from 'svelte';
 	import { goto } from '$app/navigation';
-	import { auth } from '$lib/stores';
+	import { listSubdomains, createSubdomain, deleteSubdomain, openSubdomain, listNodes } from '$lib/tauri';
+	import type { Subdomain, PeerBrief } from '$lib/types';
 
-	// [A] stub — real subdomain list comes from control-plane (POST /api/subdomains → list)
-	// Subdomain = a named reverse-proxy entry pointing to a node:port in the mesh
-	// F0-Plus only; F0 sees upgrade prompt
+	// F-3 branded subdomain (Part C §H.3.6.1, milestone 1.4): a private name mapped
+	// onto one of your mesh nodes. Private-default — resolves only on enrolled
+	// devices; the data path is direct over the overlay (A.1.1). Real list/create/
+	// delete go through the control-plane registry via agent-core.
 
-	interface SubdomainEntry {
-		id: string;
-		subdomain: string;          // e.g. "api" → api.<tenant>.ankayma.net
-		target_node_id: string;
-		target_port: number;
-		protocol: 'https' | 'tcp';
-		active: boolean;
-	}
-
-	let isF0Plus = $derived(
-		$auth.status === 'authenticated' && $auth.user.tier === 'F0Plus'
-	);
-
-	// Real list comes from invoke('list_subdomains') once the control plane is
-	// wired (milestone 1.3). Until then start empty — never seed fake entries.
-	let entries = $state<SubdomainEntry[]>([]);
+	let entries = $state<Subdomain[]>([]);
+	let nodes = $state<PeerBrief[]>([]);
+	let loading = $state(true);
+	let loadError = $state('');
 
 	let showAddForm = $state(false);
-	let newSub = $state('');
-	let newPort = $state(443);
-	let newProto = $state<'https' | 'tcp'>('https');
+	let newLabel = $state('');
+	let newTarget = $state('');
 	let adding = $state(false);
 	let error = $state('');
 
+	onMount(load);
+
+	async function load() {
+		loading = true;
+		loadError = '';
+		try {
+			[entries, nodes] = await Promise.all([listSubdomains(), listNodes()]);
+			if (!newTarget && nodes.length > 0) newTarget = nodes[0].node_id;
+		} catch (e: unknown) {
+			loadError = e instanceof Error ? e.message : 'Failed to load subdomains';
+		} finally {
+			loading = false;
+		}
+	}
+
 	async function addSubdomain() {
-		if (!newSub.trim()) return;
+		if (!isValidLabel(newLabel) || !newTarget) return;
 		adding = true;
 		error = '';
 		try {
-			// [A] stub — real: invoke('create_subdomain', { subdomain: newSub, port: newPort, protocol: newProto })
-			await new Promise(r => setTimeout(r, 600)); // fake latency
-			entries = [...entries, {
-				id: `sub_${Date.now()}`,
-				subdomain: newSub.trim().toLowerCase(),
-				target_node_id: 'node_placeholder',
-				target_port: newPort,
-				protocol: newProto,
-				active: true,
-			}];
-			newSub = '';
-			newPort = 443;
+			await createSubdomain(newLabel.trim().toLowerCase(), newTarget);
+			newLabel = '';
 			showAddForm = false;
+			await load();
 		} catch (e: unknown) {
+			// Surface the control plane's reason verbatim (invalid label / cap / dup).
 			error = e instanceof Error ? e.message : 'Failed to create subdomain';
 		} finally {
 			adding = false;
 		}
 	}
 
-	async function removeSubdomain(id: string) {
-		// [A] stub — real: invoke('delete_subdomain', { id })
-		entries = entries.filter(e => e.id !== id);
+	async function removeSubdomain(label: string) {
+		try {
+			await deleteSubdomain(label);
+			await load();
+		} catch (e: unknown) {
+			loadError = e instanceof Error ? e.message : 'Failed to remove subdomain';
+		}
 	}
 
-	function fqdn(sub: string) {
-		const tenantId = $auth.status === 'authenticated' ? $auth.user.tenant_id : 'tenant';
-		// [A] domain pattern pending control-plane DNS delegation spec
-		return `${sub}.${tenantId}.ankayma.net`;
+	function nodeName(id: string) {
+		return nodes.find(n => n.node_id === id)?.hostname ?? id;
 	}
 
-	// Subdomain validation: lowercase alphanumeric + hyphen, 3-32 chars
-	function isValidSub(s: string) {
-		return /^[a-z0-9][a-z0-9-]{1,30}[a-z0-9]$/.test(s) || /^[a-z0-9]{3,32}$/.test(s);
+	// RFC 1035 LDH label, lowercase, 1–63, no leading/trailing hyphen (mirrors the
+	// control-plane `edge::validate_label`; the server is authoritative).
+	function isValidLabel(s: string) {
+		const l = s.trim();
+		return /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/.test(l);
 	}
 </script>
 
@@ -83,52 +84,43 @@
 		<div style="width:36px"></div>
 	</header>
 
-	{#if !isF0Plus}
-		<!-- Gate: F0 users see upgrade prompt -->
-		<div class="gate">
-			<div class="gate-icon" aria-hidden="true">
-				<svg width="40" height="40" viewBox="0 0 24 24" fill="none">
-					<rect x="3" y="11" width="18" height="11" rx="2" stroke="var(--c-accent)" stroke-width="1.5"/>
-					<path d="M7 11V7a5 5 0 0110 0v4" stroke="var(--c-accent)" stroke-width="1.5" stroke-linecap="round"/>
-					<circle cx="12" cy="16" r="1.5" fill="var(--c-accent)"/>
-				</svg>
-			</div>
-			<h3>F0-Plus feature</h3>
-			<p>Custom subdomains let you expose mesh services at a stable URL — no port forwarding, no IP changes.</p>
-			<button class="btn-primary" onclick={() => goto('/upgrade')}>Upgrade to F0-Plus — $9/mo</button>
-		</div>
-	{:else}
 		<div class="body">
 			<p class="desc">
-				Each subdomain routes HTTPS or TCP traffic from the public internet to a node in your mesh, at a stable <code>*.ankayma.net</code> URL.
-				<span class="note-inline">Subdomain provisioning is being finalized and lands in an upcoming release.</span>
+				Map a private name onto one of your mesh nodes. It resolves <strong>only on enrolled devices</strong> and the traffic goes direct over the overlay — no public port, no vendor on the path.
+				<span class="note-inline">Transparent name resolution + auto-TLS land in an upcoming release; the registry is live.</span>
 			</p>
 
+			{#if loadError}
+				<p class="form-error">{loadError}</p>
+			{/if}
+
 			<!-- Entry list -->
-			{#if entries.length === 0}
+			{#if loading}
+				<div class="empty"><p>Loading…</p></div>
+			{:else if entries.length === 0}
 				<div class="empty">
-					<p>No subdomains yet. Add one to expose a service.</p>
+					<p>No subdomains yet. Add one to give a service a private name.</p>
 				</div>
 			{:else}
 				<ul class="entry-list">
-					{#each entries as entry (entry.id)}
+					{#each entries as entry (entry.fqdn)}
 						<li class="entry">
 							<div class="entry-info">
-								<code class="entry-fqdn">{fqdn(entry.subdomain)}</code>
+								<code class="entry-fqdn">{entry.fqdn}</code>
 								<div class="entry-meta">
-									<span class="badge" class:tcp={entry.protocol === 'tcp'}>{entry.protocol.toUpperCase()}</span>
+									<span class="badge">private</span>
 									<span class="arrow">→</span>
-									<span class="target">:{entry.target_port}</span>
-									{#if entry.active}
-										<span class="active-dot" title="Active"></span>
-									{/if}
+									<span class="target">{nodeName(entry.target_node_id)}</span>
 								</div>
 							</div>
-							<button class="remove-btn" onclick={() => removeSubdomain(entry.id)} aria-label="Remove subdomain">
-								<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-									<path d="M18 6L6 18M6 6l12 12"/>
-								</svg>
-							</button>
+							<div class="entry-actions">
+								<button class="link-btn" onclick={() => openSubdomain(entry.fqdn)} aria-label="Open in browser">Open</button>
+								<button class="remove-btn" onclick={() => removeSubdomain(entry.label)} aria-label="Remove subdomain">
+									<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+										<path d="M18 6L6 18M6 6l12 12"/>
+									</svg>
+								</button>
+							</div>
 						</li>
 					{/each}
 				</ul>
@@ -140,33 +132,30 @@
 					<h4>New subdomain</h4>
 
 					<label class="field">
-						<span>Subdomain prefix</span>
-						<div class="input-suffix-wrap">
-							<input
-								type="text"
-								bind:value={newSub}
-								placeholder="api"
-								maxlength="32"
-								autocapitalize="none"
-								autocorrect="off"
-								spellcheck="false"
-							/>
-							<span class="suffix">.…ankayma.net</span>
-						</div>
+						<span>Name</span>
+						<input
+							type="text"
+							bind:value={newLabel}
+							placeholder="epos"
+							maxlength="63"
+							autocapitalize="none"
+							autocorrect="off"
+							spellcheck="false"
+						/>
 					</label>
 
 					<label class="field">
-						<span>Target port</span>
-						<input type="number" bind:value={newPort} min="1" max="65535" placeholder="443"/>
+						<span>Target node</span>
+						{#if nodes.length === 0}
+							<span class="form-error">Enroll a node first.</span>
+						{:else}
+							<select bind:value={newTarget}>
+								{#each nodes as n (n.node_id)}
+									<option value={n.node_id}>{n.hostname}</option>
+								{/each}
+							</select>
+						{/if}
 					</label>
-
-					<div class="field">
-						<span>Protocol</span>
-						<div class="proto-toggle">
-							<button class:active={newProto === 'https'} onclick={() => newProto = 'https'}>HTTPS</button>
-							<button class:active={newProto === 'tcp'} onclick={() => newProto = 'tcp'}>TCP</button>
-						</div>
-					</div>
 
 					{#if error}
 						<p class="form-error">{error}</p>
@@ -176,7 +165,7 @@
 						<button
 							class="btn-primary"
 							onclick={addSubdomain}
-							disabled={adding || !isValidSub(newSub)}
+							disabled={adding || !isValidLabel(newLabel) || !newTarget}
 						>
 							{#if adding}
 								<span class="spinner"></span> Adding…
@@ -198,7 +187,6 @@
 				</button>
 			{/if}
 		</div>
-	{/if}
 </main>
 
 <style>
@@ -231,36 +219,6 @@
 	}
 
 	/* Gate (F0 users) */
-	.gate {
-		flex: 1;
-		display: flex;
-		flex-direction: column;
-		align-items: center;
-		justify-content: center;
-		gap: 16px;
-		text-align: center;
-		padding: 32px 0;
-	}
-
-	.gate-icon {
-		width: 72px;
-		height: 72px;
-		background: color-mix(in srgb, var(--c-accent) 10%, transparent);
-		border-radius: 50%;
-		display: flex;
-		align-items: center;
-		justify-content: center;
-	}
-
-	.gate h3 { font-size: 20px; font-weight: 700; }
-
-	.gate p {
-		font-size: 14px;
-		color: var(--c-text-dim);
-		line-height: 1.6;
-		max-width: 300px;
-	}
-
 	/* Body */
 	.body {
 		display: flex;
@@ -335,21 +293,21 @@
 		border-radius: 4px;
 	}
 
-	.badge.tcp {
-		background: color-mix(in srgb, var(--c-success) 15%, transparent);
-		color: var(--c-success);
-	}
-
 	.arrow { opacity: 0.5; }
 
 	.target { font-family: 'SF Mono', 'Fira Code', monospace; }
 
-	.active-dot {
-		width: 6px;
-		height: 6px;
-		border-radius: 50%;
-		background: var(--c-success);
+	.entry-actions { display: flex; align-items: center; gap: 4px; flex-shrink: 0; }
+
+	.link-btn {
+		font-size: 13px;
+		font-weight: 600;
+		color: var(--c-accent);
+		padding: 6px 10px;
+		border-radius: 6px;
 	}
+
+	.link-btn:hover { background: color-mix(in srgb, var(--c-accent) 12%, transparent); }
 
 	.remove-btn {
 		width: 32px;
@@ -418,49 +376,13 @@
 		border-color: var(--c-accent);
 	}
 
-	.input-suffix-wrap {
-		display: flex;
-		align-items: center;
-		gap: 0;
-	}
-
-	.input-suffix-wrap input {
-		border-radius: 8px 0 0 8px;
-		border-right: none;
-		flex: 1;
-	}
-
-	.suffix {
+	.field select {
 		padding: 10px 12px;
-		background: var(--c-border);
-		border: 1px solid var(--c-border);
-		border-radius: 0 8px 8px 0;
-		font-family: 'SF Mono', 'Fira Code', monospace;
-		font-size: 12px;
-		color: var(--c-text-dim);
-		white-space: nowrap;
-	}
-
-	.proto-toggle {
-		display: flex;
-		gap: 0;
 		border: 1px solid var(--c-border);
 		border-radius: 8px;
-		overflow: hidden;
-	}
-
-	.proto-toggle button {
-		flex: 1;
-		padding: 9px;
-		font-size: 13px;
-		font-weight: 600;
-		color: var(--c-text-dim);
-		transition: background 0.1s;
-	}
-
-	.proto-toggle button.active {
-		background: var(--c-accent);
-		color: #fff;
+		background: var(--c-bg);
+		color: var(--c-text);
+		font-size: 14px;
 	}
 
 	.form-error {

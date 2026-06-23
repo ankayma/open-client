@@ -729,6 +729,47 @@ async fn delete_ci_policy(repo: String, state: State<'_, AppState>) -> Result<()
         .map_err(|e| e.to_string())
 }
 
+// ── F-3 branded subdomains ────────────────────────────────────────────────────
+
+#[tauri::command]
+async fn list_subdomains(state: State<'_, AppState>) -> Result<Vec<domain::Subdomain>, String> {
+    let tok = state.token().ok_or("not signed in")?;
+    adapters::list_subdomains(&state.http, &state.base_url, &tok)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn create_subdomain(
+    label: String,
+    target_node_id: String,
+    state: State<'_, AppState>,
+) -> Result<String, String> {
+    let tok = state.token().ok_or("not signed in")?;
+    let req = domain::SubdomainReq {
+        label: label.trim().to_string(),
+        target_node_id,
+    };
+    adapters::register_subdomain(&state.http, &state.base_url, &tok, &req)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn delete_subdomain(label: String, state: State<'_, AppState>) -> Result<(), String> {
+    let tok = state.token().ok_or("not signed in")?;
+    adapters::delete_subdomain(&state.http, &state.base_url, &tok, &label)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Open a branded name in the browser. It resolves only on an enrolled device once
+/// the mesh resolver is active (and TLS once auto-TLS lands) — best-effort today.
+#[tauri::command]
+async fn open_subdomain(fqdn: String) -> Result<(), String> {
+    open::that(format!("https://{fqdn}")).map_err(|e| format!("could not open browser: {e}"))
+}
+
 /// Remove one of the tenant's own mesh nodes (retire a device). Tenant-scoped on
 /// the control plane (A.1.6). If it's THIS device, also drop the local identity
 /// so the next connect enrolls cleanly.
@@ -1049,6 +1090,10 @@ pub fn run() {
             get_dataplane_status,
             track_event,
             open_stripe_checkout,
+            list_subdomains,
+            create_subdomain,
+            delete_subdomain,
+            open_subdomain,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
