@@ -2,8 +2,8 @@
 
 use crate::domain::{
     AgentEnrollRequest, AgentEnrollResponse, CiDeployRequest, CiDeployResponse, CiPolicy,
-    CiPolicyReq, EnrollRequest, EnrollResponse, PeerInfo, Quota, ResolveTable, SessionInfo,
-    SshSessionRequest, SshSessionResponse, Subdomain, SubdomainReq,
+    CiPolicyReq, EnrollRequest, EnrollResponse, MembersView, MyAccess, PeerInfo, PolicyView, Quota,
+    ResolveTable, SessionInfo, SshSessionRequest, SshSessionResponse, Subdomain, SubdomainReq,
 };
 
 /// Errors from the control-plane HTTP client.
@@ -252,6 +252,123 @@ pub async fn delete_subdomain(
         return Err(status_error(resp).await);
     }
     Ok(())
+}
+
+// ── F1 team membership ────────────────────────────────────────────────────────
+
+/// List the active tenant's members + cap + your role. `GET /api/v1/members`.
+pub async fn list_members(
+    http: &reqwest::Client,
+    base_url: &str,
+    session_token: &str,
+) -> Result<MembersView, ApiError> {
+    get_json(http, base_url, "/api/v1/members", session_token).await
+}
+
+/// Mint a member invite (admin). Returns the `ankayma://join-team?…` URL.
+pub async fn invite_member(
+    http: &reqwest::Client,
+    base_url: &str,
+    session_token: &str,
+) -> Result<String, ApiError> {
+    #[derive(serde::Deserialize)]
+    struct Resp {
+        url: String,
+    }
+    let resp = http
+        .post(url(base_url, "/api/v1/members/invite"))
+        .bearer_auth(session_token)
+        .send()
+        .await
+        .map_err(|e| ApiError::Transport(e.to_string()))?;
+    if !resp.status().is_success() {
+        return Err(status_error(resp).await);
+    }
+    resp.json::<Resp>()
+        .await
+        .map(|r| r.url)
+        .map_err(|e| ApiError::Decode(e.to_string()))
+}
+
+/// Redeem an invite to join a team. `POST /api/v1/members/join`.
+pub async fn join_team(
+    http: &reqwest::Client,
+    base_url: &str,
+    session_token: &str,
+    invite: &str,
+) -> Result<(), ApiError> {
+    let resp = http
+        .post(url(base_url, "/api/v1/members/join"))
+        .bearer_auth(session_token)
+        .json(&serde_json::json!({ "token": invite }))
+        .send()
+        .await
+        .map_err(|e| ApiError::Transport(e.to_string()))?;
+    if !resp.status().is_success() {
+        return Err(status_error(resp).await);
+    }
+    Ok(())
+}
+
+/// Remove a member (admin). `DELETE /api/v1/members/{user_id}`.
+pub async fn remove_member(
+    http: &reqwest::Client,
+    base_url: &str,
+    session_token: &str,
+    user_id: &str,
+) -> Result<(), ApiError> {
+    let resp = http
+        .delete(url(base_url, &format!("/api/v1/members/{user_id}")))
+        .bearer_auth(session_token)
+        .send()
+        .await
+        .map_err(|e| ApiError::Transport(e.to_string()))?;
+    if !resp.status().is_success() {
+        return Err(status_error(resp).await);
+    }
+    Ok(())
+}
+
+// ── PolicyBlock authz + my-access ─────────────────────────────────────────────
+
+/// Read the active PolicyBlock + chain status. `GET /api/v1/policies`.
+pub async fn get_policy(
+    http: &reqwest::Client,
+    base_url: &str,
+    session_token: &str,
+) -> Result<PolicyView, ApiError> {
+    get_json(http, base_url, "/api/v1/policies", session_token).await
+}
+
+/// Submit a new PolicyBlock (admin). `body` is the `{"rules":[…]}` JSON; the control
+/// plane rejects a cosmetic/network selector key (§B) with a clear message.
+pub async fn submit_policy(
+    http: &reqwest::Client,
+    base_url: &str,
+    session_token: &str,
+    body: &str,
+) -> Result<(), ApiError> {
+    let resp = http
+        .post(url(base_url, "/api/v1/policies"))
+        .bearer_auth(session_token)
+        .header("content-type", "application/json")
+        .body(body.to_string())
+        .send()
+        .await
+        .map_err(|e| ApiError::Transport(e.to_string()))?;
+    if !resp.status().is_success() {
+        return Err(status_error(resp).await);
+    }
+    Ok(())
+}
+
+/// The caller's service catalog derived from policy. `GET /api/v1/my-access`.
+pub async fn my_access(
+    http: &reqwest::Client,
+    base_url: &str,
+    session_token: &str,
+) -> Result<MyAccess, ApiError> {
+    get_json(http, base_url, "/api/v1/my-access", session_token).await
 }
 
 /// Exchange a CI OIDC token for ephemeral mesh access.

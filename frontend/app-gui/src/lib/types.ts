@@ -84,3 +84,36 @@ export interface Subdomain {
   target_node_id: string;
   created_at?: string;
 }
+
+// F1 team membership (Slice C).
+export interface Member {
+  user_id: string;
+  github_login: string;
+  role: string;
+  created_at?: string;
+  is_owner: boolean;
+}
+export interface MembersView {
+  members: Member[];
+  limit: number;
+  your_role: string;
+}
+
+// PolicyBlock authz (Slice B) + my-access catalog (Slice D).
+export interface PolicyView {
+  version: number;
+  rules: unknown; // raw JSON array of { from, to } rules
+  block_hash?: string;
+  chain_intact: boolean;
+}
+export interface AccessService {
+  fqdn: string;
+  label: string;
+  node: string;
+  rule_ref: string;
+}
+export interface MyAccess {
+  principal: string;
+  role: string;
+  services: AccessService[];
+}

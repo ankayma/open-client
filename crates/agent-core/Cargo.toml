@@ -12,6 +12,9 @@ crypto      = { workspace = true }
 # OpenSSL), matching control-plane. serde for the wire types. Deps owner-reviewable.
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 serde   = { version = "1", features = ["derive"] }
+# Already in the tree via reqwest's `json` feature; used for the policy-rules JSON
+# (arbitrary array) + small request bodies. Not a new external dependency.
+serde_json = "1"
 # [T:A.1.21] error plumbing for the OIDC token-fetch path (B-3); matches daemon.
 anyhow  = "1"
 # [T:A.1.21] WireGuard data-plane engine (owner-chosen stack). boringtun is
