@@ -4,8 +4,16 @@
 	// Backed by the existing `list_nodes` command (GET /api/v1/peers).
 	import { goto } from '$app/navigation';
 	import { onMount } from 'svelte';
+	import { connection } from '$lib/stores';
 	import { listNodes, getNodeInfo, deleteNode } from '$lib/tauri';
 	import type { PeerBrief } from '$lib/types';
+
+	// "Online" dot: this device follows the app's connection state (matches the
+	// dashboard); a peer is online when it advertises a reachable endpoint.
+	function isOnline(d: PeerBrief): boolean {
+		if (d.node_id === thisNodeId) return $connection.status === 'connected';
+		return !!d.endpoint;
+	}
 
 	let devices = $state<PeerBrief[]>([]);
 	let thisNodeId = $state<string | null>(null);
@@ -88,7 +96,7 @@
 		<ul class="device-list">
 			{#each sorted as d (d.node_id)}
 				<li class="device">
-					<span class="dot" class:online={!!d.endpoint}></span>
+					<span class="dot" class:online={isOnline(d)}></span>
 					<div class="info">
 						<div class="name-row">
 							<span class="name">{d.hostname}</span>
