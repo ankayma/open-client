@@ -49,6 +49,31 @@ export async function disconnect(): Promise<void> {
 	return invoke('disconnect');
 }
 
+// [milestone 1.2] Hand the enrolled identity to the privileged daemon so a real
+// WireGuard tunnel comes up (utun + boringtun need root → macOS admin prompt).
+// Enroll (connect) first. macOS-only at 1.1.
+export async function startDataplane(): Promise<void> {
+	return invoke('start_dataplane');
+}
+
+export async function stopDataplane(): Promise<void> {
+	return invoke('stop_dataplane');
+}
+
+// [slice 2] Live data-plane status from the daemon heartbeat file. `running` is
+// true only while the daemon is actually up (fresh heartbeat) — reflects the REAL
+// tunnel, not just enrollment.
+export interface DataplaneStatus {
+	running: boolean;
+	pid: number | null;
+	age_secs: number | null;
+	peers: { hostname: string; overlay_ip: string; endpoint: string | null }[];
+}
+
+export async function getDataplaneStatus(): Promise<DataplaneStatus> {
+	return invoke<DataplaneStatus>('get_dataplane_status');
+}
+
 export async function getQuota(): Promise<Quota> {
 	return invoke<Quota>('get_quota');
 }
@@ -82,4 +107,9 @@ export async function deleteCiPolicy(repo: string): Promise<void> {
 
 export async function listNodes(): Promise<PeerBrief[]> {
 	return invoke<PeerBrief[]>('list_nodes');
+}
+
+// Remove one of the tenant's own mesh nodes (retire a device). Tenant-scoped.
+export async function deleteNode(nodeId: string): Promise<void> {
+	return invoke('delete_node', { nodeId });
 }

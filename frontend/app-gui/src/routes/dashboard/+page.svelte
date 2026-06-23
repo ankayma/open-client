@@ -1,13 +1,73 @@
 <script lang="ts">
 	import { goto } from '$app/navigation';
+	import { onMount, onDestroy } from 'svelte';
 	import { auth, connection, quota } from '$lib/stores';
-	import { connect, disconnect, getQuota, getConnectionStatus, getPathProof } from '$lib/tauri';
+	import {
+		connect,
+		disconnect,
+		getQuota,
+		getConnectionStatus,
+		getPathProof,
+		startDataplane,
+		stopDataplane,
+		getDataplaneStatus,
+		type DataplaneStatus
+	} from '$lib/tauri';
 	import type { PathProof } from '$lib/types';
 
 	let toggling = $state(false);
 	let connectError = $state<string | null>(null);
 	let proof = $state<PathProof | null>(null);
 	let proving = $state(false);
+	let tunnelBusy = $state(false);
+	let tunnelMsg = $state<string | null>(null);
+	let dp = $state<DataplaneStatus | null>(null);
+
+	// [slice 2] Poll the daemon's live status so the card reflects the REAL tunnel
+	// (heartbeat fresh = up), not just enrollment.
+	async function refreshDataplane() {
+		try {
+			dp = await getDataplaneStatus();
+		} catch {
+			dp = null;
+		}
+	}
+	let dpTimer: ReturnType<typeof setInterval> | undefined;
+	onMount(() => {
+		refreshDataplane();
+		dpTimer = setInterval(refreshDataplane, 4000);
+	});
+	onDestroy(() => clearInterval(dpTimer));
+
+	// [milestone 1.2] Bring up / tear down the real WireGuard tunnel via the
+	// privileged daemon (macOS admin prompt). The GUI enrolls; the daemon owns the
+	// utun (needs root).
+	async function startTunnel() {
+		tunnelBusy = true;
+		tunnelMsg = null;
+		try {
+			await startDataplane();
+			tunnelMsg = 'Secure tunnel daemon launched — bringing the tunnel up…';
+			setTimeout(refreshDataplane, 1500);
+		} catch (e) {
+			tunnelMsg = e instanceof Error ? e.message : String(e);
+		} finally {
+			tunnelBusy = false;
+		}
+	}
+
+	async function stopTunnel() {
+		tunnelBusy = true;
+		tunnelMsg = null;
+		try {
+			await stopDataplane();
+			setTimeout(refreshDataplane, 1000);
+		} catch (e) {
+			tunnelMsg = e instanceof Error ? e.message : String(e);
+		} finally {
+			tunnelBusy = false;
+		}
+	}
 
 	// [F-5 "Prove it"] On demand, show that traffic is peer-to-peer and the vendor is
 	// never on the data path (A.1.1) — the differentiator, demoable from F0.
@@ -117,6 +177,34 @@
 		{#if connectError}
 			<p class="connect-error">{connectError}</p>
 		{/if}
+
+		{#if $connection.status === 'connected'}
+			{#if dp?.running}
+				<p style="margin-top:10px;font-size:13px;color:var(--c-success, #34d399);text-align:center;">
+					🔒 Secure tunnel up · {dp.peers.length} peer{dp.peers.length === 1 ? '' : 's'}
+				</p>
+				<button
+					class="tunnel-btn"
+					style="margin-top:8px;padding:10px 16px;border:1px solid var(--c-border);border-radius:8px;font-size:13px;color:var(--c-text-dim);background:transparent;"
+					onclick={stopTunnel}
+					disabled={tunnelBusy}
+				>
+					{tunnelBusy ? 'Stopping…' : 'Stop tunnel'}
+				</button>
+			{:else}
+				<button
+					class="tunnel-btn"
+					style="margin-top:10px;padding:10px 16px;border:1px solid var(--c-border);border-radius:8px;font-size:13px;color:var(--c-text);background:var(--c-surface);"
+					onclick={startTunnel}
+					disabled={tunnelBusy}
+				>
+					{tunnelBusy ? 'Starting…' : 'Bring up secure tunnel (admin)'}
+				</button>
+			{/if}
+			{#if tunnelMsg}
+				<p style="font-size:12px;color:var(--c-text-dim);text-align:center;margin-top:6px;overflow-wrap:anywhere;max-width:100%;">{tunnelMsg}</p>
+			{/if}
+		{/if}
 	</section>
 
 	<!-- [F-5 "Prove it"] The differentiator: prove the vendor is not on your data path. -->
@@ -159,6 +247,23 @@
 					no hop through the vendor.
 				</p>
 			{/if}
+
+			<!-- [F-5 / ND-A1] Coexistence proof: the "won't touch production" promise
+			     as a positive artifact (A.1.5). Structural — not a live measurement. -->
+			<div class="coexist">
+				<p class="coexist-label">Coexistence</p>
+				<div class="coexist-paths">
+					<div class="coexist-path">
+						<span class="cp-title">Path 1 · production-critical</span>
+						<span class="cp-body">DB replication, engine-native TLS — <strong>outside the mesh, untouched</strong>. No dependency on Ankayma being up.</span>
+					</div>
+					<div class="coexist-path secured">
+						<span class="cp-title">Path 2 · secured by Ankayma</span>
+						<span class="cp-body">This access — peer-to-peer, vendor off the data path.</span>
+					</div>
+				</div>
+				<p class="coexist-note">Structural guarantee (A.1.5) — turning on security doesn't put your running system on the mesh.</p>
+			</div>
 		</section>
 	{/if}
 
@@ -566,6 +671,58 @@
 		color: var(--c-text-dim);
 		line-height: 1.5;
 		margin: 0;
+	}
+
+	/* [F-5 / ND-A1] coexistence split-view */
+	.coexist {
+		margin-top: 14px;
+		border-top: 1px solid var(--c-border);
+		padding-top: 12px;
+	}
+	.coexist-label {
+		font-size: 11px;
+		text-transform: uppercase;
+		letter-spacing: 0.04em;
+		color: var(--c-text-dim);
+		margin: 0 0 8px;
+	}
+	.coexist-paths {
+		display: flex;
+		gap: 8px;
+		flex-wrap: wrap;
+	}
+	.coexist-path {
+		flex: 1;
+		min-width: 150px;
+		background: var(--c-surface);
+		border: 1px solid var(--c-border);
+		border-radius: 8px;
+		padding: 10px 12px;
+		display: flex;
+		flex-direction: column;
+		gap: 3px;
+	}
+	.coexist-path.secured {
+		background: color-mix(in srgb, var(--c-accent) 8%, var(--c-surface));
+		border-color: color-mix(in srgb, var(--c-accent) 30%, transparent);
+	}
+	.cp-title {
+		font-size: 12px;
+		font-weight: 600;
+		color: var(--c-text);
+	}
+	.coexist-path.secured .cp-title {
+		color: var(--c-accent);
+	}
+	.cp-body {
+		font-size: 11px;
+		color: var(--c-text-dim);
+		line-height: 1.5;
+	}
+	.coexist-note {
+		font-size: 10px;
+		color: var(--c-text-dim);
+		margin: 8px 0 0;
 	}
 
 	.prove-row {

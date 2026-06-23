@@ -162,13 +162,56 @@ fn current_connection(state: &AppState) -> ConnectionState {
     }
 }
 
-/// Real control-plane enrollment. Idempotent: a no-op if already enrolled.
+/// Reuse the persisted identity from the handoff file (~/.ankayma/agent.json) —
+/// the SAME node the daemon uses — but only if it still exists server-side, so a
+/// GUI restart/reconnect doesn't enroll a duplicate node. Returns None when there
+/// is no valid file or the stored node was removed (→ caller enrolls fresh).
+async fn load_handoff_node(state: &AppState, tok: &str) -> Option<EnrolledNode> {
+    let home = std::env::var("HOME").ok()?;
+    let path = std::path::Path::new(&home).join(".ankayma/agent.json");
+    let bytes = std::fs::read(&path).ok()?;
+    #[derive(serde::Deserialize)]
+    struct Stored {
+        private_b64: String,
+        public_b64: String,
+        node_id: String,
+        overlay_ip: String,
+    }
+    let s: Stored = serde_json::from_slice(&bytes).ok()?;
+    let peers = adapters::peers(&state.http, &state.base_url, tok)
+        .await
+        .ok()?;
+    // The stored node must still be in the tenant roster (not deleted server-side),
+    // else fall through to a fresh enroll instead of showing a ghost node.
+    if !peers.iter().any(|p| p.node_id == s.node_id) {
+        return None;
+    }
+    Some(EnrolledNode {
+        private_b64: s.private_b64,
+        public_b64: s.public_b64,
+        node_id: s.node_id,
+        overlay_ip: s.overlay_ip,
+        peers,
+    })
+}
+
+/// Real control-plane enrollment. Idempotent: reuses a persisted identity if one
+/// exists; a no-op if already enrolled in-process.
 async fn connect_inner(state: &AppState) -> Result<(), String> {
     let tok = state.token().ok_or("not signed in")?;
     if state.node.lock().expect("node lock poisoned").is_some() {
         return Ok(());
     }
-    // Real flow: fresh WireGuard keypair → enroll → overlay IP + peers.
+
+    // Reuse the persisted identity (the daemon's node) if it still exists — so a
+    // GUI restart/reconnect does NOT enroll a duplicate node. Only enroll fresh
+    // when there is no valid identity. [T:A.1.10]
+    if let Some(node) = load_handoff_node(state, &tok).await {
+        *state.node.lock().expect("node lock poisoned") = Some(node);
+        return Ok(());
+    }
+
+    // Fresh: new WireGuard keypair → enroll → overlay IP + peers.
     let kp = WgKeypair::generate();
     let req = EnrollRequest {
         public_key: kp.public_b64.clone(),
@@ -178,6 +221,20 @@ async fn connect_inner(state: &AppState) -> Result<(), String> {
     let resp = adapters::enroll(&state.http, &state.base_url, &tok, &req)
         .await
         .map_err(|e| e.to_string())?;
+
+    // Handoff: persist this identity where the privileged daemon (`agent up`)
+    // reads it (~/.ankayma/agent.json), so the data plane reuses THIS node — no
+    // duplicate enrollment. The GUI never opens a utun itself (needs root);
+    // `start_dataplane` hands off to the daemon. [T:A.1.10 / up.rs load_or_enroll]
+    if let Err(e) = write_handoff_state(
+        &kp.private_b64,
+        &kp.public_b64,
+        &resp.node_id,
+        &resp.overlay_ip,
+    ) {
+        log::warn!("handoff state not written ({e}); `agent up` would re-enroll");
+    }
+
     *state.node.lock().expect("node lock poisoned") = Some(EnrolledNode {
         private_b64: kp.private_b64,
         public_b64: kp.public_b64,
@@ -185,8 +242,6 @@ async fn connect_inner(state: &AppState) -> Result<(), String> {
         overlay_ip: resp.overlay_ip,
         peers: resp.peers,
     });
-    // [A] data path next: hand private_b64 + peers to the privileged daemon to
-    // bring up a utun device and route packets through boringtun.
     Ok(())
 }
 
@@ -410,6 +465,206 @@ async fn create_join_link(state: State<'_, AppState>) -> Result<String, String> 
         .map_err(|e| e.to_string())
 }
 
+// --- Data plane (milestone 1.2 — privileged daemon handoff) ---
+// The GUI cannot open a utun device (root-only on macOS), so it enrolls on the
+// control plane (no privilege) and hands the identity to the `agent` daemon,
+// which owns the kernel tunnel (utun + boringtun). Mirrors up.rs `AgentState`.
+
+const DATAPLANE_LISTEN_PORT: u16 = 51820; // WireGuard default; matches agent-daemon
+
+/// Persist the enrolled identity to `~/.ankayma/agent.json` — the same file the
+/// privileged `agent` daemon reads on `agent up`, so it reuses THIS node instead
+/// of enrolling a second one. Shape mirrors `agent-daemon::up::AgentState`.
+fn write_handoff_state(
+    private_b64: &str,
+    public_b64: &str,
+    node_id: &str,
+    overlay_ip: &str,
+) -> Result<(), String> {
+    let home = std::env::var("HOME").map_err(|_| "HOME not set".to_string())?;
+    let dir = std::path::Path::new(&home).join(".ankayma");
+    std::fs::create_dir_all(&dir).map_err(|e| format!("mkdir ~/.ankayma: {e}"))?;
+    let state = serde_json::json!({
+        "private_b64": private_b64,
+        "public_b64": public_b64,
+        "node_id": node_id,
+        "overlay_ip": overlay_ip,
+        "listen_port": DATAPLANE_LISTEN_PORT,
+    });
+    let bytes = serde_json::to_vec_pretty(&state).map_err(|e| e.to_string())?;
+    std::fs::write(dir.join("agent.json"), bytes).map_err(|e| format!("write agent.json: {e}"))
+}
+
+/// Locate the `agent` daemon binary — next to this app (bundled) or a dev build.
+fn locate_agent_binary() -> Result<std::path::PathBuf, String> {
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            let sib = dir.join("agent");
+            if sib.exists() {
+                return Ok(sib);
+            }
+        }
+    }
+    for p in [
+        "target/debug/agent",
+        "target/release/agent",
+        "../../target/debug/agent",
+        "../../target/release/agent",
+    ] {
+        let pb = std::path::PathBuf::from(p);
+        if pb.exists() {
+            return Ok(pb.canonicalize().unwrap_or(pb));
+        }
+    }
+    Err("agent daemon binary not found (looked next to the app and in target/)".into())
+}
+
+/// Launch the privileged `agent` daemon (utun + boringtun need root). macOS shows
+/// one admin prompt; the daemon detaches and reuses ~/.ankayma/agent.json.
+#[cfg(target_os = "macos")]
+fn bring_up_dataplane(
+    agent_bin: &std::path::Path,
+    token: &str,
+    control_plane: &str,
+) -> Result<(), String> {
+    let bin = agent_bin.to_string_lossy();
+    // Session token is hex, control-plane is a URL — no shell metacharacters.
+    // Single-quote paths (an .app bundle path may contain spaces).
+    let sh = format!(
+        "nohup '{bin}' up --token {token} --control-plane '{control_plane}' \
+         >> /tmp/ankayma-agent.log 2>&1 &"
+    );
+    let script = format!("do shell script \"{sh}\" with administrator privileges");
+    let out = std::process::Command::new("osascript")
+        .arg("-e")
+        .arg(script)
+        .output()
+        .map_err(|e| format!("launch privileged daemon: {e}"))?;
+    if !out.status.success() {
+        return Err(format!(
+            "data plane launch failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn bring_up_dataplane(_b: &std::path::Path, _t: &str, _c: &str) -> Result<(), String> {
+    Err("data plane is macOS-only at milestone 1.2".into())
+}
+
+/// Hand the enrolled identity to the privileged daemon so a real WireGuard tunnel
+/// comes up. Enroll (`connect`) first; macOS prompts for admin once.
+#[tauri::command]
+async fn start_dataplane(state: State<'_, AppState>) -> Result<(), String> {
+    let tok = state.token().ok_or("not signed in")?;
+    if state.node.lock().expect("node lock poisoned").is_none() {
+        return Err("not connected — enroll first".into());
+    }
+    let bin = locate_agent_binary()?;
+    bring_up_dataplane(&bin, &tok, &state.base_url)
+}
+
+/// Tear down the data plane (stop the privileged daemon). Killing a root-owned
+/// process needs admin — macOS prompts once. Prefer the recorded PID (clean),
+/// fall back to a name match.
+#[tauri::command]
+async fn stop_dataplane() -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        let home = std::env::var("HOME").unwrap_or_default();
+        let pid = std::fs::read(format!("{home}/.ankayma/agent-status.json"))
+            .ok()
+            .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
+            .and_then(|v| v.get("pid").and_then(|p| p.as_u64()));
+        let kill = match pid {
+            Some(p) => format!("kill {p} 2>/dev/null || pkill -f 'agent up' || true"),
+            None => "pkill -f 'agent up' || true".to_string(),
+        };
+        let script = format!("do shell script \"{kill}\" with administrator privileges");
+        let out = std::process::Command::new("osascript")
+            .arg("-e")
+            .arg(script)
+            .output()
+            .map_err(|e| format!("stop daemon: {e}"))?;
+        if !out.status.success() {
+            return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
+        }
+        Ok(())
+    }
+    #[cfg(not(target_os = "macos"))]
+    Err("data plane is macOS-only".into())
+}
+
+#[derive(serde::Serialize)]
+struct DataplanePeer {
+    hostname: String,
+    overlay_ip: String,
+    endpoint: Option<String>,
+}
+
+/// Live data-plane status read from the daemon's heartbeat file. `running` is
+/// true only if the file is fresh (daemon heartbeats every 5s; >15s stale = down,
+/// and a clean shutdown removes the file). This is how the GUI reflects the REAL
+/// tunnel instead of just "enrolled". Connection-level only [T:A.1.1].
+#[derive(serde::Serialize)]
+struct DataplaneStatus {
+    running: bool,
+    pid: Option<u32>,
+    age_secs: Option<u64>,
+    peers: Vec<DataplanePeer>,
+}
+
+#[tauri::command]
+async fn get_dataplane_status() -> Result<DataplaneStatus, String> {
+    let down = || DataplaneStatus {
+        running: false,
+        pid: None,
+        age_secs: None,
+        peers: vec![],
+    };
+    let home = std::env::var("HOME").map_err(|_| "HOME not set".to_string())?;
+    let path = std::path::Path::new(&home).join(".ankayma/agent-status.json");
+    let Ok(bytes) = std::fs::read(&path) else {
+        return Ok(down());
+    };
+    #[derive(serde::Deserialize)]
+    struct FilePeer {
+        hostname: String,
+        overlay_ip: String,
+        endpoint: Option<String>,
+    }
+    #[derive(serde::Deserialize)]
+    struct FileStatus {
+        pid: u32,
+        updated_at: u64,
+        peers: Vec<FilePeer>,
+    }
+    let Ok(s) = serde_json::from_slice::<FileStatus>(&bytes) else {
+        return Ok(down());
+    };
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let age = now.saturating_sub(s.updated_at);
+    Ok(DataplaneStatus {
+        running: age <= 15,
+        pid: Some(s.pid),
+        age_secs: Some(age),
+        peers: s
+            .peers
+            .into_iter()
+            .map(|p| DataplanePeer {
+                hostname: p.hostname,
+                overlay_ip: p.overlay_ip,
+                endpoint: p.endpoint,
+            })
+            .collect(),
+    })
+}
+
 #[tauri::command]
 async fn track_event(
     name: String,
@@ -472,6 +727,32 @@ async fn delete_ci_policy(repo: String, state: State<'_, AppState>) -> Result<()
     adapters::delete_ci_policy(&state.http, &state.base_url, &tok, &repo)
         .await
         .map_err(|e| e.to_string())
+}
+
+/// Remove one of the tenant's own mesh nodes (retire a device). Tenant-scoped on
+/// the control plane (A.1.6). If it's THIS device, also drop the local identity
+/// so the next connect enrolls cleanly.
+#[tauri::command]
+async fn delete_node(node_id: String, state: State<'_, AppState>) -> Result<(), String> {
+    let tok = state.token().ok_or("not signed in")?;
+    adapters::delete_node(&state.http, &state.base_url, &tok, &node_id)
+        .await
+        .map_err(|e| e.to_string())?;
+    // If we removed the node we're currently using, clear local state + handoff so
+    // we don't keep a ghost identity.
+    let is_self = state
+        .node
+        .lock()
+        .expect("node lock poisoned")
+        .as_ref()
+        .is_some_and(|n| n.node_id == node_id);
+    if is_self {
+        *state.node.lock().expect("node lock poisoned") = None;
+        if let Ok(home) = std::env::var("HOME") {
+            let _ = std::fs::remove_file(format!("{home}/.ankayma/agent.json"));
+        }
+    }
+    Ok(())
 }
 
 /// Tenant node roster for the deploy-target picker. Reuses `GET /api/v1/peers`.
@@ -761,7 +1042,11 @@ pub fn run() {
             add_ci_policy,
             delete_ci_policy,
             list_nodes,
+            delete_node,
             create_join_link,
+            start_dataplane,
+            stop_dataplane,
+            get_dataplane_status,
             track_event,
             open_stripe_checkout,
         ])

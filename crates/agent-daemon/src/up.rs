@@ -159,6 +159,10 @@ pub(crate) async fn serve_dataplane(
     // Hold the device for the process lifetime; the threads use the raw fd.
     let _dev = dev;
 
+    // [slice 2] Publish live status for the GUI (proves the data plane is up,
+    // not just enrolled). Refreshed every roster cycle below = a heartbeat.
+    write_status(&state.node_id, &state.overlay_ip, state.listen_port, &peers);
+
     spawn_tx(fd, udp.clone(), peers.clone());
     spawn_rx(fd, udp.clone(), peers.clone());
     spawn_timers(udp.clone(), peers.clone());
@@ -168,6 +172,11 @@ pub(crate) async fn serve_dataplane(
         let (http, cp, token) = (ctx.http, ctx.control_plane, ctx.token);
         let (peers, index, udp) = (peers.clone(), index.clone(), udp.clone());
         let dev_name = dev_name.clone();
+        let (node_id, overlay_s, port) = (
+            state.node_id.clone(),
+            state.overlay_ip.clone(),
+            state.listen_port,
+        );
         async move {
             loop {
                 tokio::time::sleep(Duration::from_secs(5)).await;
@@ -185,6 +194,8 @@ pub(crate) async fn serve_dataplane(
                         println!("discovered {added} new peer(s)");
                     }
                 }
+                // Heartbeat + fresh roster for the GUI status reader.
+                write_status(&node_id, &overlay_s, port, &peers);
             }
         }
     };
@@ -193,6 +204,8 @@ pub(crate) async fn serve_dataplane(
         _ = refresh => {}
         _ = tokio::signal::ctrl_c() => println!("\nshutting down."),
     }
+    // Tunnel down → remove the status file so the GUI shows "not up".
+    let _ = std::fs::remove_file(status_path());
     Ok(())
 }
 
@@ -241,6 +254,62 @@ impl Config {
 fn default_state_path() -> String {
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
     format!("{home}/.ankayma/agent.json")
+}
+
+// [slice 2] Live data-plane status, published for the GUI to read. The GUI runs
+// unprivileged and never opens the tunnel itself, so this file is how it learns
+// the daemon is actually up (not just enrolled) + the current peer roster.
+// Connection-level only (hostname/overlay/endpoint) — never payload [T:A.1.1].
+fn status_path() -> String {
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
+    format!("{home}/.ankayma/agent-status.json")
+}
+
+#[derive(serde::Serialize)]
+struct StatusPeer {
+    hostname: String,
+    overlay_ip: String,
+    endpoint: Option<String>,
+}
+
+#[derive(serde::Serialize)]
+struct DataplaneStatus {
+    pid: u32,
+    node_id: String,
+    overlay_ip: String,
+    listen_port: u16,
+    updated_at: u64, // unix seconds — GUI treats a stale file as "down"
+    peers: Vec<StatusPeer>,
+}
+
+/// Write the live status file (best-effort; never fail the data plane on a write
+/// error). Called at startup and on every roster refresh = a heartbeat.
+fn write_status(node_id: &str, overlay_ip: &str, listen_port: u16, peers: &Peers) {
+    let updated_at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let list: Vec<StatusPeer> = peers
+        .lock()
+        .expect("peers lock")
+        .iter()
+        .map(|p| StatusPeer {
+            hostname: p.peer.hostname.clone(),
+            overlay_ip: p.peer.overlay_ip.to_string(),
+            endpoint: p.endpoint().map(|e| e.to_string()),
+        })
+        .collect();
+    let status = DataplaneStatus {
+        pid: std::process::id(),
+        node_id: node_id.to_string(),
+        overlay_ip: overlay_ip.to_string(),
+        listen_port,
+        updated_at,
+        peers: list,
+    };
+    if let Ok(bytes) = serde_json::to_vec_pretty(&status) {
+        let _ = std::fs::write(status_path(), bytes);
+    }
 }
 
 /// Reuse a persisted identity if present; otherwise generate a keypair, enroll

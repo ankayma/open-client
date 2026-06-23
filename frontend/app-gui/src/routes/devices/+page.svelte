@@ -4,13 +4,23 @@
 	// Backed by the existing `list_nodes` command (GET /api/v1/peers).
 	import { goto } from '$app/navigation';
 	import { onMount } from 'svelte';
-	import { listNodes, getNodeInfo } from '$lib/tauri';
+	import { connection } from '$lib/stores';
+	import { listNodes, getNodeInfo, deleteNode } from '$lib/tauri';
 	import type { PeerBrief } from '$lib/types';
+
+	// "Online" dot: this device follows the app's connection state (matches the
+	// dashboard); a peer is online when it advertises a reachable endpoint.
+	function isOnline(d: PeerBrief): boolean {
+		if (d.node_id === thisNodeId) return $connection.status === 'connected';
+		return !!d.endpoint;
+	}
 
 	let devices = $state<PeerBrief[]>([]);
 	let thisNodeId = $state<string | null>(null);
 	let loading = $state(true);
 	let error = $state('');
+	let confirmNode = $state<PeerBrief | null>(null);
+	let removing = $state(false);
 
 	async function load() {
 		loading = true;
@@ -30,6 +40,19 @@
 		}
 	}
 	onMount(load);
+
+	async function removeDevice(nodeId: string) {
+		removing = true;
+		try {
+			await deleteNode(nodeId);
+			confirmNode = null;
+			await load();
+		} catch (e) {
+			error = String(e);
+		} finally {
+			removing = false;
+		}
+	}
 
 	// This device on top, then by hostname.
 	let sorted = $derived(
@@ -73,7 +96,7 @@
 		<ul class="device-list">
 			{#each sorted as d (d.node_id)}
 				<li class="device">
-					<span class="dot" class:online={!!d.endpoint}></span>
+					<span class="dot" class:online={isOnline(d)}></span>
 					<div class="info">
 						<div class="name-row">
 							<span class="name">{d.hostname}</span>
@@ -82,6 +105,14 @@
 						<span class="ip">{d.overlay_ip}</span>
 						{#if d.endpoint}<span class="endpoint">{d.endpoint}</span>{/if}
 					</div>
+					<button
+						class="remove"
+						style="margin-left:auto;width:32px;height:32px;display:flex;align-items:center;justify-content:center;color:var(--c-text-dim);border-radius:6px;flex-shrink:0;background:transparent;"
+						aria-label="Remove device"
+						onclick={() => (confirmNode = d)}
+					>
+						<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
+					</button>
 				</li>
 			{/each}
 		</ul>
@@ -94,6 +125,37 @@
 		</button>
 	{/if}
 </main>
+
+{#if confirmNode}
+	<div
+		role="presentation"
+		onclick={() => (confirmNode = null)}
+		style="position:fixed;inset:0;background:rgba(0,0,0,0.55);display:flex;align-items:center;justify-content:center;padding:24px;z-index:50;"
+	>
+		<div
+			role="dialog"
+			aria-modal="true"
+			tabindex="-1"
+			onclick={(e) => e.stopPropagation()}
+			style="background:var(--c-surface);border:1px solid var(--c-border);border-radius:var(--radius);padding:20px;max-width:340px;width:100%;display:flex;flex-direction:column;gap:16px;"
+		>
+			<p style="font-size:15px;line-height:1.5;">
+				Remove <strong>{confirmNode.hostname}</strong> from your mesh?{#if confirmNode.node_id === thisNodeId}
+					This is the current device — it re-enrolls on the next connect.{/if}
+			</p>
+			<div style="display:flex;justify-content:flex-end;gap:8px;">
+				<button onclick={() => (confirmNode = null)} style="padding:9px 16px;border-radius:8px;color:var(--c-text-dim);background:transparent;">Cancel</button>
+				<button
+					disabled={removing}
+					onclick={() => removeDevice(confirmNode!.node_id)}
+					style="padding:9px 16px;border-radius:8px;background:var(--c-danger, #ef4444);color:#fff;"
+				>
+					{removing ? 'Removing…' : 'Remove'}
+				</button>
+			</div>
+		</div>
+	</div>
+{/if}
 
 <style>
 	main {

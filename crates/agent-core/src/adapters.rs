@@ -335,6 +335,23 @@ pub async fn delete_ci_policy(
     expect_ok(resp).await
 }
 
+/// Remove one of the tenant's own mesh nodes (retire a device).
+/// `DELETE /api/v1/nodes/{id}` (session-authed, tenant-scoped). `[T:A.1.6]`
+pub async fn delete_node(
+    http: &reqwest::Client,
+    base_url: &str,
+    session_token: &str,
+    node_id: &str,
+) -> Result<(), ApiError> {
+    let resp = http
+        .delete(url(base_url, &format!("/api/v1/nodes/{node_id}")))
+        .bearer_auth(session_token)
+        .send()
+        .await
+        .map_err(|e| ApiError::Transport(e.to_string()))?;
+    expect_ok(resp).await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
