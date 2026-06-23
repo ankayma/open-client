@@ -18,6 +18,7 @@ mod agent_token;
 mod ci_deploy;
 mod ci_policy;
 mod netstack;
+mod ssh;
 mod tun;
 mod up;
 
@@ -32,11 +33,13 @@ async fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     // `agent up …` brings the WireGuard overlay online (data plane);
     // `agent ci-deploy …` does a secretless CI deploy (Part C §H.3.3);
+    // `agent ssh <node> …` opens a Sovereign SSH session (F-2, Part C §H.3.6.1);
     // `agent enroll-identity …` redeems a non-human/agent identity (F-4). Anything
     // else stays the existing Gate A.1.4 NATS encryption harness.
     match args.first().map(String::as_str) {
         Some("up") => up::run(&args[1..]).await,
         Some("ci-deploy") => ci_deploy::run(&args[1..]).await,
+        Some("ssh") => ssh::run(&args[1..]).await,
         Some("ci-policy") => ci_policy::run(&args[1..]).await,
         Some("agent-token") => agent_token::run(&args[1..]).await,
         Some("enroll-identity") => agent_identity::run(&args[1..]).await,
