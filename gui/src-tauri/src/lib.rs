@@ -178,7 +178,9 @@ async fn load_handoff_node(state: &AppState, tok: &str) -> Option<EnrolledNode> 
         overlay_ip: String,
     }
     let s: Stored = serde_json::from_slice(&bytes).ok()?;
-    let peers = adapters::peers(&state.http, &state.base_url, tok).await.ok()?;
+    let peers = adapters::peers(&state.http, &state.base_url, tok)
+        .await
+        .ok()?;
     // The stored node must still be in the tenant roster (not deleted server-side),
     // else fall through to a fresh enroll instead of showing a ghost node.
     if !peers.iter().any(|p| p.node_id == s.node_id) {
@@ -727,6 +729,32 @@ async fn delete_ci_policy(repo: String, state: State<'_, AppState>) -> Result<()
         .map_err(|e| e.to_string())
 }
 
+/// Remove one of the tenant's own mesh nodes (retire a device). Tenant-scoped on
+/// the control plane (A.1.6). If it's THIS device, also drop the local identity
+/// so the next connect enrolls cleanly.
+#[tauri::command]
+async fn delete_node(node_id: String, state: State<'_, AppState>) -> Result<(), String> {
+    let tok = state.token().ok_or("not signed in")?;
+    adapters::delete_node(&state.http, &state.base_url, &tok, &node_id)
+        .await
+        .map_err(|e| e.to_string())?;
+    // If we removed the node we're currently using, clear local state + handoff so
+    // we don't keep a ghost identity.
+    let is_self = state
+        .node
+        .lock()
+        .expect("node lock poisoned")
+        .as_ref()
+        .is_some_and(|n| n.node_id == node_id);
+    if is_self {
+        *state.node.lock().expect("node lock poisoned") = None;
+        if let Ok(home) = std::env::var("HOME") {
+            let _ = std::fs::remove_file(format!("{home}/.ankayma/agent.json"));
+        }
+    }
+    Ok(())
+}
+
 /// Tenant node roster for the deploy-target picker. Reuses `GET /api/v1/peers`.
 #[tauri::command]
 async fn list_nodes(state: State<'_, AppState>) -> Result<Vec<domain::PeerInfo>, String> {
@@ -1014,6 +1042,7 @@ pub fn run() {
             add_ci_policy,
             delete_ci_policy,
             list_nodes,
+            delete_node,
             create_join_link,
             start_dataplane,
             stop_dataplane,

@@ -108,3 +108,8 @@ export async function deleteCiPolicy(repo: string): Promise<void> {
 export async function listNodes(): Promise<PeerBrief[]> {
 	return invoke<PeerBrief[]>('list_nodes');
 }
+
+// Remove one of the tenant's own mesh nodes (retire a device). Tenant-scoped.
+export async function deleteNode(nodeId: string): Promise<void> {
+	return invoke('delete_node', { nodeId });
+}
