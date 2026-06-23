@@ -49,6 +49,17 @@ export async function disconnect(): Promise<void> {
 	return invoke('disconnect');
 }
 
+// [milestone 1.2] Hand the enrolled identity to the privileged daemon so a real
+// WireGuard tunnel comes up (utun + boringtun need root → macOS admin prompt).
+// Enroll (connect) first. macOS-only at 1.1.
+export async function startDataplane(): Promise<void> {
+	return invoke('start_dataplane');
+}
+
+export async function stopDataplane(): Promise<void> {
+	return invoke('stop_dataplane');
+}
+
 export async function getQuota(): Promise<Quota> {
 	return invoke<Quota>('get_quota');
 }

@@ -1,13 +1,30 @@
 <script lang="ts">
 	import { goto } from '$app/navigation';
 	import { auth, connection, quota } from '$lib/stores';
-	import { connect, disconnect, getQuota, getConnectionStatus, getPathProof } from '$lib/tauri';
+	import { connect, disconnect, getQuota, getConnectionStatus, getPathProof, startDataplane } from '$lib/tauri';
 	import type { PathProof } from '$lib/types';
 
 	let toggling = $state(false);
 	let connectError = $state<string | null>(null);
 	let proof = $state<PathProof | null>(null);
 	let proving = $state(false);
+	let tunnelBusy = $state(false);
+	let tunnelMsg = $state<string | null>(null);
+
+	// [milestone 1.2] Bring up the real WireGuard tunnel via the privileged daemon
+	// (macOS admin prompt). The GUI enrolls; the daemon owns the utun (needs root).
+	async function startTunnel() {
+		tunnelBusy = true;
+		tunnelMsg = null;
+		try {
+			await startDataplane();
+			tunnelMsg = 'Secure tunnel daemon launched — press "Prove it" to see the path.';
+		} catch (e) {
+			tunnelMsg = e instanceof Error ? e.message : String(e);
+		} finally {
+			tunnelBusy = false;
+		}
+	}
 
 	// [F-5 "Prove it"] On demand, show that traffic is peer-to-peer and the vendor is
 	// never on the data path (A.1.1) — the differentiator, demoable from F0.
@@ -116,6 +133,20 @@
 
 		{#if connectError}
 			<p class="connect-error">{connectError}</p>
+		{/if}
+
+		{#if $connection.status === 'connected'}
+			<button
+				class="tunnel-btn"
+				style="margin-top:10px;padding:10px 16px;border:1px solid var(--c-border);border-radius:8px;font-size:13px;color:var(--c-text);background:var(--c-surface);"
+				onclick={startTunnel}
+				disabled={tunnelBusy}
+			>
+				{tunnelBusy ? 'Starting…' : 'Bring up secure tunnel (admin)'}
+			</button>
+			{#if tunnelMsg}
+				<p style="font-size:12px;color:var(--c-text-dim);text-align:center;margin-top:6px;overflow-wrap:anywhere;max-width:100%;">{tunnelMsg}</p>
+			{/if}
 		{/if}
 	</section>
 

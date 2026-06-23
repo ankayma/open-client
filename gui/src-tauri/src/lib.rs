@@ -178,6 +178,17 @@ async fn connect_inner(state: &AppState) -> Result<(), String> {
     let resp = adapters::enroll(&state.http, &state.base_url, &tok, &req)
         .await
         .map_err(|e| e.to_string())?;
+
+    // Handoff: persist this identity where the privileged daemon (`agent up`)
+    // reads it (~/.ankayma/agent.json), so the data plane reuses THIS node — no
+    // duplicate enrollment. The GUI never opens a utun itself (needs root);
+    // `start_dataplane` hands off to the daemon. [T:A.1.10 / up.rs load_or_enroll]
+    if let Err(e) =
+        write_handoff_state(&kp.private_b64, &kp.public_b64, &resp.node_id, &resp.overlay_ip)
+    {
+        log::warn!("handoff state not written ({e}); `agent up` would re-enroll");
+    }
+
     *state.node.lock().expect("node lock poisoned") = Some(EnrolledNode {
         private_b64: kp.private_b64,
         public_b64: kp.public_b64,
@@ -185,8 +196,6 @@ async fn connect_inner(state: &AppState) -> Result<(), String> {
         overlay_ip: resp.overlay_ip,
         peers: resp.peers,
     });
-    // [A] data path next: hand private_b64 + peers to the privileged daemon to
-    // bring up a utun device and route packets through boringtun.
     Ok(())
 }
 
@@ -408,6 +417,127 @@ async fn create_join_link(state: State<'_, AppState>) -> Result<String, String> 
     adapters::issue_join_token(&state.http, &state.base_url, &tok)
         .await
         .map_err(|e| e.to_string())
+}
+
+// --- Data plane (milestone 1.2 — privileged daemon handoff) ---
+// The GUI cannot open a utun device (root-only on macOS), so it enrolls on the
+// control plane (no privilege) and hands the identity to the `agent` daemon,
+// which owns the kernel tunnel (utun + boringtun). Mirrors up.rs `AgentState`.
+
+const DATAPLANE_LISTEN_PORT: u16 = 51820; // WireGuard default; matches agent-daemon
+
+/// Persist the enrolled identity to `~/.ankayma/agent.json` — the same file the
+/// privileged `agent` daemon reads on `agent up`, so it reuses THIS node instead
+/// of enrolling a second one. Shape mirrors `agent-daemon::up::AgentState`.
+fn write_handoff_state(
+    private_b64: &str,
+    public_b64: &str,
+    node_id: &str,
+    overlay_ip: &str,
+) -> Result<(), String> {
+    let home = std::env::var("HOME").map_err(|_| "HOME not set".to_string())?;
+    let dir = std::path::Path::new(&home).join(".ankayma");
+    std::fs::create_dir_all(&dir).map_err(|e| format!("mkdir ~/.ankayma: {e}"))?;
+    let state = serde_json::json!({
+        "private_b64": private_b64,
+        "public_b64": public_b64,
+        "node_id": node_id,
+        "overlay_ip": overlay_ip,
+        "listen_port": DATAPLANE_LISTEN_PORT,
+    });
+    let bytes = serde_json::to_vec_pretty(&state).map_err(|e| e.to_string())?;
+    std::fs::write(dir.join("agent.json"), bytes).map_err(|e| format!("write agent.json: {e}"))
+}
+
+/// Locate the `agent` daemon binary — next to this app (bundled) or a dev build.
+fn locate_agent_binary() -> Result<std::path::PathBuf, String> {
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            let sib = dir.join("agent");
+            if sib.exists() {
+                return Ok(sib);
+            }
+        }
+    }
+    for p in [
+        "target/debug/agent",
+        "target/release/agent",
+        "../../target/debug/agent",
+        "../../target/release/agent",
+    ] {
+        let pb = std::path::PathBuf::from(p);
+        if pb.exists() {
+            return Ok(pb.canonicalize().unwrap_or(pb));
+        }
+    }
+    Err("agent daemon binary not found (looked next to the app and in target/)".into())
+}
+
+/// Launch the privileged `agent` daemon (utun + boringtun need root). macOS shows
+/// one admin prompt; the daemon detaches and reuses ~/.ankayma/agent.json.
+#[cfg(target_os = "macos")]
+fn bring_up_dataplane(
+    agent_bin: &std::path::Path,
+    token: &str,
+    control_plane: &str,
+) -> Result<(), String> {
+    let bin = agent_bin.to_string_lossy();
+    // Session token is hex, control-plane is a URL — no shell metacharacters.
+    // Single-quote paths (an .app bundle path may contain spaces).
+    let sh = format!(
+        "nohup '{bin}' up --token {token} --control-plane '{control_plane}' \
+         >> /tmp/ankayma-agent.log 2>&1 &"
+    );
+    let script = format!("do shell script \"{sh}\" with administrator privileges");
+    let out = std::process::Command::new("osascript")
+        .arg("-e")
+        .arg(script)
+        .output()
+        .map_err(|e| format!("launch privileged daemon: {e}"))?;
+    if !out.status.success() {
+        return Err(format!(
+            "data plane launch failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn bring_up_dataplane(_b: &std::path::Path, _t: &str, _c: &str) -> Result<(), String> {
+    Err("data plane is macOS-only at milestone 1.2".into())
+}
+
+/// Hand the enrolled identity to the privileged daemon so a real WireGuard tunnel
+/// comes up. Enroll (`connect`) first; macOS prompts for admin once.
+#[tauri::command]
+async fn start_dataplane(state: State<'_, AppState>) -> Result<(), String> {
+    let tok = state.token().ok_or("not signed in")?;
+    if state.node.lock().expect("node lock poisoned").is_none() {
+        return Err("not connected — enroll first".into());
+    }
+    let bin = locate_agent_binary()?;
+    bring_up_dataplane(&bin, &tok, &state.base_url)
+}
+
+/// Tear down the data plane (stop the privileged daemon). Killing a root-owned
+/// process needs admin — macOS prompts once.
+#[tauri::command]
+async fn stop_dataplane() -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        let out = std::process::Command::new("osascript")
+            .arg("-e")
+            .arg("do shell script \"pkill -f 'agent up' || true\" with administrator privileges")
+            .output()
+            .map_err(|e| format!("stop daemon: {e}"))?;
+        if !out.status.success() {
+            return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
+        }
+        Ok(())
+    }
+    #[cfg(not(target_os = "macos"))]
+    Err("data plane is macOS-only".into())
 }
 
 #[tauri::command]
@@ -762,6 +892,8 @@ pub fn run() {
             delete_ci_policy,
             list_nodes,
             create_join_link,
+            start_dataplane,
+            stop_dataplane,
             track_event,
             open_stripe_checkout,
         ])
