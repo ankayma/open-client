@@ -353,29 +353,26 @@ fn token_from_deep_link(url: &url::Url) -> Option<String> {
         .filter(|t| !t.is_empty())
 }
 
-/// Handle one batch of deep-link URLs: validate the token, sign in, focus the
-/// window, and tell the frontend (`signed-in`) so it navigates to the dashboard.
+/// Handle a batch of deep-link URLs (cold OR warm start): hold the token and nudge
+/// the frontend. We do NOT validate-and-emit here because that races the webview's
+/// listeners; instead the frontend's `check_auth_state` (driven on mount, on the
+/// `auth-pending` nudge, and on window focus) adopts the held token and navigates to
+/// the dashboard — one code path, no timing assumptions.
 fn handle_deep_links(app: &AppHandle, urls: Vec<url::Url>) {
+    let st = app.state::<AppState>();
+    let mut got = false;
     for url in urls {
-        let Some(token) = token_from_deep_link(&url) else {
-            continue;
-        };
-        let app = app.clone();
-        tauri::async_runtime::spawn(async move {
-            match apply_session_token(&app, token).await {
-                Ok(user) => {
-                    log::info!("deep-link sign-in succeeded (tier {:?})", user.tier);
-                    #[cfg(desktop)]
-                    show_main_window(&app);
-                    let _ = app.emit("signed-in", AuthState::Authenticated { user });
-                }
-                Err(e) => {
-                    // Token never written to the log — only the failure reason.
-                    log::error!("deep-link sign-in failed: {e}");
-                    let _ = app.emit("signin-error", e);
-                }
-            }
-        });
+        if let Some(token) = token_from_deep_link(&url) {
+            st.set_pending(Some(token));
+            got = true;
+        }
+    }
+    if got {
+        #[cfg(desktop)]
+        show_main_window(app);
+        // Best-effort nudge for the warm case; if it's lost (cold start), the
+        // window-focus / mount re-check still picks the token up.
+        let _ = app.emit("auth-pending", ());
     }
 }
 
@@ -1101,17 +1098,16 @@ pub fn run() {
                 app.deep_link()
                     .on_open_url(move |event| handle_deep_links(&handle, event.urls()));
                 // Cold start: the app was launched *by* the deep link, before the
-                // webview (and its `signed-in` listener) exists — emitting now would
-                // be lost. Hold the token; the frontend's first `check_auth_state`
-                // adopts it and lands on the dashboard. No event-timing race.
+                // webview exists. handle_deep_links holds the token; the frontend's
+                // first check_auth_state adopts it and lands on the dashboard.
                 if let Ok(Some(urls)) = app.deep_link().get_current() {
-                    let st = app.state::<AppState>();
-                    for url in &urls {
-                        if let Some(token) = token_from_deep_link(url) {
-                            st.set_pending(Some(token));
-                        }
-                    }
+                    handle_deep_links(&app.handle().clone(), urls);
                 }
+                // Dev on macOS (unbundled): also register the scheme at runtime so a
+                // running `tauri dev` instance receives the URL, not just a stale
+                // bundle. Harmless if the Info.plist already registered it.
+                #[cfg(all(debug_assertions, target_os = "macos"))]
+                let _ = app.deep_link().register_all();
                 // Dev only (unbundled): register the scheme at runtime where the
                 // OS supports it. macOS/iOS register via the bundle Info.plist.
                 #[cfg(any(target_os = "linux", target_os = "windows"))]
