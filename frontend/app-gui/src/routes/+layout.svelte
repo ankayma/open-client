@@ -5,54 +5,68 @@
 	import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 	import { auth, connection, quota } from '$lib/stores';
 	import { checkAuthState, getConnectionStatus, getQuota } from '$lib/tauri';
-	import type { AuthState, ConnectionState } from '$lib/types';
+	import type { ConnectionState } from '$lib/types';
 
 	let { children } = $props();
 
 	let unlisteners: UnlistenFn[] = [];
 
-	onMount(async () => {
+	// Re-check auth and, if a deep-link token was adopted, land on the dashboard.
+	// Called on mount, on the `auth-pending` nudge, and whenever the window regains
+	// focus — so "Open app" works whether the app was cold-launched or already open,
+	// without depending on event timing. `silent` avoids bouncing to /welcome on a
+	// focus check that found nothing (e.g. the user is mid-sign-in).
+	async function refreshAuth(silent = false) {
 		try {
-			const [authState, connState, quotaData] = await Promise.all([
-				checkAuthState(),
-				getConnectionStatus(),
-				getQuota().catch(() => null)
-			]);
+			const authState = await checkAuthState();
 			auth.set(authState);
-			connection.set(connState);
-			if (quotaData) quota.set(quotaData);
-
-			if (authState.status === 'unauthenticated') {
-				goto('/welcome');
-			} else if (connState.status === 'disconnected') {
+			if (authState.status === 'authenticated') {
 				goto('/dashboard');
+			} else if (!silent) {
+				goto('/welcome');
 			}
 		} catch {
 			// Tauri not available (browser dev) — stay on current route
 		}
+	}
 
-		// Keep the window in sync when the macOS tray drives connect/disconnect
-		// or navigation. No-op in browser dev (listen rejects without Tauri IPC).
+	onMount(async () => {
+		try {
+			const [connState, quotaData] = await Promise.all([
+				getConnectionStatus(),
+				getQuota().catch(() => null)
+			]);
+			connection.set(connState);
+			if (quotaData) quota.set(quotaData);
+		} catch {
+			// Tauri not available (browser dev)
+		}
+		// Initial auth check (adopts a cold-start deep-link token if present).
+		await refreshAuth();
+
+		// Catch-all paths so deep-link "Open app" always lands on the dashboard:
 		try {
 			unlisteners.push(
 				await listen<ConnectionState>('connection-changed', (e) => connection.set(e.payload)),
 				await listen<string>('tray-navigate', (e) => goto(e.payload)),
-				// Deep-link sign-in: the browser opened `ankayma://auth?token=…`,
-				// the Rust side validated it and emits the auth state. Land on the
-				// dashboard regardless of which screen we're on. (welcome page keeps
-				// the manual paste flow as a fallback.)
-				await listen<AuthState>('signed-in', (e) => {
-					auth.set(e.payload);
-					goto('/dashboard');
-				})
+				// Warm start: the running app received the deep link.
+				await listen('auth-pending', () => refreshAuth(true))
 			);
 		} catch {
 			// Tauri events unavailable — ignore
 		}
+		// Universal catch-all: clicking "Allow" brings the app to the foreground —
+		// re-check then, regardless of whether any event arrived.
+		window.addEventListener('focus', onFocus);
 	});
+
+	function onFocus() {
+		if ($auth.status !== 'authenticated') refreshAuth(true);
+	}
 
 	onDestroy(() => {
 		for (const off of unlisteners) off();
+		window.removeEventListener('focus', onFocus);
 	});
 
 	// Desktop chrome only: the sidebar is rendered when signed in and hidden
