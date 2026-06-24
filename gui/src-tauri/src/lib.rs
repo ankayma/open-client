@@ -47,6 +47,11 @@ struct AppState {
     /// Signed-in account email, surfaced in the tray menu. None when signed out.
     email: Mutex<Option<String>>,
     node: Mutex<Option<EnrolledNode>>,
+    /// A deep-link token captured at COLD start (the app was launched by
+    /// `ankayma://auth/callback?token=…`). The frontend isn't listening yet at that
+    /// moment, so we hold it here and let the first `check_auth_state` drain it —
+    /// no event-timing race. Warm-start deep links use the live `signed-in` event.
+    pending_token: Mutex<Option<String>>,
 }
 
 impl AppState {
@@ -59,7 +64,19 @@ impl AppState {
             session: Mutex::new(None),
             email: Mutex::new(None),
             node: Mutex::new(None),
+            pending_token: Mutex::new(None),
         }
+    }
+
+    fn set_pending(&self, tok: Option<String>) {
+        *self.pending_token.lock().expect("pending lock poisoned") = tok;
+    }
+
+    fn take_pending(&self) -> Option<String> {
+        self.pending_token
+            .lock()
+            .expect("pending lock poisoned")
+            .take()
     }
 
     fn token(&self) -> Option<String> {
@@ -262,6 +279,13 @@ fn apply_connection_change(app: &AppHandle) {
 
 #[tauri::command]
 async fn check_auth_state(app: AppHandle, state: State<'_, AppState>) -> Result<AuthState, String> {
+    // Cold-start deep link: adopt a token the app was launched with, if any. This
+    // is what makes "Open app" land straight on the dashboard with no manual paste.
+    if state.token().is_none() {
+        if let Some(pending) = state.take_pending() {
+            state.set_token(Some(pending));
+        }
+    }
     let result = match state.token() {
         None => AuthState::Unauthenticated,
         // Re-validate the stored token against the control plane.
@@ -1076,10 +1100,17 @@ pub fn run() {
                 let handle = app.handle().clone();
                 app.deep_link()
                     .on_open_url(move |event| handle_deep_links(&handle, event.urls()));
-                // Cold start: the app may have been launched *by* the deep link
-                // (URL already consumed before the handler was attached).
+                // Cold start: the app was launched *by* the deep link, before the
+                // webview (and its `signed-in` listener) exists — emitting now would
+                // be lost. Hold the token; the frontend's first `check_auth_state`
+                // adopts it and lands on the dashboard. No event-timing race.
                 if let Ok(Some(urls)) = app.deep_link().get_current() {
-                    handle_deep_links(&app.handle().clone(), urls);
+                    let st = app.state::<AppState>();
+                    for url in &urls {
+                        if let Some(token) = token_from_deep_link(url) {
+                            st.set_pending(Some(token));
+                        }
+                    }
                 }
                 // Dev only (unbundled): register the scheme at runtime where the
                 // OS supports it. macOS/iOS register via the bundle Info.plist.
