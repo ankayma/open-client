@@ -35,8 +35,28 @@ echo "→ Building signed + notarized universal DMG (this compiles both arches)�
 cargo tauri build --target universal-apple-darwin --bundles dmg
 
 DMG=$(find ../../target/universal-apple-darwin/release/bundle/dmg -iname "*.dmg" 2>/dev/null | head -1)
+if [[ -z "$DMG" ]]; then
+  echo "✗ DMG not found after build — check the build output above." >&2
+  exit 1
+fi
+
+# Tauri notarizes + staples the inner .app but NOT the .dmg container. A DMG whose
+# container is signed-but-not-notarized trips Gatekeeper on mount ("Apple could
+# not verify… is free of malware") when downloaded from the web. So notarize +
+# staple the DMG itself here, reusing the same credentials. [A: observed 2026-06-25
+# on tauri 2.11.x — verify still needed if tauri starts notarizing the dmg upstream]
+echo "→ Notarizing the DMG container (Tauri only handles the inner .app)…"
+if [[ -n "${APPLE_API_KEY:-}" ]]; then
+  xcrun notarytool submit "$DMG" \
+    --key "$APPLE_API_KEY_PATH" --key-id "$APPLE_API_KEY" --issuer "$APPLE_API_ISSUER" --wait
+else
+  xcrun notarytool submit "$DMG" \
+    --apple-id "$APPLE_ID" --password "$APPLE_PASSWORD" --team-id "$APPLE_TEAM_ID" --wait
+fi
+xcrun stapler staple "$DMG"
+
 echo
-echo "✓ Signed + notarized DMG: ${DMG:-<not found — check the build output>}"
+echo "✓ Signed + notarized DMG: $DMG"
 echo "  Verify before publishing:"
 echo "    spctl -a -vv -t install \"$DMG\"        # should say: accepted, Notarized Developer ID"
 echo "    xcrun stapler validate \"$DMG\"         # should say: validate worked"
