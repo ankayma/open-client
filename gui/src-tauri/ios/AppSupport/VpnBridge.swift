@@ -1,0 +1,45 @@
+// VpnBridge — C ABI that the app's Rust layer (gui/src-tauri/src/vpn.rs) calls to
+// drive the VPN from the Tauri/JS frontend. Symmetric to agent-ios-ptp (Rust→Swift
+// this time): plain @_cdecl C functions, no Tauri/SwiftRs Swift package needed, so
+// it compiles as part of the app target and the Rust `extern "C"` resolves at link.
+// All real work is in TunnelManager. [T:A.1.9]
+
+import Foundation
+
+/// Start the tunnel with a resolved config JSON (NUL-terminated UTF-8). Returns 0 if
+/// accepted, -1 on a decoding error. The async install/start runs fire-and-forget;
+/// progress + failures surface through `ankayma_vpn_status` and the device console.
+@_cdecl("ankayma_vpn_connect")
+public func ankayma_vpn_connect(_ configJSON: UnsafePointer<CChar>) -> Int32 {
+    let json = String(cString: configJSON)
+    TunnelManager.shared.connect(configJSON: json) { error in
+        if let error = error {
+            NSLog("ankayma_vpn_connect failed: \(error.localizedDescription)")
+        }
+    }
+    return 0
+}
+
+/// Stop the tunnel (fire-and-forget).
+@_cdecl("ankayma_vpn_disconnect")
+public func ankayma_vpn_disconnect() {
+    TunnelManager.shared.disconnect { error in
+        if let error = error {
+            NSLog("ankayma_vpn_disconnect failed: \(error.localizedDescription)")
+        }
+    }
+}
+
+/// Current status as an NEVPNStatus rawValue (0=invalid … 3=connected). Synchronous:
+/// reads the cached value the status observer keeps up to date.
+@_cdecl("ankayma_vpn_status")
+public func ankayma_vpn_status() -> Int32 {
+    return TunnelManager.shared.cachedStatusCode
+}
+
+/// Start tracking the installed tunnel's status (call once on app launch so the UI
+/// reflects reality before the user taps connect).
+@_cdecl("ankayma_vpn_prime")
+public func ankayma_vpn_prime() {
+    TunnelManager.shared.primeStatus()
+}

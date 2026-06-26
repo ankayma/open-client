@@ -81,6 +81,26 @@ export async function getDataplaneStatus(): Promise<DataplaneStatus> {
   return invoke<DataplaneStatus>("get_dataplane_status");
 }
 
+// iOS VPN — enroll + bring up the Packet Tunnel via the Network Extension (the
+// data plane runs in-app on iOS, not a privileged daemon). On desktop these reject
+// ("iOS-only"); desktop uses startDataplane/the agent daemon instead.
+export interface VpnStatus {
+  // "invalid" | "disconnected" | "connecting" | "connected" | "reasserting" | "disconnecting"
+  status: string;
+}
+
+export async function vpnConnect(): Promise<void> {
+  return invoke("vpn_connect");
+}
+
+export async function vpnDisconnect(): Promise<void> {
+  return invoke("vpn_disconnect");
+}
+
+export async function vpnStatus(): Promise<VpnStatus> {
+  return invoke<VpnStatus>("vpn_status");
+}
+
 export async function getQuota(): Promise<Quota> {
   return invoke<Quota>("get_quota");
 }

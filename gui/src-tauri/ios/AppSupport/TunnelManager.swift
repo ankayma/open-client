@@ -21,6 +21,32 @@ import NetworkExtension
     private static let appGroup = "group.com.ankayma.app"
     private static let configFile = "tunnel-config.json"
 
+    /// Last known connection status as an NEVPNStatus rawValue (0=invalid, 1=disconnected,
+    /// 2=connecting, 3=connected, 4=reasserting, 5=disconnecting). Updated by a status
+    /// observer so the sync C bridge (`ankayma_vpn_status`) can read it without an async
+    /// load. `@objc` + main-actor-free so the bridge reads it directly.
+    @objc private(set) var cachedStatusCode: Int32 = 0
+    private var statusObserver: NSObjectProtocol?
+
+    /// Observe the manager's connection so `cachedStatusCode` tracks reality. Idempotent.
+    private func beginMonitoring(_ manager: NETunnelProviderManager) {
+        cachedStatusCode = Int32(manager.connection.status.rawValue)
+        if let observer = statusObserver { NotificationCenter.default.removeObserver(observer) }
+        statusObserver = NotificationCenter.default.addObserver(
+            forName: .NEVPNStatusDidChange, object: manager.connection, queue: .main
+        ) { [weak self] _ in
+            self?.cachedStatusCode = Int32(manager.connection.status.rawValue)
+        }
+    }
+
+    /// Load the installed manager (if any) and start tracking its status — call once on
+    /// app launch so the UI shows the real state before the user taps connect.
+    @objc func primeStatus() {
+        NETunnelProviderManager.loadAllFromPreferences { [weak self] managers, _ in
+            if let manager = managers?.first { self?.beginMonitoring(manager) }
+        }
+    }
+
     // MARK: Config (App Group)
 
     /// Write the resolved tunnel config JSON to the shared App Group container, where
@@ -82,6 +108,7 @@ import NetworkExtension
             case .failure(let error):
                 completion(error)
             case .success(let manager):
+                self.beginMonitoring(manager)
                 do {
                     try manager.connection.startVPNTunnel()
                     completion(nil)

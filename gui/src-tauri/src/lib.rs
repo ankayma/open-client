@@ -20,6 +20,10 @@ use agent_core::{adapters, domain, reqwest, WgKeypair};
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager, State};
 
+// VPN bridge for iOS (frontend → Swift TunnelManager via a C ABI). Compiled on all
+// platforms; the iOS-only path is gated inside. [T:A.1.9]
+mod vpn;
+
 /// Default control plane; override with ANKAYMA_CONTROL_PLANE for dev/staging.
 const DEFAULT_CONTROL_PLANE: &str = "https://cp.ankayma.com";
 
@@ -1091,6 +1095,11 @@ pub fn run() {
         .setup(|app| {
             app.manage(AppState::new());
 
+            // iOS: start tracking the installed tunnel's status so the UI shows the
+            // real state on launch. [T:A.1.9]
+            #[cfg(target_os = "ios")]
+            vpn::prime();
+
             // Route `ankayma://auth?token=…` straight into sign-in (no copy/paste).
             {
                 use tauri_plugin_deep_link::DeepLinkExt;
@@ -1188,6 +1197,9 @@ pub fn run() {
             get_policy,
             submit_policy,
             my_access,
+            vpn::vpn_connect,
+            vpn::vpn_disconnect,
+            vpn::vpn_status,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
