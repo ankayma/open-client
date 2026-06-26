@@ -7,6 +7,7 @@ members = [
     "crates/ledger-client",
     "crates/agent-core",
     "crates/agent-daemon",
+    "crates/agent-ios-ptp",  # [T:A.1.9] iOS Packet Tunnel FFI staticlib (extension links it)
     "crates/cli",
     "gui/src-tauri",  # [T:Part D §D.3] Tauri 2 GUI shell — initialized milestone 1.1
 ]

@@ -1,0 +1,19 @@
+[package]
+name = "agent-ios-ptp"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "iOS Packet Tunnel Provider FFI — drives the agent-core pump over the extension's utun fd"
+
+[lib]
+# staticlib → linked into the iOS Network Extension (Packet Tunnel Provider) target;
+# rlib → so unit tests build/run on the host. [T:A.1.9]
+crate-type = ["staticlib", "rlib"]
+
+[dependencies]
+# The whole point: reuse the OPEN data-plane pump, no fork. [T:A.1.9]
+agent-core = { workspace = true }
+# Config (keys + overlay + peers) arrives as JSON from the app via the App Group.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
