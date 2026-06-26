@@ -15,7 +15,7 @@
  *         "listen_port":     51820,                       // optional, default 51820
  *         "peers": [ { "node_id":"…", "public_key":"<b64>",
  *                      "overlay_ip":"…", "hostname":"…",
- *                      "endpoint":"host:port" /* optional */ } ] }
+ *                      "endpoint":"host:port" (optional) } ] }
  *   - Pass the returned handle to ankayma_ptp_stop() from stopTunnel().
  */
 #ifndef AGENT_IOS_PTP_H
