@@ -29,6 +29,9 @@ else
   # app the NE + App Group entitlements.
   awk '
     { print }
+    /^      - path: ankayma-gui_iOS$/ && !src {
+      print "      - path: ../../ios/AppSupport"; src=1
+    }
     /^    dependencies:$/ && !dep {
       print "      - target: ankayma-gui_PacketTunnel"; dep=1
     }
