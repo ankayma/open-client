@@ -1,0 +1,56 @@
+  # Packet Tunnel Provider extension. Appended under `targets:` of the cargo-mobile2
+  # project.yml by scripts/ios-postinit.sh. Paths are relative to gen/apple (where
+  # project.yml lives): ../../ios = gui/src-tauri/ios; ../../../../crates = the
+  # workspace crates dir. [T:A.1.9]
+  ankayma-gui_PacketTunnel:
+    type: app-extension
+    platform: iOS
+    sources:
+      - path: ../../ios/PacketTunnel
+    info:
+      # Written by xcodegen from the properties below, into gen/apple (gitignored).
+      path: AnkaymaTunnel-Info.plist
+      properties:
+        CFBundleDisplayName: Ankayma Tunnel
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.networkextension.packet-tunnel
+          NSExtensionPrincipalClass: $(PRODUCT_MODULE_NAME).PacketTunnelProvider
+    entitlements:
+      # Written by xcodegen from properties into gen/apple (gitignored). NE
+      # packet-tunnel-provider + the App Group the host app shares config through.
+      path: AnkaymaTunnel.entitlements
+      properties:
+        com.apple.developer.networking.networkextension:
+          - packet-tunnel-provider
+        com.apple.security.application-groups:
+          - group.com.ankayma.app
+    settings:
+      base:
+        PRODUCT_NAME: AnkaymaTunnel
+        PRODUCT_BUNDLE_IDENTIFIER: com.ankayma.app.tunnel
+        DEVELOPMENT_TEAM: 8UF87JS6WW
+        ENABLE_BITCODE: false
+        ARCHS: [arm64]
+        SWIFT_VERSION: "5.0"
+        SWIFT_OBJC_BRIDGING_HEADER: ../../ios/PacketTunnel/PacketTunnel-Bridging-Header.h
+        HEADER_SEARCH_PATHS: $(inherited) $(PROJECT_DIR)/../../../../crates/agent-ios-ptp/include
+        LIBRARY_SEARCH_PATHS: $(inherited) $(PROJECT_DIR)/Externals/ptp/$(CONFIGURATION)
+        OTHER_LDFLAGS: $(inherited) -lagent_ios_ptp
+    dependencies:
+      - sdk: NetworkExtension.framework
+    preBuildScripts:
+      - name: Build PTP Rust staticlib
+        basedOnDependencyAnalysis: false
+        script: |
+          set -euo pipefail
+          # Workspace root = gen/apple up four levels (apple→gen→src-tauri→gui→client).
+          ROOT="$SRCROOT/../../../.."
+          case "$PLATFORM_NAME" in
+            iphonesimulator) TRIPLE="aarch64-apple-ios-sim" ;;
+            *)               TRIPLE="aarch64-apple-ios" ;;
+          esac
+          if [ "$CONFIGURATION" = "release" ]; then PROFILE="--release"; OUT="release"; else PROFILE=""; OUT="debug"; fi
+          ( cd "$ROOT" && cargo build -p agent-ios-ptp --target "$TRIPLE" $PROFILE )
+          DEST="$SRCROOT/Externals/ptp/$CONFIGURATION"
+          mkdir -p "$DEST"
+          cp "$ROOT/target/$TRIPLE/$OUT/libagent_ios_ptp.a" "$DEST/libagent_ios_ptp.a"
