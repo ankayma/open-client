@@ -24,6 +24,14 @@ use tauri::{AppHandle, Emitter, Manager, State};
 // platforms; the iOS-only path is gated inside. [T:A.1.9]
 mod vpn;
 
+/// Target OS this build runs on ("ios"/"macos"/"linux"/"windows"). The frontend uses
+/// it to pick the data-plane path: iOS brings the tunnel up in-app (Packet Tunnel
+/// extension); desktop hands off to the privileged `agent` daemon. [T:A.1.9]
+#[tauri::command]
+fn get_platform() -> &'static str {
+    std::env::consts::OS
+}
+
 /// Default control plane; override with ANKAYMA_CONTROL_PLANE for dev/staging.
 const DEFAULT_CONTROL_PLANE: &str = "https://cp.ankayma.com";
 
@@ -1197,6 +1205,7 @@ pub fn run() {
             get_policy,
             submit_policy,
             my_access,
+            get_platform,
             vpn::vpn_connect,
             vpn::vpn_disconnect,
             vpn::vpn_status,

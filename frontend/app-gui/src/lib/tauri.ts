@@ -101,6 +101,12 @@ export async function vpnStatus(): Promise<VpnStatus> {
   return invoke<VpnStatus>("vpn_status");
 }
 
+// Target OS ("ios" | "macos" | "linux" | "windows"). Used to pick the connect path:
+// iOS brings the tunnel up in-app (Packet Tunnel), desktop uses the agent daemon.
+export async function getPlatform(): Promise<string> {
+  return invoke<string>("get_platform");
+}
+
 export async function getQuota(): Promise<Quota> {
   return invoke<Quota>("get_quota");
 }

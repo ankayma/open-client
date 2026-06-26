@@ -11,7 +11,10 @@
 		startDataplane,
 		stopDataplane,
 		getDataplaneStatus,
-		type DataplaneStatus
+		type DataplaneStatus,
+		vpnConnect,
+		vpnDisconnect,
+		getPlatform
 	} from '$lib/tauri';
 	import type { PathProof } from '$lib/types';
 
@@ -22,6 +25,9 @@
 	let tunnelBusy = $state(false);
 	let tunnelMsg = $state<string | null>(null);
 	let dp = $state<DataplaneStatus | null>(null);
+	// iOS runs the data plane in-app (Packet Tunnel extension); desktop hands off to
+	// the privileged daemon. The connect toggle picks the path from this. [T:A.1.9]
+	let isIos = $state(false);
 
 	// [slice 2] Poll the daemon's live status so the card reflects the REAL tunnel
 	// (heartbeat fresh = up), not just enrollment.
@@ -34,6 +40,9 @@
 	}
 	let dpTimer: ReturnType<typeof setInterval> | undefined;
 	onMount(() => {
+		getPlatform()
+			.then((os) => (isIos = os === 'ios'))
+			.catch(() => (isIos = false));
 		refreshDataplane();
 		dpTimer = setInterval(refreshDataplane, 4000);
 	});
@@ -88,11 +97,17 @@
 		try {
 			const conn = $connection;
 			if (conn.status === 'connected') {
-				await disconnect();
+				// iOS tears down the in-app Packet Tunnel; desktop just un-enrolls
+				// (the daemon tunnel is stopped via stopTunnel).
+				if (isIos) await vpnDisconnect();
+				else await disconnect();
 				connection.set({ status: 'disconnected' });
 			} else {
 				connection.set({ status: 'connecting' });
-				await connect();
+				// iOS: enroll + bring the Packet Tunnel up in one step. Desktop: enroll
+				// only (the real tunnel comes up via the daemon / startTunnel).
+				if (isIos) await vpnConnect();
+				else await connect();
 				// Reflect the real post-enrollment status (Connected + node_id).
 				connection.set(await getConnectionStatus());
 			}
