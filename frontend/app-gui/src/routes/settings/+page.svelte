@@ -1,9 +1,20 @@
 <script lang="ts">
+	import { onMount } from 'svelte';
 	import { goto } from '$app/navigation';
 	import { auth } from '$lib/stores';
-	import { signOut } from '$lib/tauri';
+	import { signOut, getNodeInfo } from '$lib/tauri';
+	import type { NodeInfo } from '$lib/types';
 
 	let signing_out = $state(false);
+	let nodeInfo = $state<NodeInfo | null>(null);
+
+	onMount(async () => {
+		try {
+			nodeInfo = await getNodeInfo();
+		} catch {
+			// daemon not connected or not enrolled
+		}
+	});
 
 	async function handleSignOut() {
 		signing_out = true;
@@ -37,6 +48,24 @@
 			<div class="row">
 				<span class="label">Plan</span>
 				<span class="value">{$auth.user.tier}</span>
+			</div>
+		</section>
+	{/if}
+
+	{#if nodeInfo}
+		<section class="card">
+			<div class="section-label">Network</div>
+			<div class="row">
+				<span class="label">Hostname</span>
+				<span class="value mono">{nodeInfo.hostname}</span>
+			</div>
+			<div class="row">
+				<span class="label">Node ID</span>
+				<span class="value mono">{nodeInfo.node_id}</span>
+			</div>
+			<div class="row col">
+				<span class="label">Public key</span>
+				<span class="value mono pubkey">{nodeInfo.public_key}</span>
 			</div>
 		</section>
 	{/if}
@@ -128,6 +157,28 @@
 
 	.link {
 		color: var(--c-accent);
+	}
+
+	.section-label {
+		font-size: 11px;
+		font-weight: 700;
+		text-transform: uppercase;
+		letter-spacing: 0.08em;
+		color: var(--c-text-dim);
+		padding: 10px 16px 6px;
+	}
+
+	.row.col {
+		flex-direction: column;
+		align-items: flex-start;
+		gap: 4px;
+	}
+
+	.pubkey {
+		font-size: 11px;
+		color: var(--c-text-dim);
+		word-break: break-all;
+		line-height: 1.5;
 	}
 
 	.sign-out-btn {

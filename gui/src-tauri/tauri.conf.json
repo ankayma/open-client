@@ -13,10 +13,10 @@
     "windows": [
       {
         "title": "Ankayma",
-        "width": 1040,
-        "height": 720,
-        "minWidth": 860,
-        "minHeight": 600,
+        "width": 920,
+        "height": 760,
+        "minWidth": 760,
+        "minHeight": 680,
         "center": true,
         "resizable": true,
         "fullscreen": false

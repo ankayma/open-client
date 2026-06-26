@@ -377,6 +377,10 @@ fn handle_deep_links(app: &AppHandle, urls: Vec<url::Url>) {
         if let Some(token) = token_from_deep_link(&url) {
             st.set_pending(Some(token));
             got = true;
+        } else if url.scheme() == "ankayma"
+            && url.query_pairs().any(|(k, _)| k == "error")
+        {
+            let _ = app.emit("auth-cancelled", ());
         }
     }
     if got {

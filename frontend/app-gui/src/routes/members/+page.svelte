@@ -209,8 +209,9 @@
     color: var(--c-text-dim);
   }
   .role.admin {
-    background: color-mix(in srgb, var(--c-accent) 18%, transparent);
-    color: var(--c-accent);
+    background: color-mix(in srgb, var(--sec-info) 14%, transparent);
+    color: var(--sec-info);
+    border: 1px solid color-mix(in srgb, var(--sec-info) 35%, transparent);
   }
   .owner {
     font-size: 11px;
@@ -218,13 +219,15 @@
   }
   .remove {
     font-size: 13px;
-    color: var(--c-text-dim);
     padding: 5px 10px;
     border-radius: 6px;
+    background: var(--btn-danger-bg);
+    color: var(--btn-danger-text);
+    border: 1px solid var(--btn-danger-border);
+    transition: background 0.12s;
   }
   .remove:hover {
-    background: color-mix(in srgb, var(--c-danger) 14%, transparent);
-    color: var(--c-danger);
+    background: color-mix(in srgb, var(--c-danger) 22%, var(--c-surface));
   }
   .panel {
     background: var(--c-surface);

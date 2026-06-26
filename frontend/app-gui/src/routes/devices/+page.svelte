@@ -106,8 +106,7 @@
 						{#if d.endpoint}<span class="endpoint">{d.endpoint}</span>{/if}
 					</div>
 					<button
-						class="remove"
-						style="margin-left:auto;width:32px;height:32px;display:flex;align-items:center;justify-content:center;color:var(--c-text-dim);border-radius:6px;flex-shrink:0;background:transparent;"
+						class="remove-btn"
 						aria-label="Remove device"
 						onclick={() => (confirmNode = d)}
 					>
@@ -144,11 +143,11 @@
 					This is the current device — it re-enrolls on the next connect.{/if}
 			</p>
 			<div style="display:flex;justify-content:flex-end;gap:8px;">
-				<button onclick={() => (confirmNode = null)} style="padding:9px 16px;border-radius:8px;color:var(--c-text-dim);background:transparent;">Cancel</button>
+				<button class="btn-ghost" onclick={() => (confirmNode = null)}>Cancel</button>
 				<button
+					class="btn-danger"
 					disabled={removing}
 					onclick={() => removeDevice(confirmNode!.node_id)}
-					style="padding:9px 16px;border-radius:8px;background:var(--c-danger, #ef4444);color:#fff;"
 				>
 					{removing ? 'Removing…' : 'Remove'}
 				</button>
@@ -227,8 +226,8 @@
 		flex-shrink: 0;
 	}
 	.dot.online {
-		background: var(--c-success);
-		box-shadow: 0 0 8px var(--c-success);
+		background: var(--sec-allow);
+		box-shadow: 0 0 8px var(--sec-allow);
 	}
 
 	.info {
@@ -293,6 +292,24 @@
 	}
 	.btn:hover { background: var(--c-accent-dim); }
 	.btn.add { width: 100%; }
+
+	.remove-btn {
+		margin-left: auto;
+		width: 32px;
+		height: 32px;
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		border-radius: 6px;
+		flex-shrink: 0;
+		color: var(--c-text-dim);
+		background: transparent;
+		transition: background 0.12s, color 0.12s;
+	}
+	.remove-btn:hover {
+		background: var(--btn-danger-bg);
+		color: var(--btn-danger-text);
+	}
 
 	.spinner-lg {
 		width: 28px;

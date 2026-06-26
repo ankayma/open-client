@@ -3,13 +3,17 @@
 	import { goto } from '$app/navigation';
 	import { page } from '$app/state';
 	import { listen, type UnlistenFn } from '@tauri-apps/api/event';
-	import { auth, connection, quota } from '$lib/stores';
+	import { auth, connection, quota, activeTheme, activeLang } from '$lib/stores';
 	import { checkAuthState, getConnectionStatus, getQuota } from '$lib/tauri';
+	import { applyTheme, THEMES, THEME_PAIRS } from '$lib/theme';
+	import { STRINGS, type Lang } from '$lib/i18n';
 	import type { ConnectionState } from '$lib/types';
 
 	let { children } = $props();
 
 	let unlisteners: UnlistenFn[] = [];
+	let unsubTheme: (() => void) | null = null;
+	let unsubLang:  (() => void) | null = null;
 
 	// Re-check auth and, if a deep-link token was adopted, land on the dashboard.
 	// Called on mount, on the `auth-pending` nudge, and whenever the window regains
@@ -58,6 +62,15 @@
 		// Universal catch-all: clicking "Allow" brings the app to the foreground —
 		// re-check then, regardless of whether any event arrived.
 		window.addEventListener('focus', onFocus);
+
+		// Apply saved theme and wire up persistence
+		unsubTheme = activeTheme.subscribe((t) => {
+			applyTheme(t);
+			localStorage.setItem('ankayma_theme', t);
+		});
+		unsubLang = activeLang.subscribe((l) => {
+			localStorage.setItem('ankayma_lang', l);
+		});
 	});
 
 	function onFocus() {
@@ -67,16 +80,65 @@
 	onDestroy(() => {
 		for (const off of unlisteners) off();
 		window.removeEventListener('focus', onFocus);
+		unsubTheme?.();
+		unsubLang?.();
 	});
 
+	// i18n
+	let lang = $state<Lang>('vn');
+	activeLang.subscribe((l) => { lang = l; });
+	function toggleLang() { activeLang.update(l => l === 'vn' ? 'en' : 'vn'); }
+
+	// theme
+	let isDark = $state(true);
+	activeTheme.subscribe((tid) => { isDark = THEMES[tid]?.dark ?? true; });
+	function toggleTheme() {
+		activeTheme.update((tid) => {
+			if (THEME_PAIRS[tid]) return THEME_PAIRS[tid]!;
+			const dark  = Object.values(THEMES).filter(t => t.dark);
+			const light = Object.values(THEMES).filter(t => !t.dark);
+			return THEMES[tid]?.dark ? light[0].id : dark[0].id;
+		});
+	}
+
 	// Desktop chrome only: the sidebar is rendered when signed in and hidden
-	// below 760px via CSS, so mobile keeps its native full-screen flow. [A?]
+	// below 760px via CSS, so mobile keeps its native full-screen flow.
 	let signedIn = $derived($auth.status === 'authenticated');
-	let tier = $derived($auth.status === 'authenticated' ? $auth.user.tier : '');
-	let path = $derived(page.url.pathname);
+	let tier      = $derived($auth.status === 'authenticated' ? $auth.user.tier : '');
+	let userEmail = $derived($auth.status === 'authenticated' ? $auth.user.email : '');
+	let path      = $derived(page.url.pathname);
+
 	function active(href: string): boolean {
 		return path === href || path.startsWith(href + '/');
 	}
+
+	function getInitials(email: string): string {
+		const local = email.split('@')[0];
+		const parts = local.split(/[\s._-]+/).filter(Boolean);
+		if (parts.length >= 2) return (parts[0][0] + parts[1][0]).toUpperCase();
+		return local.slice(0, 2).toUpperCase();
+	}
+
+	const TIER_LABELS: Record<string, string> = {
+		F0:        'F0',
+		F0Plus:    'F0+',
+		F1Starter: 'F1 Starter',
+	};
+	const AVATAR_COLORS: Record<string, string> = {
+		F0:        'var(--c-surface)',
+		F0Plus:    'color-mix(in srgb, var(--c-accent) 30%, var(--c-surface))',
+		F1Starter: 'var(--c-accent)',
+	};
+	const AVATAR_TEXT: Record<string, string> = {
+		F0:        'var(--c-text-dim)',
+		F0Plus:    'var(--c-text)',
+		F1Starter: '#fff',
+	};
+
+	let avatarInitials = $derived(getInitials(userEmail));
+	let avatarBg       = $derived(AVATAR_COLORS[tier] ?? 'var(--c-surface)');
+	let avatarText     = $derived(AVATAR_TEXT[tier] ?? 'var(--c-text-dim)');
+	let tierLabel      = $derived(TIER_LABELS[tier] ?? tier);
 </script>
 
 <div class="app" class:with-sidebar={signedIn}>
@@ -93,11 +155,11 @@
 				</button>
 				<button class="nav-item" class:active={active('/devices')} onclick={() => goto('/devices')}>
 					<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="2" y="4" width="20" height="14" rx="2"/><path d="M8 21h8M12 18v3"/></svg>
-					<span>Devices</span>
+					<span>{STRINGS[lang].nav_nodes}</span>
 				</button>
 				<button class="nav-item" class:active={active('/services')} onclick={() => goto('/services')}>
 					<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M3 7h18M3 12h18M3 17h18"/><circle cx="7" cy="7" r="0.5"/></svg>
-					<span>Services</span>
+					<span>{STRINGS[lang].nav_services}</span>
 				</button>
 				<button class="nav-item" class:active={active('/subdomains')} onclick={() => goto('/subdomains')}>
 					<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="9"/><path d="M3.6 9h16.8M3.6 15h16.8M12 3a15 15 0 010 18"/></svg>
@@ -105,7 +167,7 @@
 				</button>
 				<button class="nav-item" class:active={active('/members')} onclick={() => goto('/members')}>
 					<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 00-3-3.87M16 3.13a4 4 0 010 7.75"/></svg>
-					<span>Members</span>
+					<span>{STRINGS[lang].nav_users}</span>
 				</button>
 				<button class="nav-item" class:active={active('/access')} onclick={() => goto('/access')}>
 					<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0110 0v4"/></svg>
@@ -121,11 +183,35 @@
 						<span>Upgrade</span>
 					</button>
 				{/if}
+				<button class="nav-item nav-settings" class:active={active('/settings')} onclick={() => goto('/settings')}>
+					<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 11-2.83 2.83l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 11-2.83-2.83l.06-.06A1.65 1.65 0 004.6 15a1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 112.83-2.83l.06.06A1.65 1.65 0 009 4.6a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 112.83 2.83l-.06.06a1.65 1.65 0 00-.33 1.82V12a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z"/></svg>
+					<span>{STRINGS[lang].nav_settings}</span>
+				</button>
 			</nav>
-			<button class="nav-item bottom" class:active={active('/settings')} onclick={() => goto('/settings')}>
-				<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 11-2.83 2.83l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 11-2.83-2.83l.06-.06A1.65 1.65 0 004.6 15a1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 112.83-2.83l.06.06A1.65 1.65 0 009 4.6a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 112.83 2.83l-.06.06a1.65 1.65 0 00-.33 1.82V12a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z"/></svg>
-				<span>Settings</span>
-			</button>
+
+			<div class="user-chip">
+				<div class="user-avatar" style="background:{avatarBg};color:{avatarText}">
+					{avatarInitials}
+				</div>
+				<div class="user-info">
+					<div class="user-email">{userEmail}</div>
+					<div class="user-tier">{tierLabel}</div>
+				</div>
+			</div>
+
+			<div class="sidebar-prefs">
+				<button class="pref-btn" onclick={toggleTheme} title={isDark ? 'Switch to light' : 'Switch to dark'}>
+					{#if isDark}
+						<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" width="16" height="16"><path d="M21 12.79A9 9 0 1111.21 3a7 7 0 009.79 9.79z"/></svg>
+					{:else}
+						<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" width="16" height="16"><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/></svg>
+					{/if}
+				</button>
+				<button class="pref-btn lang-btn" onclick={toggleLang} title="Switch language">
+					<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" width="15" height="15"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 014 10 15.3 15.3 0 01-4 10 15.3 15.3 0 01-4-10 15.3 15.3 0 014-10z"/></svg>
+					<span class="lang-label">{lang.toUpperCase()}</span>
+				</button>
+			</div>
 		</aside>
 	{/if}
 
@@ -155,6 +241,20 @@
 		--radius: 12px;
 		--safe-top: env(safe-area-inset-top, 0px);
 		--safe-bottom: env(safe-area-inset-bottom, 0px);
+		/* security state layer — fixed, overwritten by applyTheme() on mount */
+		--sec-allow: #1A7F37;
+		--sec-deny:  #CF222E;
+		--sec-info:  #0969DA;
+		/* button component tokens — overwritten per theme */
+		--btn-secondary-bg:     var(--c-surface);
+		--btn-secondary-border: var(--c-border);
+		--btn-secondary-text:   var(--c-text);
+		--btn-danger-bg:        color-mix(in srgb, #ef4444 16%, #13131a);
+		--btn-danger-border:    color-mix(in srgb, #ef4444 45%, transparent);
+		--btn-danger-text:      #ef4444;
+		--btn-warn-bg:          color-mix(in srgb, #f59e0b 14%, #13131a);
+		--btn-warn-border:      color-mix(in srgb, #f59e0b 40%, transparent);
+		--btn-warn-text:        #f59e0b;
 	}
 
 	:global(html), :global(body) {
@@ -187,6 +287,84 @@
 	:global(a) {
 		color: var(--c-accent);
 		text-decoration: none;
+	}
+
+	/* Global button classes */
+	:global(.btn-primary) {
+		background: var(--c-accent);
+		color: #fff;
+		border: 1px solid var(--c-accent);
+		padding: 7px 14px;
+		border-radius: var(--radius);
+		font-size: 13px;
+		font-weight: 500;
+		cursor: pointer;
+		transition: background 0.12s, border-color 0.12s;
+	}
+	:global(.btn-primary:hover) {
+		background: var(--c-accent-dim);
+		border-color: var(--c-accent-dim);
+	}
+
+	:global(.btn-secondary) {
+		background: var(--btn-secondary-bg);
+		color: var(--btn-secondary-text);
+		border: 1px solid var(--btn-secondary-border);
+		padding: 7px 14px;
+		border-radius: var(--radius);
+		font-size: 13px;
+		font-weight: 500;
+		cursor: pointer;
+		transition: background 0.12s, border-color 0.12s;
+	}
+	:global(.btn-secondary:hover) {
+		background: color-mix(in srgb, var(--c-text) 6%, var(--btn-secondary-bg));
+	}
+
+	:global(.btn-danger) {
+		background: var(--btn-danger-bg);
+		color: var(--btn-danger-text);
+		border: 1px solid var(--btn-danger-border);
+		padding: 7px 14px;
+		border-radius: var(--radius);
+		font-size: 13px;
+		font-weight: 500;
+		cursor: pointer;
+		transition: background 0.12s, border-color 0.12s;
+	}
+	:global(.btn-danger:hover) {
+		background: color-mix(in srgb, var(--c-danger) 22%, var(--c-surface));
+	}
+
+	:global(.btn-warn) {
+		background: var(--btn-warn-bg);
+		color: var(--btn-warn-text);
+		border: 1px solid var(--btn-warn-border);
+		padding: 7px 14px;
+		border-radius: var(--radius);
+		font-size: 13px;
+		font-weight: 500;
+		cursor: pointer;
+		transition: background 0.12s, border-color 0.12s;
+	}
+	:global(.btn-warn:hover) {
+		background: color-mix(in srgb, var(--c-warn) 22%, var(--c-surface));
+	}
+
+	:global(.btn-ghost) {
+		background: transparent;
+		color: var(--c-text-dim);
+		border: 1px solid transparent;
+		padding: 7px 14px;
+		border-radius: var(--radius);
+		font-size: 13px;
+		font-weight: 500;
+		cursor: pointer;
+		transition: background 0.12s, color 0.12s;
+	}
+	:global(.btn-ghost:hover) {
+		background: color-mix(in srgb, var(--c-text) 8%, transparent);
+		color: var(--c-text);
 	}
 
 	/* Mobile-first: single column, sidebar hidden. */
@@ -226,6 +404,8 @@
 			gap: 4px;
 			background: var(--c-surface);
 			border-right: 1px solid var(--c-border);
+			height: 100dvh;
+			overflow-y: auto;
 		}
 
 		.app.with-sidebar .view {
@@ -247,6 +427,7 @@
 			font-size: 17px;
 			font-weight: 700;
 			padding: 6px 10px 16px;
+			flex-shrink: 0;
 		}
 
 		.brand-dot {
@@ -265,6 +446,7 @@
 			display: flex;
 			flex-direction: column;
 			gap: 2px;
+			flex: 1;
 		}
 
 		.nav-item {
@@ -296,8 +478,98 @@
 			color: var(--c-text);
 		}
 
-		.nav-item.bottom {
+		.nav-settings {
 			margin-top: auto;
 		}
+
+		/* User chip */
+		.user-chip {
+			display: flex;
+			align-items: center;
+			gap: 8px;
+			padding: 10px 12px;
+			border-top: 1px solid var(--c-border);
+			margin-top: 4px;
+			flex-shrink: 0;
+		}
+
+		.user-avatar {
+			width: 30px;
+			height: 30px;
+			border-radius: 50%;
+			flex-shrink: 0;
+			display: flex;
+			align-items: center;
+			justify-content: center;
+			font-size: 11px;
+			font-weight: 700;
+			letter-spacing: 0.03em;
+			border: 1.5px solid color-mix(in srgb, var(--c-border) 60%, transparent);
+		}
+
+		.user-info {
+			min-width: 0;
+		}
+
+		.user-email {
+			font-size: 12px;
+			color: var(--c-text);
+			white-space: nowrap;
+			overflow: hidden;
+			text-overflow: ellipsis;
+		}
+
+		.user-tier {
+			font-size: 11px;
+			color: var(--c-text-dim);
+			white-space: nowrap;
+			overflow: hidden;
+			text-overflow: ellipsis;
+		}
+
+		/* Preference buttons: theme + lang */
+		.sidebar-prefs {
+			display: flex;
+			align-items: center;
+			gap: 4px;
+			padding: 8px 10px 10px;
+			border-top: 1px solid var(--c-border);
+			flex-shrink: 0;
+		}
+
+		.pref-btn {
+			display: flex;
+			align-items: center;
+			gap: 5px;
+			padding: 5px 8px;
+			border-radius: 6px;
+			color: var(--c-text-dim);
+			font-size: 12px;
+			border: 1px solid transparent;
+			cursor: pointer;
+			transition: color 0.12s, background 0.12s;
+		}
+
+		.pref-btn:hover {
+			color: var(--c-text);
+			background: color-mix(in srgb, var(--c-text) 8%, transparent);
+			border-color: var(--c-border);
+		}
+
+		.lang-btn {
+			margin-left: auto;
+		}
+
+		.lang-label {
+			font-size: 11px;
+			font-weight: 600;
+			letter-spacing: 0.05em;
+		}
+	}
+
+	@media print {
+		.sidebar { display: none !important; }
+		.app { display: block !important; }
+		.view { padding: 0 !important; }
 	}
 </style>

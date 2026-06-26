@@ -1,62 +1,65 @@
 <script lang="ts">
 	import { goto } from '$app/navigation';
+	import { onMount, onDestroy } from 'svelte';
 	import { auth } from '$lib/stores';
 	import { signInGithub, submitSessionToken } from '$lib/tauri';
+	import { listen } from '@tauri-apps/api/event';
 
-	// 'idle' → click GitHub (opens browser); 'paste' → enter the token shown there.
-	let step = $state<'idle' | 'paste'>('idle');
-	let signing_in = $state(false);
+	// idle   → initial screen with GitHub button
+	// waiting → browser opened, deep-link will auto-complete (layout listens for auth-pending)
+	// paste  → manual fallback (no browser / headless)
+	let step = $state<'idle' | 'waiting' | 'paste'>('idle');
+	let busy = $state(false);
 	let token = $state('');
 	let error = $state<string | null>(null);
 
 	async function handleSignIn() {
-		signing_in = true;
+		busy = true;
 		error = null;
 		try {
-			await signInGithub(); // opens the system browser to control-plane OAuth
-			step = 'paste';
+			await signInGithub();
+			// Browser opened — wait for the deep link to arrive.
+			// Layout's auth-pending listener calls checkAuthState() → goto('/dashboard').
+			step = 'waiting';
 		} catch {
-			// No browser here (iOS simulator / headless): fall back to manual token
-			// entry. Authorize at cp.ankayma.com/auth/github on any device where a
-			// browser works, then paste the session token shown there.
-			error = 'Could not open a browser here — paste a session token instead.';
+			// Can't open a browser (headless / iOS sim) — fall back to manual paste.
 			step = 'paste';
 		} finally {
-			signing_in = false;
+			busy = false;
 		}
-	}
-
-	// Skip the browser entirely (iOS sim / headless): go straight to token entry.
-	function enterTokenManually() {
-		error = null;
-		step = 'paste';
 	}
 
 	async function handleSubmitToken() {
 		if (!token.trim()) return;
-		signing_in = true;
+		busy = true;
 		error = null;
 		try {
 			const state = await submitSessionToken(token.trim());
 			auth.set(state);
 			goto('/dashboard');
 		} catch (e) {
-			error = e instanceof Error ? e.message : 'Invalid session token';
-			signing_in = false;
+			error = e instanceof Error ? e.message : 'Invalid token';
+			busy = false;
 		}
 	}
+
+	function reset() {
+		step = 'idle';
+		error = null;
+		token = '';
+	}
+
+	let unsubCancel: (() => void) | undefined;
+	onMount(async () => {
+		const unsub = await listen('auth-cancelled', () => reset());
+		unsubCancel = unsub;
+	});
+	onDestroy(() => unsubCancel?.());
 </script>
 
 <main>
 	<div class="hero">
-		<div class="logo">
-			<svg width="64" height="64" viewBox="0 0 64 64" fill="none" xmlns="http://www.w3.org/2000/svg">
-				<rect width="64" height="64" rx="16" fill="#6366f1" fill-opacity="0.15"/>
-				<path d="M32 14L48 23V41L32 50L16 41V23L32 14Z" stroke="#6366f1" stroke-width="2" fill="none"/>
-				<circle cx="32" cy="32" r="6" fill="#6366f1"/>
-			</svg>
-		</div>
-		<h1>Ankayma</h1>
+		<img class="logo-lockup" src="/ankayma_icon.png" alt="Ankayma" />
 		<p class="tagline">The sovereign zero-trust mesh —<br/>identity-bound access, your keys, your proof.</p>
 	</div>
 
@@ -85,12 +88,9 @@
 	</div>
 
 	<div class="actions">
-		{#if error}
-			<p class="error">{error}</p>
-		{/if}
 		{#if step === 'idle'}
-			<button class="btn-primary" onclick={handleSignIn} disabled={signing_in}>
-				{#if signing_in}
+			<button class="btn-primary" onclick={handleSignIn} disabled={busy}>
+				{#if busy}
 					<span class="spinner"></span> Opening browser…
 				{:else}
 					<svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor">
@@ -99,15 +99,26 @@
 					Continue with GitHub
 				{/if}
 			</button>
-			<button class="btn-link" onclick={enterTokenManually} disabled={signing_in}>
+			<button class="btn-link" onclick={() => { step = 'paste'; error = null; }}>
 				Enter a token instead
 			</button>
+
+		{:else if step === 'waiting'}
+			<div class="waiting-card">
+				<span class="spinner-lg"></span>
+				<p class="waiting-text">Authorizing in browser…</p>
+				<p class="waiting-sub">Return to this window after approving access.</p>
+			</div>
+			<button class="btn-link" onclick={handleSignIn} disabled={busy}>
+				Re-open browser
+			</button>
+			<button class="btn-link" onclick={() => { step = 'paste'; error = null; }}>
+				Enter token manually
+			</button>
+			<button class="btn-link" onclick={reset}>← Cancel</button>
+
 		{:else}
-			<p class="hint">
-				Authorize at <strong>cp.ankayma.com/auth/github</strong> in any browser (e.g. on
-				your Mac), then paste the session token shown there. Works for the iOS simulator
-				and headless devices.
-			</p>
+			{#if error}<p class="error">{error}</p>{/if}
 			<input
 				class="token-input"
 				type="text"
@@ -117,13 +128,12 @@
 				spellcheck="false"
 				onkeydown={(e) => e.key === 'Enter' && handleSubmitToken()}
 			/>
-			<button class="btn-primary" onclick={handleSubmitToken} disabled={signing_in || !token.trim()}>
-				{#if signing_in}<span class="spinner"></span> Verifying…{:else}Continue{/if}
+			<button class="btn-primary" onclick={handleSubmitToken} disabled={busy || !token.trim()}>
+				{#if busy}<span class="spinner"></span> Verifying…{:else}Sign in{/if}
 			</button>
-			<button class="btn-link" onclick={handleSignIn} disabled={signing_in}>
-				Re-open browser
-			</button>
+			<button class="btn-link" onclick={reset}>← Back</button>
 		{/if}
+
 		<p class="terms">
 			Free tier · No credit card required ·
 			<a href="https://ankayma.com/terms.html" target="_blank" rel="noopener">Terms</a>
@@ -133,11 +143,10 @@
 
 <style>
 	main {
-		flex: 1;
 		display: flex;
 		flex-direction: column;
 		align-items: center;
-		justify-content: space-between;
+		gap: 32px;
 		padding: calc(var(--safe-top) + 48px) 24px calc(var(--safe-bottom) + 40px);
 		max-width: 420px;
 		margin: 0 auto;
@@ -148,15 +157,14 @@
 		text-align: center;
 	}
 
-	.logo {
-		margin-bottom: 24px;
-	}
-
-	h1 {
-		font-size: 32px;
-		font-weight: 700;
-		letter-spacing: -0.5px;
-		margin-bottom: 12px;
+	.logo-lockup {
+		width: 96px;
+		height: 96px;
+		border-radius: 22px;
+		margin-bottom: 20px;
+		display: block;
+		margin-left: auto;
+		margin-right: auto;
 	}
 
 	.tagline {
@@ -261,7 +269,34 @@
 		text-align: center;
 	}
 
-	.hint {
+	.waiting-card {
+		width: 100%;
+		display: flex;
+		flex-direction: column;
+		align-items: center;
+		gap: 10px;
+		padding: 24px 16px;
+		background: var(--c-surface);
+		border: 1px solid var(--c-border);
+		border-radius: var(--radius);
+	}
+
+	.spinner-lg {
+		width: 28px;
+		height: 28px;
+		border: 3px solid var(--c-border);
+		border-top-color: var(--c-accent);
+		border-radius: 50%;
+		animation: spin 0.8s linear infinite;
+	}
+
+	.waiting-text {
+		font-size: 15px;
+		font-weight: 600;
+		color: var(--c-text);
+	}
+
+	.waiting-sub {
 		font-size: 13px;
 		color: var(--c-text-dim);
 		text-align: center;
