@@ -4,9 +4,9 @@
 > này tách rõ việc **làm được ngay (không cần cert/membership)** vs **cần gia hạn + cert**,
 > và nêu **rào kiến trúc** (Network Extension) phải giải trước khi App Store khả thi.
 >
-> **Trạng thái:** `[A — prep]`. Build thật chưa chạy (chờ owner gia hạn membership + cấp cert).
-> **Bối cảnh:** Apple Developer Program **membership đã hết hạn** (ảnh chụp 2026-06-25) —
-> chặn ký/notarize/upload, **không** chặn compile.
+> **Trạng thái (2026-06-26):** `[B — built]`. Membership **đã gia hạn**; Network Extension
+> đã **implement + build cho iOS sim** (BUILD SUCCEEDED). Còn lại = bridge JS→Swift +
+> build trên device + App Store review (5.4). Xem **§5 Implementation status** + **§6 Runbook**.
 
 ---
 
@@ -77,8 +77,57 @@ Giống `release-macos.sh`: credential đọc từ **environment**, không hard-
 
 ---
 
+## 5. Implementation status — Network Extension (đã build 2026-06-26)
+
+Owner chốt hướng **(a) Packet Tunnel Provider bọc boringtun** (giữ A.1.9, 1 core Rust).
+Đã implement + verify (compile/typecheck/link, chưa chạy trên device):
+
+| # | Việc | Verify | Vị trí |
+|---|---|---|---|
+| 1 | Tách packet-pump tái dùng (tx/rx/timer + demux) ra `agent-core` | ✅ test + iOS compile, macOS không regress | `agent-core::{pump,tundev}` |
+| 2 | FFI staticlib `ankayma_ptp_start/stop` bọc pump | ✅ 3 test + build `aarch64-apple-ios` | `crates/agent-ios-ptp` (+ `include/agent_ios_ptp.h`) |
+| 3 | Swift `PacketTunnelProvider` (lấy utun fd, set network settings, gọi FFI) | ✅ `swiftc -typecheck` iOS 26 SDK | `gui/src-tauri/ios/PacketTunnel/` |
+| 4 | Extension target + entitlements (NE packet-tunnel + App Group) + link FFI | ✅ `xcodebuild -target …PacketTunnel`: **BUILD SUCCEEDED** (sim) | `scripts/ios-postinit.sh` + `ios/PacketTunnel.target.yml` |
+| 5 | App `TunnelManager` (NETunnelProviderManager install + start/stop + config→App Group) | ✅ typecheck, wired vào app target | `gui/src-tauri/ios/AppSupport/TunnelManager.swift` |
+
+**Provisioning đã có** (portal 2026-06-26): App ID `com.ankayma.app` + `com.ankayma.app.tunnel`,
+App Group `group.com.ankayma.app`, cả 2 bật Network Extensions + App Groups. Team `8UF87JS6WW`.
+
+**Còn lại (chưa làm — cần device/Apple):**
+- **Bridge JS→Rust→Swift**: Tauri mobile plugin để frontend gọi connect/disconnect. Rust command
+  dùng `agent-core` (enroll + GET /peers) dựng config JSON → gọi `TunnelManager.connect(configJSON:)`
+  qua Swift Plugin. Cần `cargo tauri ios build` + device để verify runtime.
+- Build trên device, TestFlight, App Store review (§6).
+
+> Lưu ý quy trình: `gen/apple/` bị regenerate + gitignore → sau mỗi `cargo tauri ios init` phải
+> chạy `scripts/ios-postinit.sh` để áp lại extension target + entitlements (idempotent).
+
+## 6. Runbook — build device → TestFlight → App Store
+
+> Cổng cần **device thật + signing + Apple review** — không tự động hoá headless được.
+
+1. **Provisioning profiles** (Xcode managed signing, hoặc portal): app `com.ankayma.app` +
+   extension `com.ankayma.app.tunnel`, mỗi cái gắn Network Extensions + App Groups capability.
+   Set `DEVELOPMENT_TEAM=8UF87JS6WW` (đã trong project.yml).
+2. **Bridge + frontend** (phần "còn lại" §5) trước khi build device, nếu không app chỉ có UI,
+   không bấm connect được.
+3. **Build:** `cd gui/src-tauri && cargo tauri ios init && bash ../../scripts/ios-postinit.sh`
+   rồi `cargo tauri ios build` (ký bằng cert/profile ở keychain). Ra `.ipa`.
+4. **Upload:** Transporter, hoặc App Store Connect API key (`xcrun altool`/`scripts/release-ios.sh`).
+5. **App Store Connect:** tạo app record `com.ankayma.app`, điền metadata + **privacy** (đã có
+   ankayma.com/privacy.html), khai **Trader status (EU DSA)**, encryption export.
+6. **Guideline 5.4 (VPN):** submit bằng **tài khoản tổ chức** (✅ VIET NAM ADVANCED SOFTWARE
+   COMPANY LIMITED), app **tự** cung cấp VPN qua NetworkExtension (✅), khai data collection,
+   không bán/chia dữ liệu VPN. Reviewer **test tunnel chạy thật** → cần bridge + device xong.
+
+---
+
 ### Log
 - 2026-06-25 — Tạo prep checklist. Target = iOS App Store (owner chốt). Build chưa chạy
   (membership expired). Flag rào Network Extension (boringtun → Packet Tunnel Provider).
   Tham chiếu: scripts/release-ios.sh, scripts/release-macos.sh (mẫu env-driven),
   phase-completion-checklist-1.1.md (5-platform 🟡), auth-deeplink-signin-spec.md.
+- 2026-06-26 — Membership gia hạn. Owner chốt hướng (a). Implement Network Extension
+  end-to-end (task 1→5): agent-core pump + agent-ios-ptp FFI + Swift provider + extension
+  target + app TunnelManager. Extension BUILD SUCCEEDED (sim). Còn bridge JS↔Swift + device +
+  App Store 5.4. Provisioning (2 App ID + App Group) đã tạo. Thêm §5/§6.
