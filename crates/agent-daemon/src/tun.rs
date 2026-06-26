@@ -100,42 +100,8 @@ mod imp {
         }
     }
 
-    /// Read one IP packet, stripping the 4-byte address-family header utun
-    /// prepends. `[T:Apple-XNU net/if_utun.h]` framing = 4-byte AF (big-endian).
-    pub fn read_packet(fd: i32, buf: &mut [u8]) -> io::Result<usize> {
-        let mut framed = [0u8; 2048];
-        // SAFETY: read into a valid local buffer with a correct length.
-        let n = unsafe {
-            libc::read(
-                fd,
-                framed.as_mut_ptr() as *mut libc::c_void,
-                framed.len().min(buf.len() + 4),
-            )
-        };
-        if n < 0 {
-            return Err(io::Error::last_os_error());
-        }
-        let n = n as usize;
-        if n < 4 {
-            return Ok(0);
-        }
-        let payload = &framed[4..n];
-        buf[..payload.len()].copy_from_slice(payload);
-        Ok(payload.len())
-    }
-
-    /// Write one IPv4 packet, prepending the 4-byte AF_INET header utun expects.
-    pub fn write_packet(fd: i32, packet: &[u8]) -> io::Result<usize> {
-        let mut framed = Vec::with_capacity(packet.len() + 4);
-        framed.extend_from_slice(&(libc::AF_INET as u32).to_be_bytes()); // [T:Apple-XNU] AF in network order
-        framed.extend_from_slice(packet);
-        // SAFETY: write from a valid local buffer with a correct length.
-        let n = unsafe { libc::write(fd, framed.as_ptr() as *const libc::c_void, framed.len()) };
-        if n < 0 {
-            return Err(io::Error::last_os_error());
-        }
-        Ok(n as usize)
-    }
+    // read_packet/write_packet moved to `agent_core::tundev` (shared by the daemon
+    // pump + the iOS Packet Tunnel extension). `[T:A.1.9]`
 }
 
 #[cfg(target_os = "linux")]
@@ -188,26 +154,8 @@ mod imp {
         }
     }
 
-    /// Read one bare IP packet (IFF_NO_PI → no framing to strip).
-    pub fn read_packet(fd: i32, buf: &mut [u8]) -> io::Result<usize> {
-        // SAFETY: read into a valid local buffer with its real length.
-        let n = unsafe { libc::read(fd, buf.as_mut_ptr() as *mut c_void, buf.len()) };
-        if n < 0 {
-            return Err(io::Error::last_os_error());
-        }
-        Ok(n as usize)
-    }
-
-    /// Write one bare IP packet (works for IPv4 and IPv6 — the kernel reads the
-    /// version nibble; IFF_NO_PI means no AF prefix is needed).
-    pub fn write_packet(fd: i32, packet: &[u8]) -> io::Result<usize> {
-        // SAFETY: write from a valid local buffer with its real length.
-        let n = unsafe { libc::write(fd, packet.as_ptr() as *const c_void, packet.len()) };
-        if n < 0 {
-            return Err(io::Error::last_os_error());
-        }
-        Ok(n as usize)
-    }
+    // read_packet/write_packet moved to `agent_core::tundev` (shared by the daemon
+    // pump + the iOS Packet Tunnel extension). `[T:A.1.9]`
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
@@ -221,31 +169,9 @@ mod imp {
             "kernel tun data plane is implemented for macOS + Linux [T:A.1.9]",
         ))
     }
-    pub fn read_packet(_fd: i32, _buf: &mut [u8]) -> io::Result<usize> {
-        Err(io::Error::new(
-            io::ErrorKind::Unsupported,
-            "no tun device on this platform",
-        ))
-    }
-    pub fn write_packet(_fd: i32, _packet: &[u8]) -> io::Result<usize> {
-        Err(io::Error::new(
-            io::ErrorKind::Unsupported,
-            "no tun device on this platform",
-        ))
-    }
 }
 
 /// Open a fresh layer-3 tunnel device (root required on macOS).
 pub fn open() -> io::Result<TunDevice> {
     imp::open()
-}
-
-/// Read one bare IP packet from the device.
-pub fn read_packet(fd: i32, buf: &mut [u8]) -> io::Result<usize> {
-    imp::read_packet(fd, buf)
-}
-
-/// Write one bare IPv4 packet to the device.
-pub fn write_packet(fd: i32, packet: &[u8]) -> io::Result<usize> {
-    imp::write_packet(fd, packet)
 }

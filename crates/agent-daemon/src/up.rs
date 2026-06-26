@@ -15,22 +15,20 @@
 //! macOS only at 1.1 (the utun adapter); other platforms error at runtime but
 //! still compile (A.1.9). Requires root (utun + route).
 
-use std::collections::HashSet;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket};
 use std::process::Command;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use agent_core::dataplane::{self, DialablePeer};
 use agent_core::domain::EnrollRequest;
-use agent_core::tunnel::{make_tunn, PublicKey, StaticSecret, Tunn, TunnResult};
+use agent_core::pump::{self, Peers}; // shared packet pump (tx/rx/timers + peer roster)
+use agent_core::tunnel::StaticSecret;
 use agent_core::{adapters, reqwest, WgKeypair};
 use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Serialize};
 
 const DEFAULT_CONTROL_PLANE: &str = "https://cp.ankayma.com";
 const DEFAULT_LISTEN_PORT: u16 = 51820; // [T:wg(8)] WireGuard's default UDP port
-const MTU: usize = 1420; // [T:WireGuard] safe overlay MTU under a 1500 path
 
 /// Persisted node identity. Reused across runs so `agent up` does not enroll a
 /// fresh node every time (the control plane assigns a new node + overlay IP per
@@ -44,27 +42,9 @@ pub(crate) struct AgentState {
     pub(crate) listen_port: u16,
 }
 
-/// One peer's live tunnel: metadata + its boringtun state machine + the current
-/// UDP endpoint. For a responder peer (no advertised endpoint, e.g. a CI runner
-/// behind NAT) the endpoint starts `None` and is learned from the first handshake;
-/// it is also refreshed on roaming. `[T:Part C §H.3.3 B-3]`
-struct PeerEntry {
-    peer: DialablePeer,
-    endpoint: Mutex<Option<SocketAddr>>,
-    tunn: Mutex<Tunn>,
-}
-
-impl PeerEntry {
-    fn endpoint(&self) -> Option<SocketAddr> {
-        *self.endpoint.lock().expect("endpoint lock")
-    }
-    /// Learn/refresh where this peer is reachable (handshake source / roaming).
-    fn set_endpoint(&self, ep: SocketAddr) {
-        *self.endpoint.lock().expect("endpoint lock") = Some(ep);
-    }
-}
-
-type Peers = Arc<Mutex<Vec<Arc<PeerEntry>>>>;
+// `PeerEntry` / `Peers` and the tx/rx/timer pump now live in `agent_core::pump`
+// so the iOS Packet Tunnel extension reuses them (A.1.9). This file keeps only the
+// host-specific plumbing: opening utun + assigning the overlay IP + per-peer routes.
 
 /// `agent up [--token <t>] [--control-plane <url>] [--port <n>] [--state <path>]`
 pub async fn run(args: &[String]) -> Result<()> {
@@ -163,9 +143,9 @@ pub(crate) async fn serve_dataplane(
     // not just enrolled). Refreshed every roster cycle below = a heartbeat.
     write_status(&state.node_id, &state.overlay_ip, state.listen_port, &peers);
 
-    spawn_tx(fd, udp.clone(), peers.clone());
-    spawn_rx(fd, udp.clone(), peers.clone());
-    spawn_timers(udp.clone(), peers.clone());
+    pump::spawn_tx(fd, udp.clone(), peers.clone());
+    pump::spawn_rx(fd, udp.clone(), peers.clone());
+    pump::spawn_timers(udp.clone(), peers.clone());
 
     // [F-3] Private DNS for branded names while the overlay is up: resolve the
     // tenant's `<name> → overlay_ip` table locally so a browser on this enrolled
@@ -519,7 +499,10 @@ fn run_cmd(cmd: &mut Command) -> Result<()> {
     Ok(())
 }
 
-/// Add peers we don't already have a tunnel for. Returns how many were added.
+/// Add peers we don't already have a tunnel for, then route each new peer's
+/// overlay into the device. Returns how many were added. The Tunn setup + roster
+/// push is the OS-agnostic part (`pump::add_tunn_peers`); this wrapper adds the
+/// host route (macOS/Linux) the pump deliberately leaves to the caller. `[T:A.1.9]`
 fn add_new_peers(
     peers: &Peers,
     index: &Arc<Mutex<u32>>,
@@ -529,189 +512,10 @@ fn add_new_peers(
     udp: &Arc<UdpSocket>,
     dev_name: &str,
 ) -> usize {
-    let dialable = dataplane::dialable_peers(list, self_overlay);
-    let mut guard = peers.lock().expect("peers lock");
-    let known: HashSet<String> = guard
-        .iter()
-        .map(|p| p.peer.public_key_b64.clone())
-        .collect();
-    let mut added = 0;
-
-    for d in dialable {
-        if known.contains(&d.public_key_b64) {
-            continue;
-        }
-        let idx = {
-            let mut i = index.lock().expect("index lock");
-            *i += 1;
-            *i
-        };
-        let peer_pub = PublicKey::from(d.public_key);
-        let mut tunn = make_tunn(static_private.clone(), peer_pub, idx);
-
-        // Proactively initiate the handshake if we know where to send it. A
-        // responder peer (endpoint None — e.g. a CI runner behind NAT) is left to
-        // initiate; we answer and learn its endpoint from the first packet.
-        if let Some(ep) = d.endpoint {
-            let mut buf = [0u8; 2048];
-            if let TunnResult::WriteToNetwork(p) = tunn.format_handshake_initiation(&mut buf, false)
-            {
-                let _ = udp.send_to(p, ep);
-            }
-        }
-
+    let added = pump::add_tunn_peers(peers, index, static_private, self_overlay, list, udp);
+    for overlay in &added {
         // Route this peer's overlay /32 into the tunnel (wins over Tailscale's /10).
-        add_peer_route(dev_name, d.overlay_ip);
-
-        match d.endpoint {
-            Some(ep) => println!(
-                "peer {} ({}) overlay {} via {ep}",
-                d.hostname, d.node_id, d.overlay_ip
-            ),
-            None => println!(
-                "peer {} ({}) overlay {} (responder — endpoint learned on handshake)",
-                d.hostname, d.node_id, d.overlay_ip
-            ),
-        }
-        let ep = d.endpoint;
-        guard.push(Arc::new(PeerEntry {
-            peer: d,
-            endpoint: Mutex::new(ep),
-            tunn: Mutex::new(tunn),
-        }));
-        added += 1;
+        add_peer_route(dev_name, *overlay);
     }
-    added
-}
-
-/// Find the peer that owns an overlay destination (outgoing) or a UDP source
-/// (incoming). Cheap linear scan — a personal mesh has a handful of peers.
-fn peer_by_overlay(peers: &Peers, dst: IpAddr) -> Option<Arc<PeerEntry>> {
-    let g = peers.lock().expect("peers lock");
-    g.iter().find(|p| p.peer.overlay_ip == dst).cloned()
-}
-
-fn peer_by_source(peers: &Peers, src: SocketAddr) -> Option<Arc<PeerEntry>> {
-    let g = peers.lock().expect("peers lock");
-    // Exact endpoint match first; fall back to same-host (port may differ behind
-    // NAT); fall back to the sole peer if there's only one.
-    g.iter()
-        .find(|p| p.endpoint() == Some(src))
-        .or_else(|| {
-            g.iter()
-                .find(|p| p.endpoint().map(|e| e.ip()) == Some(src.ip()))
-        })
-        .or_else(|| if g.len() == 1 { g.first() } else { None })
-        .cloned()
-}
-
-/// utun → encapsulate → UDP. Reads bare IP packets, routes by destination.
-fn spawn_tx(fd: i32, udp: Arc<UdpSocket>, peers: Peers) {
-    std::thread::spawn(move || {
-        let mut pkt = [0u8; MTU + 80];
-        let mut enc = [0u8; MTU + 80];
-        loop {
-            let n = match crate::tun::read_packet(fd, &mut pkt) {
-                Ok(0) => continue,
-                Ok(n) => n,
-                Err(e) => {
-                    eprintln!("utun read error: {e}");
-                    break;
-                }
-            };
-            let Some(dst) = dataplane::packet_dst(&pkt[..n]) else {
-                continue; // not a routable IPv4/IPv6 packet (truncated / unknown version)
-            };
-            let Some(entry) = peer_by_overlay(&peers, dst) else {
-                continue; // no peer owns this overlay address
-            };
-            let mut tunn = entry.tunn.lock().expect("tunn lock");
-            match tunn.encapsulate(&pkt[..n], &mut enc) {
-                TunnResult::WriteToNetwork(out) => {
-                    if let Some(ep) = entry.endpoint() {
-                        let _ = udp.send_to(out, ep);
-                    }
-                }
-                TunnResult::Err(e) => eprintln!("encapsulate error: {e:?}"),
-                _ => {}
-            }
-        }
-    });
-}
-
-/// UDP → decapsulate → utun. Demuxes packets to the owning peer, draining queued
-/// output. `[T:WireGuard]`
-fn spawn_rx(fd: i32, udp: Arc<UdpSocket>, peers: Peers) {
-    std::thread::spawn(move || {
-        let mut datagram = [0u8; 2048];
-        let mut out = [0u8; 2048];
-        loop {
-            let (n, src) = match udp.recv_from(&mut datagram) {
-                Ok(v) => v,
-                Err(e) => {
-                    eprintln!("udp recv error: {e}");
-                    break;
-                }
-            };
-            // Pick the owning peer. Fast path: a peer whose learned endpoint matches
-            // the source. Fallback: trial-decapsulate against every peer — needed
-            // when more than one *responder* peer has no endpoint yet (e.g. a NAT'd
-            // CI runner alongside another responder); only the peer whose Tunn holds
-            // the matching key accepts the packet, the rest return `Err`. `[T:WireGuard]`
-            let candidates: Vec<Arc<PeerEntry>> = match peer_by_source(&peers, src) {
-                Some(e) => vec![e],
-                None => peers.lock().expect("peers lock").iter().cloned().collect(),
-            };
-            for entry in candidates {
-                let mut tunn = entry.tunn.lock().expect("tunn lock");
-                let mut res = tunn.decapsulate(Some(src.ip()), &datagram[..n], &mut out);
-                // Wrong peer (trial mode): its Tunn rejects the packet → try the next.
-                if matches!(res, TunnResult::Err(_)) {
-                    continue;
-                }
-                // Learn / refresh this peer's endpoint from the source — how a
-                // responder picks up a NAT'd runner's address. `[T:WireGuard roam]`
-                entry.set_endpoint(src);
-                loop {
-                    match res {
-                        TunnResult::WriteToNetwork(pkt) => {
-                            // Reply to where the packet came from (correct for NAT/roam).
-                            let _ = udp.send_to(pkt, src);
-                            // boringtun may have more queued (e.g. cookie/keepalive).
-                            res = tunn.decapsulate(None, &[], &mut out);
-                        }
-                        TunnResult::WriteToTunnelV4(pkt, _)
-                        | TunnResult::WriteToTunnelV6(pkt, _) => {
-                            let _ = crate::tun::write_packet(fd, pkt);
-                            break;
-                        }
-                        TunnResult::Err(_) => break,
-                        TunnResult::Done => break,
-                    }
-                }
-                break; // handled by this peer
-            }
-        }
-    });
-}
-
-/// Drive WireGuard timers (rekey, keepalive, handshake retries).
-/// `[T:WireGuard-whitepaper §6]` the protocol is timer-driven.
-fn spawn_timers(udp: Arc<UdpSocket>, peers: Peers) {
-    std::thread::spawn(move || {
-        let mut buf = [0u8; 2048];
-        loop {
-            std::thread::sleep(Duration::from_millis(250));
-            let snapshot: Vec<Arc<PeerEntry>> =
-                peers.lock().expect("peers lock").iter().cloned().collect();
-            for entry in snapshot {
-                let mut tunn = entry.tunn.lock().expect("tunn lock");
-                if let TunnResult::WriteToNetwork(p) = tunn.update_timers(&mut buf) {
-                    if let Some(ep) = entry.endpoint() {
-                        let _ = udp.send_to(p, ep);
-                    }
-                }
-            }
-        }
-    });
+    added.len()
 }

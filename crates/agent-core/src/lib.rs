@@ -6,6 +6,8 @@ pub mod dataplane; // overlay peer model + packet routing helpers (testable)
 pub mod domain; // pure business logic, no I/O
 pub mod oidc; // CI OIDC token fetch for secretless deploy (B-3)
 pub mod ports; // trait interfaces for external systems
+pub mod pump; // reusable WireGuard packet pump over a tun fd (daemon + iOS extension)
+pub mod tundev; // fd-level tun packet I/O (per-platform framing; macOS+iOS shared)
 pub mod tunnel; // WireGuard data-plane engine (boringtun)
 
 // Node identity = a WireGuard keypair (Part B §B.1.1 `Node`). Surface the crypto
