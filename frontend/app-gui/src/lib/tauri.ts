@@ -30,8 +30,14 @@ export async function checkAuthState(): Promise<AuthState> {
   return invoke<AuthState>("check_auth_state");
 }
 
-export async function signInGithub(): Promise<void> {
-  return invoke("sign_in_github");
+export async function signInGithub(nonce: string): Promise<void> {
+  return invoke("sign_in_github", { nonce });
+}
+
+// Poll the OAuth handoff: returns the signed-in state once the browser login
+// completes (token parked under `nonce`), or null while still pending.
+export async function pollLogin(nonce: string): Promise<AuthState | null> {
+  return invoke<AuthState | null>("poll_login", { nonce });
 }
 
 // After OAuth in the browser, the user pastes the session token shown on the

@@ -367,11 +367,32 @@ async fn check_auth_state(app: AppHandle, state: State<'_, AppState>) -> Result<
 }
 
 #[tauri::command]
-async fn sign_in_github(state: State<'_, AppState>) -> Result<(), String> {
-    // Open the system browser to the control-plane OAuth start. After GitHub,
-    // the page shows a session token to paste back via submit_session_token.
-    let url = format!("{}/auth/github", state.base_url.trim_end_matches('/'));
+async fn sign_in_github(state: State<'_, AppState>, nonce: String) -> Result<(), String> {
+    // Open the system browser to the control-plane OAuth start, passing a one-time
+    // `nonce`. After GitHub, the callback parks the session token under that nonce;
+    // the frontend polls `poll_login(nonce)` to sign in — no `ankayma://` deep link
+    // needed (it's unreliable under `tauri dev`). Deep-link + paste remain fallbacks.
+    let base = state.base_url.trim_end_matches('/');
+    let url = format!("{base}/auth/github?source=desktop&nonce={nonce}");
     open::that(&url).map_err(|e| format!("could not open browser: {e}"))
+}
+
+/// Poll the OAuth handoff: returns Authenticated once the browser-side GitHub login
+/// completes (token parked under `nonce`), else None while still pending.
+#[tauri::command]
+async fn poll_login(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    nonce: String,
+) -> Result<Option<AuthState>, String> {
+    match adapters::fetch_handoff(&state.http, &state.base_url, &nonce).await {
+        Ok(Some(token)) => {
+            let user = apply_session_token(&app, token).await?;
+            Ok(Some(AuthState::Authenticated { user }))
+        }
+        Ok(None) => Ok(None),
+        Err(e) => Err(e.to_string()),
+    }
 }
 
 /// Validate a session token against the control plane and, if good, store it +
@@ -1359,6 +1380,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             check_auth_state,
             sign_in_github,
+            poll_login,
             submit_session_token,
             sign_out,
             get_connection_status,

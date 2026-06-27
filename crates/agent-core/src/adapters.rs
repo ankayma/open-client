@@ -75,6 +75,36 @@ pub async fn session_info(
     get_json(http, base_url, "/api/v1/session", session_token).await
 }
 
+/// Poll the desktop OAuth handoff: `GET /auth/handoff?nonce=…`. Returns the session
+/// token once the browser-side GitHub OAuth completes, or `None` while still pending
+/// (HTTP 204). Lets the app sign in by polling instead of relying on the `ankayma://`
+/// deep link firing. `[T:A.1.3 handoff]`
+pub async fn fetch_handoff(
+    http: &reqwest::Client,
+    base_url: &str,
+    nonce: &str,
+) -> Result<Option<String>, ApiError> {
+    #[derive(serde::Deserialize)]
+    struct Resp {
+        token: String,
+    }
+    let resp = http
+        .get(url(base_url, &format!("/auth/handoff?nonce={nonce}")))
+        .send()
+        .await
+        .map_err(|e| ApiError::Transport(e.to_string()))?;
+    if resp.status().as_u16() == 204 {
+        return Ok(None); // still pending
+    }
+    if !resp.status().is_success() {
+        return Err(status_error(resp).await);
+    }
+    resp.json::<Resp>()
+        .await
+        .map(|r| Some(r.token))
+        .map_err(|e| ApiError::Decode(e.to_string()))
+}
+
 /// Fetch the tenant's usage quota. `GET /api/v1/quota`.
 pub async fn quota(
     http: &reqwest::Client,

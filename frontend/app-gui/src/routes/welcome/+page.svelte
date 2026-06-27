@@ -2,25 +2,57 @@
 	import { goto } from '$app/navigation';
 	import { onMount, onDestroy } from 'svelte';
 	import { auth } from '$lib/stores';
-	import { signInGithub, submitSessionToken } from '$lib/tauri';
+	import { signInGithub, pollLogin, submitSessionToken } from '$lib/tauri';
 	import { listen } from '@tauri-apps/api/event';
 
 	// idle   → initial screen with GitHub button
-	// waiting → browser opened, deep-link will auto-complete (layout listens for auth-pending)
+	// waiting → browser opened; the app POLLS the handoff (no deep-link needed) and
+	//           auto-signs-in when GitHub finishes. Paste box also shown as fallback.
 	// paste  → manual fallback (no browser / headless)
 	let step = $state<'idle' | 'waiting' | 'paste'>('idle');
 	let busy = $state(false);
 	let token = $state('');
 	let error = $state<string | null>(null);
 
+	// One-time handoff nonce + poll loop: bấm-là-vô without the ankayma:// deep link.
+	let nonce = '';
+	let pollTimer: ReturnType<typeof setInterval> | undefined;
+
+	function stopPoll() {
+		if (pollTimer) {
+			clearInterval(pollTimer);
+			pollTimer = undefined;
+		}
+	}
+
+	function startPoll() {
+		stopPoll();
+		let elapsed = 0;
+		pollTimer = setInterval(async () => {
+			elapsed += 2;
+			if (elapsed > 300) return stopPoll(); // give up after 5 min
+			try {
+				const state = await pollLogin(nonce);
+				if (state) {
+					stopPoll();
+					auth.set(state);
+					goto('/dashboard');
+				}
+			} catch {
+				// transient network blip — keep polling
+			}
+		}, 2000);
+	}
+
 	async function handleSignIn() {
 		busy = true;
 		error = null;
 		try {
-			await signInGithub();
-			// Browser opened — wait for the deep link to arrive.
-			// Layout's auth-pending listener calls checkAuthState() → goto('/dashboard').
+			nonce = crypto.randomUUID();
+			await signInGithub(nonce);
+			// Browser opened → poll the handoff until GitHub completes, then auto-sign-in.
 			step = 'waiting';
+			startPoll();
 		} catch {
 			// Can't open a browser (headless / iOS sim) — fall back to manual paste.
 			step = 'paste';
@@ -35,6 +67,7 @@
 		error = null;
 		try {
 			const state = await submitSessionToken(token.trim());
+			stopPoll();
 			auth.set(state);
 			goto('/dashboard');
 		} catch (e) {
@@ -44,6 +77,7 @@
 	}
 
 	function reset() {
+		stopPoll();
 		step = 'idle';
 		error = null;
 		token = '';
@@ -54,7 +88,10 @@
 		const unsub = await listen('auth-cancelled', () => reset());
 		unsubCancel = unsub;
 	});
-	onDestroy(() => unsubCancel?.());
+	onDestroy(() => {
+		stopPoll();
+		unsubCancel?.();
+	});
 </script>
 
 <main>
@@ -106,15 +143,23 @@
 		{:else if step === 'waiting'}
 			<div class="waiting-card">
 				<span class="spinner-lg"></span>
-				<p class="waiting-text">Authorizing in browser…</p>
-				<p class="waiting-sub">Return to this window after approving access.</p>
+				<p class="waiting-text">Waiting for GitHub…</p>
+				<p class="waiting-sub">Approve access in the browser — you'll be signed in here automatically. Stuck? Tap <strong>Copy token</strong> there and paste it below.</p>
 			</div>
-			<button class="btn-link" onclick={handleSignIn} disabled={busy}>
-				Re-open browser
+			{#if error}<p class="error">{error}</p>{/if}
+			<input
+				class="token-input"
+				type="text"
+				placeholder="Paste session token"
+				bind:value={token}
+				autocomplete="off"
+				spellcheck="false"
+				onkeydown={(e) => e.key === 'Enter' && handleSubmitToken()}
+			/>
+			<button class="btn-primary" onclick={handleSubmitToken} disabled={busy || !token.trim()}>
+				{#if busy}<span class="spinner"></span> Verifying…{:else}Paste token &amp; sign in{/if}
 			</button>
-			<button class="btn-link" onclick={() => { step = 'paste'; error = null; }}>
-				Enter token manually
-			</button>
+			<button class="btn-link" onclick={handleSignIn} disabled={busy}>Re-open browser</button>
 			<button class="btn-link" onclick={reset}>← Cancel</button>
 
 		{:else}

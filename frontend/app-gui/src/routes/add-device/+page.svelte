@@ -55,39 +55,35 @@
 		a.click();
 	}
 
-	// Recipient side: this device redeems a node invite (`ankayma://join?token=…`)
-	// to enroll itself into the invite's tenant. Prefilled when we arrived via a
-	// deep link. [A] flow per docs/part-d-invite-flow.md (Cases C+D).
-	let joinToken    = $state('');
-	let joinHostname = $state('');
-	let joinBusy     = $state(false);
-	let joinError    = $state<string | null>(null);
-	let joinDone     = $state(false);
+	// Recipient side (Cases C/D): arriving here via a node-invite deep link — i.e. the
+	// recipient SCANNED the QR or opened `ankayma://join?token=…` — AUTO-enrolls this
+	// device. No paste box, no confirm: scan = enrolled.
+	// Founder decision 2026-06-27. (The spec only mandates "token pre-filled"; auto vs
+	// confirm is an impl choice — see part-d-invite-flow.md §Cases C/D.)
+	let enrolling = $state(false);
+	let joinError = $state<string | null>(null);
+	let joinDone  = $state(false);
 
-	onMount(() => {
+	onMount(async () => {
 		const invite = get(pendingInvite);
 		if (invite?.type === 'join-node') {
-			joinToken = invite.token;
+			// Received an invite → enroll this device automatically, then go home.
 			pendingInvite.set(null);
+			enrolling = true;
+			try {
+				const m = invite.token.match(/token=([^&\s]+)/);
+				const tok = m ? m[1] : invite.token.trim();
+				await joinEnrollNode(tok, ''); // unnamed — rename later in Devices
+				joinDone = true;
+				setTimeout(() => goto('/dashboard'), 800);
+			} catch (e: unknown) {
+				joinError = e instanceof Error ? e.message : 'Enrollment failed';
+			}
+			return;
 		}
+		// Otherwise this is the "invite another device" page → mint an invite QR.
+		loadJoinLink();
 	});
-
-	async function handleJoinEnroll() {
-		joinBusy = true;
-		joinError = null;
-		try {
-			// Accept a full ankayma://join?token=… link or a bare token.
-			const m = joinToken.match(/token=([^&\s]+)/);
-			const tok = m ? m[1] : joinToken.trim();
-			await joinEnrollNode(tok, joinHostname.trim());
-			joinDone = true;
-			setTimeout(() => goto('/dashboard'), 700);
-		} catch (e: unknown) {
-			joinError = e instanceof Error ? e.message : 'Enrollment failed';
-		} finally {
-			joinBusy = false;
-		}
-	}
 
 	// Multi-user tenants gate invite minting behind a step-up. We DON'T pop the OTP
 	// modal on page load (that would email a code on mere navigation); instead we
@@ -116,8 +112,6 @@
 			loading = false;
 		}
 	}
-
-	loadJoinLink();
 
 	// Admin opts into the gated mint: run the OTP step-up, then mint with the proof.
 	async function generateWithStepUp() {
@@ -159,41 +153,19 @@
 	</header>
 
 	<div class="body">
-		<section class="join-section">
-			<h3>Have an invite link?</h3>
-			<p class="join-desc">Enroll <strong>this device</strong> into a team you were invited to. Paste the <code>ankayma://join…</code> link or token.</p>
+	{#if enrolling}
+		<!-- Recipient arrived via a node-invite deep link → auto-enrolling this device. -->
+		<section class="enroll-status">
 			{#if joinDone}
-				<p class="join-ok">Enrolled — taking you to the dashboard…</p>
+				<p class="join-ok">✓ Enrolled — taking you to the dashboard…</p>
+			{:else if joinError}
+				<p class="join-err">{joinError}</p>
 			{:else}
-				<input
-					class="join-input"
-					bind:value={joinToken}
-					placeholder="ankayma://join?token=…"
-					autocapitalize="none"
-					autocorrect="off"
-					spellcheck="false"
-				/>
-				<input
-					class="join-input"
-					bind:value={joinHostname}
-					placeholder="Name for this device (optional)"
-					autocapitalize="none"
-					autocorrect="off"
-					spellcheck="false"
-				/>
-				{#if joinError}<p class="join-err">{joinError}</p>{/if}
-				<button
-					class="join-btn"
-					onclick={handleJoinEnroll}
-					disabled={joinBusy || !joinToken.trim()}
-				>
-					{joinBusy ? 'Connecting…' : 'Join with invite'}
-				</button>
+				<span class="spinner-lg"></span>
+				<p class="desc">Enrolling this device into the mesh…</p>
 			{/if}
 		</section>
-
-		<div class="divider"><span>or invite another device</span></div>
-
+	{:else}
 		<p class="desc">Install Ankayma on another device and scan this code, or share the link. The device will join your mesh automatically.</p>
 
 		<div class="ttl-row">
@@ -264,6 +236,7 @@
 				</a>
 			</div>
 		</div>
+	{/if}
 	</div>
 </main>
 
@@ -463,54 +436,17 @@
 
 	.platform-chip:hover { border-color: var(--c-accent); text-decoration: none; }
 
-	/* Recipient (join-via-invite) section */
-	.join-section {
+	/* Recipient auto-enroll status (deep-link Cases C/D) */
+	.enroll-status {
 		width: 100%;
-		background: var(--c-surface);
-		border: 1px solid var(--c-border);
-		border-radius: var(--radius);
-		padding: 16px;
 		display: flex;
 		flex-direction: column;
-		gap: 10px;
+		align-items: center;
+		gap: 14px;
+		padding: 40px 0;
 	}
-
-	.join-section h3 { font-size: 15px; font-weight: 700; }
-
-	.join-desc {
-		font-size: 13px;
-		color: var(--c-text-dim);
-		line-height: 1.5;
-	}
-
-	.join-desc code {
-		font-family: 'SF Mono', 'Fira Code', monospace;
-		font-size: 12px;
-		color: var(--c-accent);
-	}
-
-	.join-input {
-		width: 100%;
-		background: var(--c-bg);
-		border: 1px solid var(--c-border);
-		border-radius: 8px;
-		padding: 10px 12px;
-		color: var(--c-text);
-		font-size: 13px;
-	}
-
-	.join-btn {
-		background: var(--c-accent);
-		color: #fff;
-		font-weight: 600;
-		font-size: 14px;
-		padding: 10px 16px;
-		border-radius: 9px;
-	}
-
-	.join-btn:disabled { opacity: 0.5; }
 
 	.join-err { color: var(--c-danger); font-size: 13px; }
 
-	.join-ok { color: var(--c-success); font-size: 14px; font-weight: 600; }
+	.join-ok { color: var(--c-success); font-size: 15px; font-weight: 600; }
 </style>
