@@ -19,6 +19,24 @@ mod ffi {
         pub fn ankayma_vpn_disconnect();
         pub fn ankayma_vpn_status() -> i32;
         pub fn ankayma_vpn_prime();
+        // Open an external URL in Safari (OpenUrlBridge.swift). 0 = dispatched,
+        // -1 = unparseable URL. [T:A.1.9]
+        pub fn ankayma_open_url(url: *const c_char) -> i32;
+    }
+}
+
+/// Open an external URL in the system browser via the Swift `UIApplication.open`
+/// C-ABI bridge (iOS). The `open` crate used on desktop no-ops here. Used for the
+/// GitHub OAuth start + branded-name links. [T:A.1.9]
+#[cfg(target_os = "ios")]
+pub fn open_external_url(url: &str) -> Result<(), String> {
+    let c = std::ffi::CString::new(url).map_err(|e| e.to_string())?;
+    // SAFETY: `c` is a valid NUL-terminated C string, read only for this call.
+    let rc = unsafe { ffi::ankayma_open_url(c.as_ptr()) };
+    if rc == 0 {
+        Ok(())
+    } else {
+        Err(format!("could not open url (code {rc})"))
     }
 }
 

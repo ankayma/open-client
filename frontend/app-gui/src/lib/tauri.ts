@@ -197,13 +197,19 @@ export async function openSubdomain(fqdn: string): Promise<void> {
 export async function listMembers(): Promise<MembersView> {
   return invoke<MembersView>("list_members");
 }
-// `ttlSeconds` (optional) overrides the server's default member-invite TTL; the
-// control plane clamps it to the allowed range. [A] invite-flow §TTL policy.
-export async function inviteMember(ttlSeconds?: number): Promise<string> {
-  return invoke<string>("invite_member", { ttlSeconds });
+// Invite a member BY EMAIL — the join link is delivered to that email (Part D §A).
+// `ttlSeconds` (optional) overrides the server's default member-invite TTL.
+export async function inviteMember(email: string, ttlSeconds?: number): Promise<string> {
+  return invoke<string>("invite_member", { email, ttlSeconds });
 }
 export async function joinTeam(invite: string): Promise<void> {
   return invoke("join_team", { invite });
+}
+
+// Member magic-link join (no GitHub, no OTP): the emailed invite token IS the credential —
+// redeem it to become an email-rooted member and get signed in. ZERO confirm (Part D §A).
+export async function joinTeamLink(token: string): Promise<AuthState> {
+  return invoke<AuthState>("join_team_link", { token });
 }
 export async function removeMember(userId: string): Promise<void> {
   return invoke("remove_member", { userId });

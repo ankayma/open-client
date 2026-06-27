@@ -62,11 +62,13 @@
     }
   }
 
+  let inviteEmail = $state("");
   async function invite() {
+    if (!inviteEmail.trim()) return;
     busy = true;
     error = "";
     try {
-      inviteUrl = await inviteMember(memberTtl);
+      inviteUrl = await inviteMember(inviteEmail.trim(), memberTtl);
     } catch (e: unknown) {
       error = e instanceof Error ? e.message : "Invite failed";
     } finally {
@@ -146,7 +148,16 @@
     {:else if canInvite}
       <section class="panel">
         <h3>Invite a member</h3>
-        <p class="hint">Mint a link; the teammate signs in and pastes it to join.</p>
+        <p class="hint">Enter their email — we send a join link there. They confirm with a code (no GitHub needed).</p>
+        <input
+          class="email-input"
+          type="email"
+          bind:value={inviteEmail}
+          placeholder="teammate@email.com"
+          autocapitalize="none"
+          autocorrect="off"
+          spellcheck="false"
+        />
         <div class="ttl-row">
           <label for="member-ttl">Invite expires in</label>
           <select id="member-ttl" bind:value={memberTtl}>
@@ -155,8 +166,9 @@
             {/each}
           </select>
         </div>
-        <button class="btn" onclick={invite} disabled={busy}>Create invite link</button>
+        <button class="btn" onclick={invite} disabled={busy || !inviteEmail.trim()}>Send invite</button>
         {#if inviteUrl}
+          <p class="hint" style="margin-top:10px">Invite sent to <strong>{inviteEmail}</strong>. You can also share the link:</p>
           <div class="invite">
             <code>{inviteUrl}</code>
             <button class="copy" onclick={() => copy(inviteUrl)}>Copy</button>
@@ -359,5 +371,15 @@
     padding: 10px 12px;
     color: var(--c-text);
     font-size: 13px;
+  }
+  .email-input {
+    width: 100%;
+    background: var(--c-bg);
+    border: 1px solid var(--c-border);
+    border-radius: 8px;
+    padding: 10px 12px;
+    color: var(--c-text);
+    font-size: 14px;
+    margin-bottom: 10px;
   }
 </style>

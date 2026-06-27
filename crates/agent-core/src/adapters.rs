@@ -364,19 +364,17 @@ pub async fn invite_member(
     http: &reqwest::Client,
     base_url: &str,
     session_token: &str,
+    email: &str,
     ttl_seconds: Option<u64>,
 ) -> Result<String, ApiError> {
     #[derive(serde::Deserialize)]
     struct Resp {
         url: String,
     }
-    let mut endpoint = url(base_url, "/api/v1/members/invite");
-    if let Some(ttl) = ttl_seconds {
-        endpoint = format!("{endpoint}?ttl_seconds={ttl}");
-    }
     let resp = http
-        .post(endpoint)
+        .post(url(base_url, "/api/v1/members/invite"))
         .bearer_auth(session_token)
+        .json(&serde_json::json!({ "email": email, "ttl_seconds": ttl_seconds }))
         .send()
         .await
         .map_err(|e| ApiError::Transport(e.to_string()))?;
@@ -386,6 +384,34 @@ pub async fn invite_member(
     resp.json::<Resp>()
         .await
         .map(|r| r.url)
+        .map_err(|e| ApiError::Decode(e.to_string()))
+}
+
+/// Member magic-link join (no session, no OTP): redeem the emailed invite token — which
+/// IS the credential — to become an email-rooted member. Returns a NEW session token (the
+/// invitee is now signed in, no GitHub). `POST /api/v1/members/join-link`. `[T:Part D §A
+/// invite-flow §Cases — ZERO confirm at redeem, doc lines 28-30]`
+pub async fn join_team_link(
+    http: &reqwest::Client,
+    base_url: &str,
+    token: &str,
+) -> Result<String, ApiError> {
+    #[derive(serde::Deserialize)]
+    struct Resp {
+        token: String,
+    }
+    let resp = http
+        .post(url(base_url, "/api/v1/members/join-link"))
+        .json(&serde_json::json!({ "token": token }))
+        .send()
+        .await
+        .map_err(|e| ApiError::Transport(e.to_string()))?;
+    if !resp.status().is_success() {
+        return Err(status_error(resp).await);
+    }
+    resp.json::<Resp>()
+        .await
+        .map(|r| r.token)
         .map_err(|e| ApiError::Decode(e.to_string()))
 }
 

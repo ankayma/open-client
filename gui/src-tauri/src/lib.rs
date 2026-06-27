@@ -374,7 +374,21 @@ async fn sign_in_github(state: State<'_, AppState>, nonce: String) -> Result<(),
     // needed (it's unreliable under `tauri dev`). Deep-link + paste remain fallbacks.
     let base = state.base_url.trim_end_matches('/');
     let url = format!("{base}/auth/github?source=desktop&nonce={nonce}");
-    open::that(&url).map_err(|e| format!("could not open browser: {e}"))
+    open_url(&url)
+}
+
+/// Open an external URL in the system browser. On desktop the `open` crate launches
+/// the OS default browser; on iOS that crate no-ops (no `open`/`xdg-open`), so route
+/// through the Swift `UIApplication.open` C-ABI bridge instead. [T:A.1.9]
+fn open_url(url: &str) -> Result<(), String> {
+    #[cfg(target_os = "ios")]
+    {
+        vpn::open_external_url(url)
+    }
+    #[cfg(not(target_os = "ios"))]
+    {
+        open::that(url).map_err(|e| format!("could not open browser: {e}"))
+    }
 }
 
 /// Poll the OAuth handoff: returns Authenticated once the browser-side GitHub login
@@ -988,7 +1002,7 @@ async fn delete_subdomain(label: String, state: State<'_, AppState>) -> Result<(
 /// the mesh resolver is active (and TLS once auto-TLS lands) — best-effort today.
 #[tauri::command]
 async fn open_subdomain(fqdn: String) -> Result<(), String> {
-    open::that(format!("https://{fqdn}")).map_err(|e| format!("could not open browser: {e}"))
+    open_url(&format!("https://{fqdn}"))
 }
 
 // ── F1 team membership ────────────────────────────────────────────────────────
@@ -1004,12 +1018,35 @@ async fn list_members(state: State<'_, AppState>) -> Result<domain::MembersView,
 #[tauri::command]
 async fn invite_member(
     state: State<'_, AppState>,
+    email: String,
     ttl_seconds: Option<u64>,
 ) -> Result<String, String> {
     let tok = state.token().ok_or("not signed in")?;
-    adapters::invite_member(&state.http, &state.base_url, &tok, ttl_seconds)
+    adapters::invite_member(
+        &state.http,
+        &state.base_url,
+        &tok,
+        email.trim(),
+        ttl_seconds,
+    )
+    .await
+    .map_err(|e| e.to_string())
+}
+
+/// Member magic-link join (no session, no OTP): redeem the emailed invite token — which
+/// IS the credential — to mint + store an email-rooted session → signed in. ZERO confirm
+/// at redeem (Part D §A invite-flow §Cases, doc lines 28-30). [T:Part D §A]
+#[tauri::command]
+async fn join_team_link(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    token: String,
+) -> Result<AuthState, String> {
+    let session = adapters::join_team_link(&state.http, &state.base_url, token.trim())
         .await
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+    let user = apply_session_token(&app, session).await?;
+    Ok(AuthState::Authenticated { user })
 }
 
 #[tauri::command]
@@ -1381,6 +1418,7 @@ pub fn run() {
             check_auth_state,
             sign_in_github,
             poll_login,
+            join_team_link,
             submit_session_token,
             sign_out,
             get_connection_status,

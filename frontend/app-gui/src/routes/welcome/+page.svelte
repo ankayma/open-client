@@ -1,18 +1,35 @@
 <script lang="ts">
 	import { goto } from '$app/navigation';
 	import { onMount, onDestroy } from 'svelte';
-	import { auth } from '$lib/stores';
-	import { signInGithub, pollLogin, submitSessionToken } from '$lib/tauri';
+	import { get } from 'svelte/store';
+	import { auth, pendingInvite } from '$lib/stores';
+	import { signInGithub, pollLogin, submitSessionToken, joinTeamLink } from '$lib/tauri';
 	import { listen } from '@tauri-apps/api/event';
 
 	// idle   → initial screen with GitHub button
 	// waiting → browser opened; the app POLLS the handoff (no deep-link needed) and
 	//           auto-signs-in when GitHub finishes. Paste box also shown as fallback.
 	// paste  → manual fallback (no browser / headless)
-	let step = $state<'idle' | 'waiting' | 'paste'>('idle');
+	// joining → redeeming a magic-link team invite (no GitHub, no OTP) — Part D §A
+	let step = $state<'idle' | 'waiting' | 'paste' | 'joining'>('idle');
 	let busy = $state(false);
 	let token = $state('');
 	let error = $state<string | null>(null);
+
+	// Magic-link team join (invitee has no GitHub): the emailed token IS the credential —
+	// redeem it directly, ZERO confirm, no OTP (Part D §A invite-flow §Cases, doc 28-30).
+	async function redeemInvite(inviteToken: string) {
+		step = 'joining';
+		error = null;
+		try {
+			const state = await joinTeamLink(inviteToken);
+			auth.set(state);
+			goto('/dashboard');
+		} catch (e) {
+			error = e instanceof Error ? e.message : 'Could not join the team — the invite may have expired';
+			step = 'idle';
+		}
+	}
 
 	// One-time handoff nonce + poll loop: bấm-là-vô without the ankayma:// deep link.
 	let nonce = '';
@@ -85,6 +102,13 @@
 
 	let unsubCancel: (() => void) | undefined;
 	onMount(async () => {
+		// Arrived via a join-team invite deep link while signed out → redeem it directly.
+		// The token (delivered to the invitee's email) is the credential; no OTP, no GitHub.
+		const inv = get(pendingInvite);
+		if (inv?.type === 'join-team') {
+			pendingInvite.set(null);
+			redeemInvite(inv.token);
+		}
 		const unsub = await listen('auth-cancelled', () => reset());
 		unsubCancel = unsub;
 	});
@@ -161,6 +185,13 @@
 			</button>
 			<button class="btn-link" onclick={handleSignIn} disabled={busy}>Re-open browser</button>
 			<button class="btn-link" onclick={reset}>← Cancel</button>
+
+		{:else if step === 'joining'}
+			<div class="waiting-card">
+				<span class="spinner-lg"></span>
+				<p class="waiting-text">Joining the team…</p>
+				<p class="waiting-sub">Redeeming your invite — you'll be signed in automatically.</p>
+			</div>
 
 		{:else}
 			{#if error}<p class="error">{error}</p>{/if}

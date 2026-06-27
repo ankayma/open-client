@@ -34,7 +34,9 @@ tauri-plugin-deep-link = "2"
 # plugin's re-export (cargo unifies), so the types line up.
 url = "2"
 # Control-plane calls go through agent-core (A.1.1). `open` launches the system
-# browser for the GitHub OAuth start. [T:A.1.21]
+# browser for the GitHub OAuth start on DESKTOP. On iOS the `open` crate no-ops
+# (no `open`/`xdg-open` binary) so we bridge to Swift `UIApplication.open` via the
+# C-ABI in ios/AppSupport/OpenUrlBridge.swift instead (see src/vpn.rs). [T:A.1.21]
 agent-core = { workspace = true }
 open = "5"
 
