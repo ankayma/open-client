@@ -113,6 +113,12 @@ mod imp {
     use std::os::raw::{c_char, c_short, c_void};
 
     // [T:linux/if_tun.h] TUNSETIFF = _IOW('T', 202, int) = 0x400454ca; flags.
+    // libc::ioctl's request arg type differs by C library: glibc = c_ulong,
+    // musl = c_int. Type the constant to match each so the call needs no cast
+    // (the value fits i32, so both are exact). [T:libc-0.2 Ioctl per target_env]
+    #[cfg(target_env = "musl")]
+    const TUNSETIFF: libc::c_int = 0x4004_54ca;
+    #[cfg(not(target_env = "musl"))]
     const TUNSETIFF: libc::c_ulong = 0x4004_54ca;
     const IFF_TUN: c_short = 0x0001; // [T:linux/if_tun.h] layer-3 tun (no ethernet)
     const IFF_NO_PI: c_short = 0x1000; // [T:linux/if_tun.h] no 4-byte packet-info prefix

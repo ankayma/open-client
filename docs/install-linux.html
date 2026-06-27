@@ -1,0 +1,208 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Ankayma — Install on Linux / VPS</title>
+  <meta name="description" content="Install the Ankayma mesh client on any Linux distro or VPS. One static binary, Cosign-verified, no dependencies. Ubuntu, Debian, Alpine, RHEL." />
+  <link rel="stylesheet" href="style.css" />
+  <link rel="icon" href="favicon.svg" type="image/svg+xml" />
+  <style>
+    /* Minimal code styling — scoped to this install page. */
+    .cmd {
+      background: var(--surface); border: 1px solid var(--border);
+      border-radius: var(--radius); padding: 16px 18px; margin: 16px 0;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 13.5px; line-height: 1.6; color: var(--text);
+      overflow-x: auto; white-space: pre;
+    }
+    .cmd .c { color: var(--dim); }      /* comment */
+    .cmd .p { color: var(--success); }  /* prompt $ */
+    .doc h2 { margin-top: 48px; }
+    .doc h3 { font-size: 17px; font-weight: 700; margin: 28px 0 8px; }
+    .doc p, .doc li { color: var(--text); }
+    .doc ul { margin: 10px 0 10px 20px; }
+    .note {
+      border-left: 3px solid var(--accent); background: var(--surface);
+      padding: 12px 16px; border-radius: 0 8px 8px 0; margin: 16px 0;
+      font-size: 14px; color: var(--dim);
+    }
+    .note.warn { border-left-color: var(--warn); }
+    .pillrow { display:flex; gap:8px; flex-wrap:wrap; margin:8px 0 4px; }
+    .pill { font-size:12px; padding:4px 10px; border:1px solid var(--border);
+            border-radius:20px; color:var(--dim); }
+  </style>
+</head>
+<body>
+
+<nav>
+  <div class="inner">
+    <a class="logo" href="/">Ank<span>ayma</span></a>
+    <ul>
+      <li><a href="/#how">How it works</a></li>
+      <li><a href="/#features">Features</a></li>
+      <li><a href="/#download">Download</a></li>
+      <li><a href="https://github.com/ankayma/open-client" target="_blank" rel="noopener">GitHub</a></li>
+    </ul>
+    <a class="btn btn-primary" href="#quick">Install now</a>
+  </div>
+</nav>
+
+<section class="section doc">
+  <div class="wrap" style="max-width:760px;">
+    <div class="section-label">Install · Linux &amp; VPS</div>
+    <h1 style="font-size:34px; line-height:1.15;">Run the mesh on any Linux box</h1>
+    <p style="font-size:17px; color:var(--dim);">
+      One static binary. No glibc, OpenSSL, or system WireGuard to install — the agent
+      ships its own userspace WireGuard. Works on Ubuntu, Debian, Alpine, RHEL, and any
+      VPS, on every kernel from 4.x up.
+    </p>
+    <div class="pillrow">
+      <span class="pill">x86_64</span>
+      <span class="pill">static musl</span>
+      <span class="pill">Cosign-signed</span>
+      <span class="pill">open source</span>
+    </div>
+
+    <!-- QUICK INSTALL -->
+    <h2 id="quick">Quick install</h2>
+    <p>From a shell on the target machine (a server, VPS, or your dev box):</p>
+    <div class="cmd"><span class="p">$ </span>curl -fsSL https://get.ankayma.com/install.sh | sh</div>
+    <p>The script will:</p>
+    <ul>
+      <li>detect your CPU architecture,</li>
+      <li>download the <code>mesh</code> CLI and the <code>agent</code> daemon,</li>
+      <li>verify their <strong>SHA-256</strong> against a signed checksum manifest,</li>
+      <li>verify that manifest's <strong>Cosign signature</strong> (when <code>cosign</code> is installed), and</li>
+      <li>install both into <code>/usr/local/bin</code>.</li>
+    </ul>
+    <div class="note">
+      Reading before piping to a shell is the right instinct — that's the point of an
+      open client. Read it first:
+      <code>curl -fsSL https://get.ankayma.com/install.sh | less</code>, or use the
+      manual steps below.
+    </div>
+
+    <!-- VERIFY / MANUAL -->
+    <h2>Manual install &amp; verification</h2>
+    <p>If you'd rather not pipe a script, do every step by hand. This is also how you
+       get the strongest supply-chain guarantee.</p>
+
+    <h3>1. Download</h3>
+    <div class="cmd"><span class="c"># pick your version, e.g. latest</span>
+<span class="p">$ </span>base=https://get.ankayma.com/latest
+<span class="p">$ </span>curl -fLO $base/mesh-linux-amd64
+<span class="p">$ </span>curl -fLO $base/agent-linux-amd64
+<span class="p">$ </span>curl -fLO $base/SHA256SUMS
+<span class="p">$ </span>curl -fLO $base/SHA256SUMS.sig
+<span class="p">$ </span>curl -fLO $base/cosign.pub</div>
+
+    <h3>2. Verify integrity (checksums)</h3>
+    <div class="cmd"><span class="p">$ </span>sha256sum -c SHA256SUMS
+mesh-linux-amd64: OK
+agent-linux-amd64: OK</div>
+
+    <h3>3. Verify authenticity (Cosign signature)</h3>
+    <p>One signature over <code>SHA256SUMS</code> authenticates every binary it lists —
+       the same key and offline-verification model used for our GitLab releases.</p>
+    <div class="cmd"><span class="p">$ </span>cosign verify-blob --insecure-ignore-tlog \
+    --key cosign.pub --signature SHA256SUMS.sig SHA256SUMS
+Verified OK</div>
+    <div class="note">
+      No <code>cosign</code>? Install it from
+      <a href="https://docs.sigstore.dev/cosign/installation" target="_blank" rel="noopener">sigstore.dev</a>.
+      The checksums alone (over HTTPS) give you integrity; the Cosign step adds publisher
+      authenticity. <code>cosign.pub</code> is committed in the
+      <a href="https://github.com/ankayma/open-client" target="_blank" rel="noopener">open-client repo</a> —
+      compare it, don't just trust the copy you downloaded.
+    </div>
+
+    <h3>4. Install</h3>
+    <div class="cmd"><span class="p">$ </span>sudo install -m 0755 mesh-linux-amd64  /usr/local/bin/mesh
+<span class="p">$ </span>sudo install -m 0755 agent-linux-amd64 /usr/local/bin/agent</div>
+
+    <!-- USAGE -->
+    <h2>First run</h2>
+    <p>Generate a WireGuard keypair (the CLI mirrors <code>wg(8)</code>, so output is
+       interchangeable with the stock tools):</p>
+    <div class="cmd"><span class="p">$ </span>mesh genkey | tee priv.key | mesh pubkey
+&lt;your-node-public-key&gt;</div>
+    <p>Bring the overlay up. On Linux the agent uses the kernel TUN device
+       (<code>/dev/net/tun</code>), so it needs <code>CAP_NET_ADMIN</code> — run it with
+       <code>sudo</code> (or as a service):</p>
+    <div class="cmd"><span class="p">$ </span>sudo agent up</div>
+    <div class="note">
+      Running unprivileged CI/CD? The agent also has a userspace-network deploy path
+      (<code>agent ci-deploy</code>) that moves traffic over the tunnel <em>without</em> a
+      kernel TUN device — so it runs inside an unprivileged hosted-CI container.
+    </div>
+
+    <!-- SERVER / SERVICE -->
+    <h2>Run it as a service (server / VPS)</h2>
+    <p>For an always-on node, run the daemon under systemd. Create
+       <code>/etc/systemd/system/ankayma-agent.service</code>:</p>
+    <div class="cmd"><span class="c">[Unit]</span>
+Description=Ankayma mesh agent
+After=network-online.target
+Wants=network-online.target
+
+<span class="c">[Service]</span>
+ExecStart=/usr/local/bin/agent up
+Restart=on-failure
+AmbientCapabilities=CAP_NET_ADMIN
+NoNewPrivileges=yes
+
+<span class="c">[Install]</span>
+WantedBy=multi-user.target</div>
+    <div class="cmd"><span class="p">$ </span>sudo systemctl daemon-reload
+<span class="p">$ </span>sudo systemctl enable --now ankayma-agent</div>
+
+    <!-- UPDATE / UNINSTALL -->
+    <h2>Update &amp; uninstall</h2>
+    <p>Re-run the installer to update — it overwrites the binaries in place:</p>
+    <div class="cmd"><span class="p">$ </span>curl -fsSL https://get.ankayma.com/install.sh | sh</div>
+    <p>To remove:</p>
+    <div class="cmd"><span class="p">$ </span>sudo systemctl disable --now ankayma-agent 2&gt;/dev/null || true
+<span class="p">$ </span>sudo rm -f /usr/local/bin/mesh /usr/local/bin/agent
+<span class="p">$ </span>sudo rm -f /etc/systemd/system/ankayma-agent.service</div>
+
+    <!-- BUILD FROM SOURCE -->
+    <h2>Build from source</h2>
+    <p>The agent is open source — you don't have to trust our binaries. The toolchain is
+       pinned (<code>rust-toolchain.toml</code>), so builds are reproducible:</p>
+    <div class="cmd"><span class="p">$ </span>git clone https://github.com/ankayma/open-client &amp;&amp; cd open-client
+<span class="p">$ </span>cargo build --release --target x86_64-unknown-linux-musl \
+    --bin mesh --bin agent</div>
+
+    <!-- HONEST LIMITS -->
+    <h2>Current limits</h2>
+    <p>We publish what isn't done yet rather than imply otherwise:</p>
+    <ul>
+      <li><strong>x86_64 only.</strong> arm64 (aarch64) builds aren't published yet.</li>
+      <li><strong>CLI is intentionally small.</strong> <code>mesh</code> today covers key
+          tooling (<code>genkey</code>, <code>pubkey</code>); node lifecycle lives in the
+          GUI and the <code>agent</code> daemon. More CLI surface lands as the product
+          matures.</li>
+      <li>See <a href="honest-limits.html">Honest limits</a> for the full picture.</li>
+    </ul>
+
+    <p style="margin-top:40px;">
+      <a class="btn btn-outline" href="https://github.com/ankayma/open-client" target="_blank" rel="noopener">View source on GitHub →</a>
+    </p>
+  </div>
+</section>
+
+<footer>
+  <div class="inner">
+    <span>© 2026 Ankayma. Built in public.</span>
+    <ul>
+      <li><a href="honest-limits.html">Honest limits</a></li>
+      <li><a href="privacy.html">Privacy</a></li>
+      <li><a href="terms.html">Terms</a></li>
+      <li><a href="https://github.com/ankayma/open-client" target="_blank" rel="noopener">GitHub</a></li>
+    </ul>
+  </div>
+</footer>
+
+</body>
+</html>

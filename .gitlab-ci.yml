@@ -88,23 +88,72 @@ sign:
     # cosign releases có cosign_checksums.txt; thêm khi siết supply-chain.
     - chmod +x /usr/local/bin/cosign
   script:
-    - cargo build --release --locked --bin agent-daemon
+    # Bin target name là `agent` (crate agent-daemon → [[bin]] name = "agent").
+    - cargo build --release --locked --bin agent
     # COSIGN_PRIVATE_KEY = cosign.key base64-1-dòng (Masked) → decode lại thành file.
     - echo "$COSIGN_PRIVATE_KEY" | base64 -d > "$CI_PROJECT_DIR/cosign.key"
     # Ký offline bằng key; tlog-upload=false để không phụ thuộc Rekor network.
     - cosign sign-blob --yes --tlog-upload=false --key "$CI_PROJECT_DIR/cosign.key"
-        --output-signature target/release/agent-daemon.sig
-        target/release/agent-daemon
+        --output-signature target/release/agent.sig
+        target/release/agent
     - cosign verify-blob --insecure-ignore-tlog --key cosign.pub
-        --signature target/release/agent-daemon.sig
-        target/release/agent-daemon
+        --signature target/release/agent.sig
+        target/release/agent
   after_script:
     # Luôn xoá key đã decode, kể cả khi job fail giữa chừng.
     - rm -f "$CI_PROJECT_DIR/cosign.key"
   artifacts:
     paths:
-      - target/release/agent-daemon
-      - target/release/agent-daemon.sig
+      - target/release/agent
+      - target/release/agent.sig
+    expire_in: 30 days
+
+# ── Build + Sign Linux client (static musl: mesh + agent) ───────────────────
+# Tier-1 website download channel. Static x86_64 musl → 1 binary runs on every
+# distro/version (no glibc/OpenSSL dep — pure-Rust rustls+ring+boringtun, verified
+# in Cargo.lock). One Cosign signature over SHA256SUMS authenticates both binaries
+# [T:A.1.21]. install.sh (scripts/) consumes exactly these artifact names.
+build-linux:
+  stage: sign
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "main"'
+    - if: '$CI_COMMIT_TAG'
+  before_script:
+    - apt-get update -qq && apt-get install -y -qq curl musl-tools
+    - rustup target add x86_64-unknown-linux-musl
+    - COSIGN_VERSION=v2.4.1   # [T:A.1.21] pin version
+    - curl -sSfL "https://github.com/sigstore/cosign/releases/download/${COSIGN_VERSION}/cosign-linux-amd64"
+        -o /usr/local/bin/cosign
+    - chmod +x /usr/local/bin/cosign
+  script:
+    # ring needs a C compiler for the musl target → musl-gcc (from musl-tools).
+    - export CC_x86_64_unknown_linux_musl=musl-gcc
+    - cargo build --release --locked --target x86_64-unknown-linux-musl --bin mesh --bin agent
+    - mkdir -p dist
+    - install -m0755 target/x86_64-unknown-linux-musl/release/mesh  dist/mesh-linux-amd64
+    - install -m0755 target/x86_64-unknown-linux-musl/release/agent dist/agent-linux-amd64
+    - cp cosign.pub dist/cosign.pub
+    - cp scripts/install.sh dist/install.sh
+    - (cd dist && sha256sum mesh-linux-amd64 agent-linux-amd64 > SHA256SUMS)
+    # Sign the manifest once (covers both binaries). Decode key the same way as `sign`.
+    - echo "$COSIGN_PRIVATE_KEY" | base64 -d > "$CI_PROJECT_DIR/cosign.key"
+    - cosign sign-blob --yes --tlog-upload=false --key "$CI_PROJECT_DIR/cosign.key"
+        --output-signature dist/SHA256SUMS.sig dist/SHA256SUMS
+    - cosign verify-blob --insecure-ignore-tlog --key cosign.pub
+        --signature dist/SHA256SUMS.sig dist/SHA256SUMS
+    # On tags → publish to the generic package registry (mirrors the release job).
+    - |
+      if [ -n "$CI_COMMIT_TAG" ]; then
+        for f in mesh-linux-amd64 agent-linux-amd64 SHA256SUMS SHA256SUMS.sig install.sh cosign.pub; do
+          curl --fail --header "JOB-TOKEN: $CI_JOB_TOKEN" --upload-file "dist/$f" \
+            "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/generic/ankayma-linux/${CI_COMMIT_TAG}/$f"
+        done
+      fi
+  after_script:
+    - rm -f "$CI_PROJECT_DIR/cosign.key"
+  artifacts:
+    paths:
+      - dist/
     expire_in: 30 days
 
 # ── Publish GitLab Release (tags vX.Y.Z only) ───────────────────────────────
@@ -113,17 +162,17 @@ release:
   image: registry.gitlab.com/gitlab-org/release-cli:latest
   rules:
     - if: '$CI_COMMIT_TAG =~ /^v\d+\.\d+\.\d+$/'
-  needs: [sign]
+  needs: [sign, build-linux]
   before_script:
     - apt-get update -qq && apt-get install -y -qq curl
     # Upload binary + chữ ký lên GitLab Package Registry để đính kèm Release
     - |
       curl --header "JOB-TOKEN: $CI_JOB_TOKEN" \
-           --upload-file target/release/agent-daemon \
+           --upload-file target/release/agent \
            "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/generic/agent-daemon/${CI_COMMIT_TAG}/agent-daemon-linux-amd64"
     - |
       curl --header "JOB-TOKEN: $CI_JOB_TOKEN" \
-           --upload-file target/release/agent-daemon.sig \
+           --upload-file target/release/agent.sig \
            "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/generic/agent-daemon/${CI_COMMIT_TAG}/agent-daemon-linux-amd64.sig"
   script:
     - echo "Creating GitLab Release $CI_COMMIT_TAG"
@@ -145,3 +194,11 @@ release:
           url: "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/generic/agent-daemon/${CI_COMMIT_TAG}/agent-daemon-linux-amd64"
         - name: "agent-daemon.sig (Cosign signature)"
           url: "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/generic/agent-daemon/${CI_COMMIT_TAG}/agent-daemon-linux-amd64.sig"
+        - name: "mesh CLI (Linux x86_64, static musl)"
+          url: "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/generic/ankayma-linux/${CI_COMMIT_TAG}/mesh-linux-amd64"
+        - name: "agent daemon (Linux x86_64, static musl)"
+          url: "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/generic/ankayma-linux/${CI_COMMIT_TAG}/agent-linux-amd64"
+        - name: "SHA256SUMS (Linux)"
+          url: "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/generic/ankayma-linux/${CI_COMMIT_TAG}/SHA256SUMS"
+        - name: "SHA256SUMS.sig (Cosign signature, Linux)"
+          url: "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/generic/ankayma-linux/${CI_COMMIT_TAG}/SHA256SUMS.sig"
