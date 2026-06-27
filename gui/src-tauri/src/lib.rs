@@ -64,6 +64,13 @@ struct AppState {
     /// moment, so we hold it here and let the first `check_auth_state` drain it —
     /// no event-timing race. Warm-start deep links use the live `signed-in` event.
     pending_token: Mutex<Option<String>>,
+    /// A held `ankayma://join-team?token=…` invite, captured the same way as
+    /// `pending_token`. Drained only once authenticated so a not-yet-signed-in
+    /// recipient keeps it across sign-in. See docs/part-d-invite-flow §Edge case.
+    pending_join_team: Mutex<Option<String>>,
+    /// A held `ankayma://join?token=…` node-enrollment invite. Same lifecycle as
+    /// `pending_join_team`: drained only once authenticated.
+    pending_join_node: Mutex<Option<String>>,
 }
 
 impl AppState {
@@ -77,6 +84,8 @@ impl AppState {
             email: Mutex::new(None),
             node: Mutex::new(None),
             pending_token: Mutex::new(None),
+            pending_join_team: Mutex::new(None),
+            pending_join_node: Mutex::new(None),
         }
     }
 
@@ -88,6 +97,34 @@ impl AppState {
         self.pending_token
             .lock()
             .expect("pending lock poisoned")
+            .take()
+    }
+
+    fn set_pending_join_team(&self, tok: Option<String>) {
+        *self
+            .pending_join_team
+            .lock()
+            .expect("pending join-team lock poisoned") = tok;
+    }
+
+    fn take_pending_join_team(&self) -> Option<String> {
+        self.pending_join_team
+            .lock()
+            .expect("pending join-team lock poisoned")
+            .take()
+    }
+
+    fn set_pending_join_node(&self, tok: Option<String>) {
+        *self
+            .pending_join_node
+            .lock()
+            .expect("pending join-node lock poisoned") = tok;
+    }
+
+    fn take_pending_join_node(&self) -> Option<String> {
+        self.pending_join_node
+            .lock()
+            .expect("pending join-node lock poisoned")
             .take()
     }
 
@@ -313,6 +350,18 @@ async fn check_auth_state(app: AppHandle, state: State<'_, AppState>) -> Result<
             }
         },
     };
+    // Hand any held invite token to the frontend, but ONLY once authenticated. A
+    // not-yet-signed-in recipient (or one whose session was revoked) keeps the
+    // pending invite across sign-in, since we don't drain it here until the session
+    // validates. [A] flow per docs/part-d-invite-flow.md §Edge case.
+    if matches!(result, AuthState::Authenticated { .. }) {
+        if let Some(tok) = state.take_pending_join_team() {
+            let _ = app.emit("join-team-pending", tok);
+        }
+        if let Some(tok) = state.take_pending_join_node() {
+            let _ = app.emit("join-node-pending", tok);
+        }
+    }
     apply_connection_change(&app);
     Ok(result)
 }
@@ -352,35 +401,65 @@ async fn submit_session_token(app: AppHandle, token: String) -> Result<AuthState
     Ok(AuthState::Authenticated { user })
 }
 
-/// Pull the `token` out of a `ankayma://auth?token=…` deep link. Returns None
-/// for any other scheme or a missing/empty token. (Generic over the URL type so
-/// we don't take a direct dependency on the `url` crate's exact version.)
-fn token_from_deep_link(url: &url::Url) -> Option<String> {
+/// The three `ankayma://` deep links we route on, distinguished by host:
+/// `auth` (session sign-in), `join-team` (member invite), `join` (node enrollment
+/// invite). The previous code keyed only on scheme, so a `join-team`/`join` token
+/// was wrongly adopted as a session token. [A] per docs/part-d-invite-flow.md.
+enum DeepLinkKind {
+    Auth,
+    JoinTeam,
+    JoinNode,
+}
+
+/// Parse a `ankayma://<host>?token=…` deep link into its kind + token. Returns None
+/// for a foreign scheme, an unknown host, or a missing/empty token — so a stray URL
+/// can't be mistaken for any of the three flows.
+fn parse_deep_link(url: &url::Url) -> Option<(DeepLinkKind, String)> {
     if url.scheme() != "ankayma" {
         return None;
     }
-    url.query_pairs()
+    let token = url
+        .query_pairs()
         .find(|(k, _)| k == "token")
         .map(|(_, v)| v.into_owned())
-        .filter(|t| !t.is_empty())
+        .filter(|t| !t.is_empty())?;
+    let kind = match url.host_str().unwrap_or("") {
+        "auth" => DeepLinkKind::Auth,
+        "join-team" => DeepLinkKind::JoinTeam,
+        "join" => DeepLinkKind::JoinNode,
+        _ => return None,
+    };
+    Some((kind, token))
 }
 
-/// Handle a batch of deep-link URLs (cold OR warm start): hold the token and nudge
-/// the frontend. We do NOT validate-and-emit here because that races the webview's
-/// listeners; instead the frontend's `check_auth_state` (driven on mount, on the
-/// `auth-pending` nudge, and on window focus) adopts the held token and navigates to
-/// the dashboard — one code path, no timing assumptions.
+/// Handle a batch of deep-link URLs (cold OR warm start): hold the token by kind and
+/// nudge the frontend. We do NOT validate-and-emit here because that races the
+/// webview's listeners; instead the frontend's `check_auth_state` (driven on mount,
+/// on the `auth-pending` nudge, and on window focus) adopts the held token and routes
+/// (dashboard for auth; `/members` or `/add-device` for invites) — one code path, no
+/// timing assumptions.
 fn handle_deep_links(app: &AppHandle, urls: Vec<url::Url>) {
     let st = app.state::<AppState>();
     let mut got = false;
     for url in urls {
-        if let Some(token) = token_from_deep_link(&url) {
-            st.set_pending(Some(token));
-            got = true;
-        } else if url.scheme() == "ankayma"
-            && url.query_pairs().any(|(k, _)| k == "error")
-        {
-            let _ = app.emit("auth-cancelled", ());
+        match parse_deep_link(&url) {
+            Some((DeepLinkKind::Auth, token)) => {
+                st.set_pending(Some(token));
+                got = true;
+            }
+            Some((DeepLinkKind::JoinTeam, token)) => {
+                st.set_pending_join_team(Some(token));
+                got = true;
+            }
+            Some((DeepLinkKind::JoinNode, token)) => {
+                st.set_pending_join_node(Some(token));
+                got = true;
+            }
+            None => {
+                if url.scheme() == "ankayma" && url.query_pairs().any(|(k, _)| k == "error") {
+                    let _ = app.emit("auth-cancelled", ());
+                }
+            }
         }
     }
     if got {
@@ -493,13 +572,97 @@ async fn get_path_proof(state: State<'_, AppState>) -> Result<PathProof, String>
 }
 
 #[tauri::command]
-async fn create_join_link(state: State<'_, AppState>) -> Result<String, String> {
+async fn create_join_link(
+    state: State<'_, AppState>,
+    ttl_seconds: Option<u64>,
+    challenge_id: Option<String>,
+    code: Option<String>,
+) -> Result<String, String> {
     // Mint a single-use `ankayma://join?token=…` link via the control plane so a
-    // second device enrolls into this tenant (A.1.10/A.1.22). 15-min TTL.
+    // second device enrolls into this tenant (A.1.10/A.1.22). `ttl_seconds` lets the
+    // admin pick the expiry; the control plane clamps it. In a multi-user tenant the
+    // server gates this behind a step-up — on the first call (no proof) it returns
+    // STEP_UP_REQUIRED; the GUI runs the OTP flow and retries with challenge_id+code.
     let tok = state.token().ok_or("not signed in")?;
-    adapters::issue_join_token(&state.http, &state.base_url, &tok)
+    adapters::issue_join_token(
+        &state.http,
+        &state.base_url,
+        &tok,
+        ttl_seconds,
+        challenge_id.as_deref(),
+        code.as_deref(),
+    )
+    .await
+    .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn request_step_up(state: State<'_, AppState>, purpose: String) -> Result<String, String> {
+    // Ask the control plane to email an OTP for a sensitive action; returns the
+    // challenge_id to pass back at the action. [T:Part D §Authority model]
+    let tok = state.token().ok_or("not signed in")?;
+    adapters::request_step_up(&state.http, &state.base_url, &tok, &purpose)
         .await
         .map_err(|e| e.to_string())
+}
+
+/// Recipient side of the node-invite (`ankayma://join?token=…`): enroll THIS device
+/// into the invite's tenant using only the join token. No session is required — the
+/// token IS the authorization to join (A.1.10/A.1.22), so this works whether or not
+/// the user is signed in. Mirrors the in-process bookkeeping of `connect_inner`
+/// (persist identity for the privileged-daemon handoff, then publish the node).
+#[tauri::command]
+async fn join_enroll_node(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    join_token: String,
+    hostname: String,
+) -> Result<(), String> {
+    let join_token = join_token.trim().to_string();
+    if join_token.is_empty() {
+        return Err("join token is empty".into());
+    }
+    let hostname = {
+        let h = hostname.trim();
+        if h.is_empty() {
+            device_hostname()
+        } else {
+            h.to_string()
+        }
+    };
+
+    // Fresh WireGuard identity for this device, same as a first-device enroll.
+    let kp = WgKeypair::generate();
+    let req = adapters::JoinEnrollRequest {
+        join_token,
+        public_key: kp.public_b64.clone(),
+        hostname,
+        endpoint: None,
+    };
+    let resp = adapters::enroll_via_join_token(&state.http, &state.base_url, &req)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    // Handoff: persist this identity where the privileged daemon reads it so the
+    // data plane reuses THIS node — no duplicate enroll. [T:A.1.10 / up.rs]
+    if let Err(e) = write_handoff_state(
+        &kp.private_b64,
+        &kp.public_b64,
+        &resp.node_id,
+        &resp.overlay_ip,
+    ) {
+        log::warn!("handoff state not written ({e}); `agent up` would re-enroll");
+    }
+
+    *state.node.lock().expect("node lock poisoned") = Some(EnrolledNode {
+        private_b64: kp.private_b64,
+        public_b64: kp.public_b64,
+        node_id: resp.node_id,
+        overlay_ip: resp.overlay_ip,
+        peers: resp.peers,
+    });
+    apply_connection_change(&app);
+    Ok(())
 }
 
 // --- Data plane (milestone 1.2 — privileged daemon handoff) ---
@@ -818,9 +981,12 @@ async fn list_members(state: State<'_, AppState>) -> Result<domain::MembersView,
 }
 
 #[tauri::command]
-async fn invite_member(state: State<'_, AppState>) -> Result<String, String> {
+async fn invite_member(
+    state: State<'_, AppState>,
+    ttl_seconds: Option<u64>,
+) -> Result<String, String> {
     let tok = state.token().ok_or("not signed in")?;
-    adapters::invite_member(&state.http, &state.base_url, &tok)
+    adapters::invite_member(&state.http, &state.base_url, &tok, ttl_seconds)
         .await
         .map_err(|e| e.to_string())
 }
@@ -871,11 +1037,25 @@ async fn my_access(state: State<'_, AppState>) -> Result<domain::MyAccess, Strin
 /// the control plane (A.1.6). If it's THIS device, also drop the local identity
 /// so the next connect enrolls cleanly.
 #[tauri::command]
-async fn delete_node(node_id: String, state: State<'_, AppState>) -> Result<(), String> {
+async fn delete_node(
+    node_id: String,
+    state: State<'_, AppState>,
+    challenge_id: Option<String>,
+    code: Option<String>,
+) -> Result<(), String> {
+    // Multi-user tenant gates revoke behind a step-up (Part D §Authority): first call
+    // without proof returns STEP_UP_REQUIRED; the GUI runs the OTP flow and retries.
     let tok = state.token().ok_or("not signed in")?;
-    adapters::delete_node(&state.http, &state.base_url, &tok, &node_id)
-        .await
-        .map_err(|e| e.to_string())?;
+    adapters::delete_node(
+        &state.http,
+        &state.base_url,
+        &tok,
+        &node_id,
+        challenge_id.as_deref(),
+        code.as_deref(),
+    )
+    .await
+    .map_err(|e| e.to_string())?;
     // If we removed the node we're currently using, clear local state + handoff so
     // we don't keep a ghost identity.
     let is_self = state
@@ -1193,6 +1373,8 @@ pub fn run() {
             list_nodes,
             delete_node,
             create_join_link,
+            request_step_up,
+            join_enroll_node,
             start_dataplane,
             stop_dataplane,
             get_dataplane_status,
@@ -1216,4 +1398,55 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{parse_deep_link, DeepLinkKind};
+
+    fn kind_token(s: &str) -> Option<(DeepLinkKind, String)> {
+        parse_deep_link(&url::Url::parse(s).expect("test url parses"))
+    }
+
+    #[test]
+    fn auth_link_routes_to_auth() {
+        let (kind, tok) = kind_token("ankayma://auth?token=sess123").expect("auth link parses");
+        assert!(matches!(kind, DeepLinkKind::Auth));
+        assert_eq!(tok, "sess123");
+    }
+
+    #[test]
+    fn join_team_link_routes_to_join_team() {
+        let (kind, tok) =
+            kind_token("ankayma://join-team?token=inv456").expect("join-team link parses");
+        assert!(matches!(kind, DeepLinkKind::JoinTeam));
+        assert_eq!(tok, "inv456");
+    }
+
+    #[test]
+    fn join_node_link_routes_to_join_node() {
+        let (kind, tok) =
+            kind_token("ankayma://join?token=node789&tenant=t1").expect("join link parses");
+        assert!(matches!(kind, DeepLinkKind::JoinNode));
+        assert_eq!(tok, "node789");
+    }
+
+    #[test]
+    fn unknown_host_is_rejected() {
+        // A previously-accepted shape: scheme matched but host is none of the three.
+        // Must NOT be adopted as any flow (regression guard for the old bug where a
+        // join token was mistaken for a session token).
+        assert!(kind_token("ankayma://wat?token=x").is_none());
+    }
+
+    #[test]
+    fn missing_or_empty_token_is_rejected() {
+        assert!(kind_token("ankayma://auth").is_none());
+        assert!(kind_token("ankayma://auth?token=").is_none());
+    }
+
+    #[test]
+    fn foreign_scheme_is_rejected() {
+        assert!(kind_token("https://auth?token=x").is_none());
+    }
 }

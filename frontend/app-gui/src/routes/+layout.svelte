@@ -3,11 +3,12 @@
 	import { goto } from '$app/navigation';
 	import { page } from '$app/state';
 	import { listen, type UnlistenFn } from '@tauri-apps/api/event';
-	import { auth, connection, quota, activeTheme, activeLang } from '$lib/stores';
+	import { auth, connection, quota, activeTheme, activeLang, pendingInvite } from '$lib/stores';
 	import { checkAuthState, getConnectionStatus, getQuota } from '$lib/tauri';
 	import { applyTheme, THEMES, THEME_PAIRS } from '$lib/theme';
 	import { STRINGS, type Lang } from '$lib/i18n';
 	import type { ConnectionState } from '$lib/types';
+	import StepUpModal from '$lib/StepUpModal.svelte';
 
 	let { children } = $props();
 
@@ -54,7 +55,17 @@
 				await listen<ConnectionState>('connection-changed', (e) => connection.set(e.payload)),
 				await listen<string>('tray-navigate', (e) => goto(e.payload)),
 				// Warm start: the running app received the deep link.
-				await listen('auth-pending', () => refreshAuth(true))
+				await listen('auth-pending', () => refreshAuth(true)),
+				// Invite deep links, handed over by Rust once authenticated: stash the
+				// token and route to the page that consumes it. [A] part-d-invite-flow.
+				await listen<string>('join-team-pending', (e) => {
+					pendingInvite.set({ type: 'join-team', token: e.payload });
+					goto('/members');
+				}),
+				await listen<string>('join-node-pending', (e) => {
+					pendingInvite.set({ type: 'join-node', token: e.payload });
+					goto('/add-device');
+				})
 			);
 		} catch {
 			// Tauri events unavailable — ignore
@@ -219,6 +230,9 @@
 		{@render children()}
 	</div>
 </div>
+
+<!-- Global step-up OTP modal (Part D §Authority model) — appears for gated actions. -->
+<StepUpModal />
 
 <style>
 	:global(*) {

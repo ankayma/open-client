@@ -6,6 +6,7 @@
 	import { onMount } from 'svelte';
 	import { connection } from '$lib/stores';
 	import { listNodes, getNodeInfo, deleteNode } from '$lib/tauri';
+	import { runWithStepUp } from '$lib/stepup';
 	import type { PeerBrief } from '$lib/types';
 
 	// "Online" dot: this device follows the app's connection state (matches the
@@ -44,10 +45,13 @@
 	async function removeDevice(nodeId: string) {
 		removing = true;
 		try {
-			await deleteNode(nodeId);
+			// Multi-user tenant gates revoke behind a step-up; runWithStepUp drives the
+			// OTP and retries. Solo tenants pass straight through. [Part D §Authority]
+			await runWithStepUp('revoke_node', (proof) => deleteNode(nodeId, proof));
 			confirmNode = null;
 			await load();
 		} catch (e) {
+			if (String(e).includes('Step-up cancelled')) return; // user backed out
 			error = String(e);
 		} finally {
 			removing = false;

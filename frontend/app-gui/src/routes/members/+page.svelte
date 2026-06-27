@@ -1,6 +1,8 @@
 <script lang="ts">
   import { onMount } from "svelte";
+  import { get } from "svelte/store";
   import { listMembers, inviteMember, joinTeam, removeMember } from "$lib/tauri";
+  import { pendingInvite, auth } from "$lib/stores";
   import type { MembersView } from "$lib/types";
 
   // F1 team membership (Slice C). Admin invites/removes; anyone sees the roster;
@@ -15,7 +17,39 @@
 
   let isAdmin = $derived(data?.your_role === "admin");
 
-  onMount(load);
+  // Inviting members is a team feature — F0 (solo) must upgrade first. [A] §2.3.
+  let tier = $derived($auth.status === "authenticated" ? $auth.user.tier : null);
+  let canInvite = $derived(isAdmin && tier !== "F0");
+
+  // Configurable member-invite TTL (server clamps to [1d, 30d]). [A] §TTL policy.
+  const MEMBER_TTL_OPTIONS = [
+    { label: "1 day", secs: 86400 },
+    { label: "3 days", secs: 259200 },
+    { label: "7 days", secs: 604800 },
+    { label: "30 days", secs: 2592000 },
+  ];
+  let memberTtl = $state(604800);
+
+  onMount(async () => {
+    await load();
+    // Arrived here from a `ankayma://join-team?token=…` deep link: redeem the
+    // invite automatically so the recipient lands already a member. [A] invite-flow.
+    const invite = get(pendingInvite);
+    if (invite?.type === "join-team") {
+      pendingInvite.set(null);
+      busy = true;
+      error = "";
+      try {
+        await joinTeam(invite.token);
+        await load();
+      } catch (e: unknown) {
+        error = e instanceof Error ? e.message : "Failed to join team";
+      } finally {
+        busy = false;
+      }
+    }
+  });
+
   async function load() {
     loading = true;
     error = "";
@@ -32,7 +66,7 @@
     busy = true;
     error = "";
     try {
-      inviteUrl = await inviteMember();
+      inviteUrl = await inviteMember(memberTtl);
     } catch (e: unknown) {
       error = e instanceof Error ? e.message : "Invite failed";
     } finally {
@@ -103,10 +137,24 @@
       {/each}
     </ul>
 
-    {#if isAdmin}
+    {#if isAdmin && tier === "F0"}
+      <section class="panel upgrade-notice">
+        <h3>Invite teammates</h3>
+        <p class="hint">Team membership is a paid feature. Upgrade to invite members.</p>
+        <a class="btn" href="https://ankayma.com/pricing" target="_blank" rel="noopener">Upgrade plan</a>
+      </section>
+    {:else if canInvite}
       <section class="panel">
         <h3>Invite a member</h3>
         <p class="hint">Mint a link; the teammate signs in and pastes it to join.</p>
+        <div class="ttl-row">
+          <label for="member-ttl">Invite expires in</label>
+          <select id="member-ttl" bind:value={memberTtl}>
+            {#each MEMBER_TTL_OPTIONS as o (o.secs)}
+              <option value={o.secs}>{o.label}</option>
+            {/each}
+          </select>
+        </div>
         <button class="btn" onclick={invite} disabled={busy}>Create invite link</button>
         {#if inviteUrl}
           <div class="invite">
@@ -247,15 +295,36 @@
     margin-bottom: 12px;
   }
   .btn {
+    display: inline-block;
     background: var(--c-accent);
     color: #fff;
     font-weight: 600;
     font-size: 14px;
     padding: 10px 16px;
     border-radius: 9px;
+    text-align: center;
   }
+  .btn:hover { text-decoration: none; }
   .btn:disabled {
     opacity: 0.5;
+  }
+  .upgrade-notice .btn { background: var(--sec-info, var(--c-accent)); }
+  .ttl-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    margin-bottom: 12px;
+    font-size: 13px;
+    color: var(--c-text-dim);
+  }
+  .ttl-row select {
+    background: var(--c-bg);
+    border: 1px solid var(--c-border);
+    border-radius: 8px;
+    padding: 7px 10px;
+    color: var(--c-text);
+    font-size: 13px;
   }
   .invite {
     display: flex;

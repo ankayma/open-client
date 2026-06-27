@@ -145,9 +145,26 @@ export async function listNodes(): Promise<PeerBrief[]> {
   return invoke<PeerBrief[]>("list_nodes");
 }
 
-// Remove one of the tenant's own mesh nodes (retire a device). Tenant-scoped.
-export async function deleteNode(nodeId: string): Promise<void> {
-  return invoke("delete_node", { nodeId });
+// A step-up proof (OTP) carried on a sensitive action in a multi-user tenant.
+export interface StepUpProof {
+  challengeId: string;
+  code: string;
+}
+
+// Ask the control plane to email an OTP for `purpose` ('enroll_node' | 'revoke_node');
+// returns the challenge_id to pass back at the action. [Part D §Authority model]
+export async function requestStepUp(purpose: string): Promise<string> {
+  return invoke<string>("request_step_up", { purpose });
+}
+
+// Remove one of the tenant's own mesh nodes (retire a device). Tenant-scoped. In a
+// multi-user tenant the server gates this behind a step-up — pass `proof` on retry.
+export async function deleteNode(nodeId: string, proof?: StepUpProof): Promise<void> {
+  return invoke("delete_node", {
+    nodeId,
+    challengeId: proof?.challengeId,
+    code: proof?.code,
+  });
 }
 
 // F-3 branded subdomains (private-default; map a name onto a mesh node).
@@ -174,14 +191,33 @@ export async function openSubdomain(fqdn: string): Promise<void> {
 export async function listMembers(): Promise<MembersView> {
   return invoke<MembersView>("list_members");
 }
-export async function inviteMember(): Promise<string> {
-  return invoke<string>("invite_member");
+// `ttlSeconds` (optional) overrides the server's default member-invite TTL; the
+// control plane clamps it to the allowed range. [A] invite-flow §TTL policy.
+export async function inviteMember(ttlSeconds?: number): Promise<string> {
+  return invoke<string>("invite_member", { ttlSeconds });
 }
 export async function joinTeam(invite: string): Promise<void> {
   return invoke("join_team", { invite });
 }
 export async function removeMember(userId: string): Promise<void> {
   return invoke("remove_member", { userId });
+}
+
+// Mint a single-use `ankayma://join?token=…` node-enrollment link. `ttlSeconds`
+// (optional) overrides the server default; the control plane clamps the range. In a
+// multi-user tenant the server gates this behind a step-up — pass `proof` on retry.
+export async function createJoinLink(ttlSeconds?: number, proof?: StepUpProof): Promise<string> {
+  return invoke<string>("create_join_link", {
+    ttlSeconds,
+    challengeId: proof?.challengeId,
+    code: proof?.code,
+  });
+}
+
+// Recipient side of a node invite (`ankayma://join?token=…`): enroll THIS device
+// into the invite's tenant using only the join token (no session). [A] invite-flow.
+export async function joinEnrollNode(joinToken: string, hostname: string): Promise<void> {
+  return invoke("join_enroll_node", { joinToken, hostname });
 }
 
 // PolicyBlock access + my-access catalog.

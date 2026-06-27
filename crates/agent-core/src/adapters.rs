@@ -18,6 +18,11 @@ pub enum ApiError {
     Server { status: u16, message: String },
     /// Response body could not be decoded.
     Decode(String),
+    /// Server demands a step-up (fresh OTP) before this management action — a
+    /// multi-user tenant minting an invite or revoking a node. The GUI catches this
+    /// to drive the OTP flow, then retries with a challenge_id + code.
+    /// [T:Part D invite-flow §Authority model]
+    StepUpRequired { purpose: String },
 }
 
 impl std::fmt::Display for ApiError {
@@ -27,6 +32,8 @@ impl std::fmt::Display for ApiError {
             ApiError::Status(s) => write!(f, "control-plane returned HTTP {s}"),
             ApiError::Server { message, .. } => write!(f, "{message}"),
             ApiError::Decode(e) => write!(f, "control-plane decode error: {e}"),
+            // Sentinel the GUI matches on to launch the OTP step-up flow.
+            ApiError::StepUpRequired { purpose } => write!(f, "STEP_UP_REQUIRED:{purpose}"),
         }
     }
 }
@@ -131,15 +138,35 @@ struct JoinTokenResponse {
 
 /// Mint a short-lived join link (`ankayma://join?token=…`) so another device can
 /// enroll into this tenant without re-doing GitHub OAuth. `POST
-/// /api/v1/enrollment/token` (session-authed); the control plane sets the TTL
-/// (15 min). Returns the `ankayma://join?…` URL. `[T:A.1.10/A.1.22 enrollment]`
+/// /api/v1/enrollment/token` (session-authed). `ttl_seconds` optionally overrides
+/// the server's default TTL (the control plane clamps it). Returns the
+/// `ankayma://join?…` URL. `[T:A.1.10/A.1.22 enrollment]`
 pub async fn issue_join_token(
     http: &reqwest::Client,
     base_url: &str,
     session_token: &str,
+    ttl_seconds: Option<u64>,
+    challenge_id: Option<&str>,
+    code: Option<&str>,
 ) -> Result<String, ApiError> {
+    let mut qs: Vec<String> = Vec::new();
+    if let Some(ttl) = ttl_seconds {
+        qs.push(format!("ttl_seconds={ttl}"));
+    }
+    if let Some(c) = challenge_id {
+        qs.push(format!("challenge_id={c}"));
+    }
+    if let Some(k) = code {
+        qs.push(format!("code={k}"));
+    }
+    let base = url(base_url, "/api/v1/enrollment/token");
+    let endpoint = if qs.is_empty() {
+        base
+    } else {
+        format!("{base}?{}", qs.join("&"))
+    };
     let resp = http
-        .post(url(base_url, "/api/v1/enrollment/token"))
+        .post(endpoint)
         .bearer_auth(session_token)
         .send()
         .await
@@ -150,6 +177,41 @@ pub async fn issue_join_token(
     resp.json::<JoinTokenResponse>()
         .await
         .map(|r| r.url)
+        .map_err(|e| ApiError::Decode(e.to_string()))
+}
+
+/// Wire shape of `POST /api/v1/enrollment/join` — the recipient half of a node
+/// invite. Mirrors the control-plane `JoinEnrollReq`. The `join_token` IS the
+/// authorization to join the tenant, so there is no Bearer header. `[T:A.1.10]`
+#[derive(Debug, serde::Serialize)]
+pub struct JoinEnrollRequest {
+    pub join_token: String,
+    pub public_key: String,
+    pub hostname: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub endpoint: Option<String>,
+}
+
+/// Redeem a node invite (`ankayma://join?token=…`) to enroll THIS device into the
+/// invite's tenant. `POST {base_url}/api/v1/enrollment/join` — NO Authorization
+/// header; the join token authorizes the enroll (A.1.10/A.1.22). Returns the same
+/// `EnrollResponse` shape as a session-authed `enroll`. `[T:A.1.10/A.1.22 enrollment]`
+pub async fn enroll_via_join_token(
+    http: &reqwest::Client,
+    base_url: &str,
+    req: &JoinEnrollRequest,
+) -> Result<EnrollResponse, ApiError> {
+    let resp = http
+        .post(url(base_url, "/api/v1/enrollment/join"))
+        .json(req)
+        .send()
+        .await
+        .map_err(|e| ApiError::Transport(e.to_string()))?;
+    if !resp.status().is_success() {
+        return Err(status_error(resp).await);
+    }
+    resp.json::<EnrollResponse>()
+        .await
         .map_err(|e| ApiError::Decode(e.to_string()))
 }
 
@@ -265,18 +327,25 @@ pub async fn list_members(
     get_json(http, base_url, "/api/v1/members", session_token).await
 }
 
-/// Mint a member invite (admin). Returns the `ankayma://join-team?…` URL.
+/// Mint a member invite (admin). `ttl_seconds` optionally overrides the server's
+/// default member-invite TTL (clamped server-side). Returns the
+/// `ankayma://join-team?…` URL.
 pub async fn invite_member(
     http: &reqwest::Client,
     base_url: &str,
     session_token: &str,
+    ttl_seconds: Option<u64>,
 ) -> Result<String, ApiError> {
     #[derive(serde::Deserialize)]
     struct Resp {
         url: String,
     }
+    let mut endpoint = url(base_url, "/api/v1/members/invite");
+    if let Some(ttl) = ttl_seconds {
+        endpoint = format!("{endpoint}?ttl_seconds={ttl}");
+    }
     let resp = http
-        .post(url(base_url, "/api/v1/members/invite"))
+        .post(endpoint)
         .bearer_auth(session_token)
         .send()
         .await
@@ -435,9 +504,17 @@ async fn status_error(resp: reqwest::Response) -> ApiError {
     #[derive(serde::Deserialize)]
     struct ErrBody {
         error: Option<String>,
+        #[serde(default)]
+        step_up_required: bool,
+        purpose: Option<String>,
     }
     match resp.json::<ErrBody>().await {
-        Ok(ErrBody { error: Some(m) }) if !m.trim().is_empty() => ApiError::Server {
+        // Step-up demand (Part D §Authority model) takes priority — distinct variant
+        // so the GUI can drive the OTP flow rather than show a raw error.
+        Ok(b) if b.step_up_required => ApiError::StepUpRequired {
+            purpose: b.purpose.unwrap_or_default(),
+        },
+        Ok(ErrBody { error: Some(m), .. }) if !m.trim().is_empty() => ApiError::Server {
             status: code,
             message: m,
         },
@@ -555,20 +632,66 @@ pub async fn delete_ci_policy(
 }
 
 /// Remove one of the tenant's own mesh nodes (retire a device).
-/// `DELETE /api/v1/nodes/{id}` (session-authed, tenant-scoped). `[T:A.1.6]`
+/// `DELETE /api/v1/nodes/{id}` (session-authed, tenant-scoped). In a multi-user
+/// tenant the server gates this behind a step-up; pass `challenge_id` + `code` from
+/// the OTP flow (None for a solo tenant). `[T:A.1.6 + Part D §Authority model]`
 pub async fn delete_node(
     http: &reqwest::Client,
     base_url: &str,
     session_token: &str,
     node_id: &str,
+    challenge_id: Option<&str>,
+    code: Option<&str>,
 ) -> Result<(), ApiError> {
+    let mut qs: Vec<String> = Vec::new();
+    if let Some(c) = challenge_id {
+        qs.push(format!("challenge_id={c}"));
+    }
+    if let Some(k) = code {
+        qs.push(format!("code={k}"));
+    }
+    let base = url(base_url, &format!("/api/v1/nodes/{node_id}"));
+    let endpoint = if qs.is_empty() {
+        base
+    } else {
+        format!("{base}?{}", qs.join("&"))
+    };
     let resp = http
-        .delete(url(base_url, &format!("/api/v1/nodes/{node_id}")))
+        .delete(endpoint)
         .bearer_auth(session_token)
         .send()
         .await
         .map_err(|e| ApiError::Transport(e.to_string()))?;
     expect_ok(resp).await
+}
+
+/// `POST /api/v1/stepup/request` (session-authed) — ask the control plane to mint an
+/// OTP challenge for a sensitive action and send the code out-of-band. Returns the
+/// `challenge_id` to pass back at the action. `[T:Part D invite-flow §Authority model]`
+pub async fn request_step_up(
+    http: &reqwest::Client,
+    base_url: &str,
+    session_token: &str,
+    purpose: &str,
+) -> Result<String, ApiError> {
+    #[derive(serde::Deserialize)]
+    struct Resp {
+        challenge_id: String,
+    }
+    let resp = http
+        .post(url(base_url, "/api/v1/stepup/request"))
+        .bearer_auth(session_token)
+        .json(&serde_json::json!({ "purpose": purpose }))
+        .send()
+        .await
+        .map_err(|e| ApiError::Transport(e.to_string()))?;
+    if !resp.status().is_success() {
+        return Err(status_error(resp).await);
+    }
+    resp.json::<Resp>()
+        .await
+        .map(|r| r.challenge_id)
+        .map_err(|e| ApiError::Decode(e.to_string()))
 }
 
 #[cfg(test)]
@@ -593,6 +716,27 @@ mod tests {
         assert!(
             matches!(err, ApiError::Status(401) | ApiError::Status(400)),
             "expected auth rejection, got {err:?}"
+        );
+    }
+
+    // A bogus join token must be rejected (401) — proving the no-auth join-enroll
+    // URL + body + error mapping are correct.
+    #[tokio::test]
+    #[ignore = "network: requires reachable control-plane"]
+    async fn join_enroll_with_bogus_token_is_rejected() {
+        let http = reqwest::Client::new();
+        let req = JoinEnrollRequest {
+            join_token: "bogus-token".into(),
+            public_key: "x".into(),
+            hostname: "h".into(),
+            endpoint: None,
+        };
+        let err = enroll_via_join_token(&http, "https://cp.ankayma.com", &req)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, ApiError::Status(401) | ApiError::Status(400)),
+            "expected token rejection, got {err:?}"
         );
     }
 
