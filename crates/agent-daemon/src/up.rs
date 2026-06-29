@@ -15,6 +15,8 @@
 //! macOS only at 1.1 (the utun adapter); other platforms error at runtime but
 //! still compile (A.1.9). Requires root (utun + route).
 
+use std::fs::OpenOptions;
+use std::io::Write as _;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket};
 use std::process::Command;
 use std::sync::{Arc, Mutex};
@@ -360,7 +362,26 @@ async fn load_or_enroll(http: &reqwest::Client, cfg: &Config, token: &str) -> Re
     if let Some(dir) = std::path::Path::new(&cfg.state_path).parent() {
         let _ = std::fs::create_dir_all(dir);
     }
-    std::fs::write(&cfg.state_path, serde_json::to_vec_pretty(&state)?)
+    // mode 0o600: private key must not be readable by other users on the same host.
+    #[cfg(unix)]
+    let mut f = {
+        use std::os::unix::fs::OpenOptionsExt;
+        OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(&cfg.state_path)
+            .with_context(|| format!("create identity file {}", cfg.state_path))?
+    };
+    #[cfg(not(unix))]
+    let mut f = OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(&cfg.state_path)
+        .with_context(|| format!("create identity file {}", cfg.state_path))?;
+    f.write_all(&serde_json::to_vec_pretty(&state)?)
         .with_context(|| format!("persist identity to {}", cfg.state_path))?;
     Ok(state)
 }
