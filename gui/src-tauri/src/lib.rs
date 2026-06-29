@@ -1206,9 +1206,12 @@ async fn delete_node(
 
 /// Tenant node roster for the deploy-target picker. Reuses `GET /api/v1/peers`.
 #[tauri::command]
-async fn list_nodes(state: State<'_, AppState>) -> Result<Vec<domain::PeerInfo>, String> {
+async fn list_nodes(state: State<'_, AppState>) -> Result<Vec<domain::NodeBrief>, String> {
     let tok = state.token().ok_or("not signed in")?;
-    adapters::peers(&state.http, &state.base_url, &tok)
+    // Use the management endpoint (GET /api/v1/nodes) instead of /peers:
+    // server-side role filter returns all nodes for admin, own nodes for member.
+    // [T:A.1.2 + Part D §D.10.3 — no cross-member node visibility]
+    adapters::list_nodes(&state.http, &state.base_url, &tok)
         .await
         .map_err(|e| e.to_string())
 }

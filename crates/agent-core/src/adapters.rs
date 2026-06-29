@@ -2,8 +2,9 @@
 
 use crate::domain::{
     AgentEnrollRequest, AgentEnrollResponse, CiDeployRequest, CiDeployResponse, CiPolicy,
-    CiPolicyReq, EnrollRequest, EnrollResponse, MembersView, MyAccess, PeerInfo, PolicyView, Quota,
-    ResolveTable, SessionInfo, SshSessionRequest, SshSessionResponse, Subdomain, SubdomainReq,
+    CiPolicyReq, EnrollRequest, EnrollResponse, MembersView, MyAccess, NodeBrief, PeerInfo,
+    PolicyView, Quota, ResolveTable, SessionInfo, SshSessionRequest, SshSessionResponse, Subdomain,
+    SubdomainReq,
 };
 
 /// Errors from the control-plane HTTP client.
@@ -119,6 +120,24 @@ pub async fn quota(
 #[derive(Debug, Clone, serde::Deserialize)]
 struct PeersResponse {
     peers: Vec<PeerInfo>,
+}
+
+/// Wire shape of `GET /api/v1/nodes`: management surface (role-filtered server-side).
+#[derive(Debug, Clone, serde::Deserialize)]
+struct NodesResponse {
+    nodes: Vec<NodeBrief>,
+}
+
+/// Fetch the device list for the UI. `GET /api/v1/nodes`. [T:B.5.2]
+/// Role-filtered server-side: admin sees all tenant nodes, member sees only own.
+/// Replaces the old `peers` call for the device list page (peers is for mesh routing).
+pub async fn list_nodes(
+    http: &reqwest::Client,
+    base_url: &str,
+    session_token: &str,
+) -> Result<Vec<NodeBrief>, ApiError> {
+    let resp: NodesResponse = get_json(http, base_url, "/api/v1/nodes", session_token).await?;
+    Ok(resp.nodes)
 }
 
 /// Fetch the current mesh roster. `GET /api/v1/peers`. `[T:B.5.1]`

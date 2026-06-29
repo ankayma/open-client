@@ -25,6 +25,19 @@ pub struct EnrollResponse {
     pub peers: Vec<PeerInfo>,
 }
 
+/// A node entry from the management endpoint `GET /api/v1/nodes`. [T:B.5.2]
+/// Includes server-side `active` status; used for the admin/member device list UI.
+/// Role-filtered server-side: admin sees all tenant nodes, member sees only own.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NodeBrief {
+    pub node_id: String,
+    pub hostname: String,
+    pub overlay_ip: String,
+    pub active: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub owner_user_id: Option<String>,
+}
+
 /// A peer in the mesh as returned by the control-plane. `[T:B.5.1]`
 /// `[T:A.1.1]` metadata only — no business payload crosses the control plane.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

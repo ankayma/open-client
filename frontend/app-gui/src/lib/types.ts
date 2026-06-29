@@ -71,10 +71,11 @@ export interface CiPolicyDraft {
 // Tenant node (from GET /api/v1/peers) for the deploy-target picker.
 export interface PeerBrief {
   node_id: string;
-  public_key: string;
   overlay_ip: string;
   hostname: string;
-  endpoint?: string;
+  /** Server-side active status from GET /api/v1/nodes (expires_at check). */
+  active: boolean;
+  owner_user_id?: string;
 }
 
 // F-3 branded subdomain (Part C §H.3.6.1): a private name mapped onto a mesh node.

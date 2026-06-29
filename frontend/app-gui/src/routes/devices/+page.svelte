@@ -9,11 +9,11 @@
 	import { runWithStepUp } from '$lib/stepup';
 	import type { PeerBrief } from '$lib/types';
 
-	// "Online" dot: this device follows the app's connection state (matches the
-	// dashboard); a peer is online when it advertises a reachable endpoint.
+	// "Online" dot: this device follows the app's connection state; peers use
+	// the server-side `active` field (expires_at check from /api/v1/nodes).
 	function isOnline(d: PeerBrief): boolean {
 		if (d.node_id === thisNodeId) return $connection.status === 'connected';
-		return !!d.endpoint;
+		return d.active;
 	}
 
 	let devices = $state<PeerBrief[]>([]);
