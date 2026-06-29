@@ -575,10 +575,31 @@ async fn get_quota(state: State<'_, AppState>) -> Result<Quota, String> {
 // --- Mesh enrollment (real control-plane half of connect) ---
 
 fn device_hostname() -> String {
-    std::env::var("HOSTNAME")
-        .ok()
-        .filter(|h| !h.is_empty())
-        .unwrap_or_else(|| "ankayma-desktop".to_string())
+    // $HOSTNAME is set by shells on Linux but NOT by macOS launchd/GUI apps.
+    // Fall back to gethostname(2) which works on macOS, Linux, and iOS sandbox.
+    if let Ok(h) = std::env::var("HOSTNAME") {
+        let h = h.trim().to_string();
+        if !h.is_empty() && h != "localhost" {
+            return h;
+        }
+    }
+    #[cfg(unix)]
+    {
+        let mut buf = [0u8; 256];
+        let ret = unsafe {
+            libc::gethostname(buf.as_mut_ptr() as *mut libc::c_char, buf.len())
+        };
+        if ret == 0 {
+            let end = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
+            if let Ok(name) = std::str::from_utf8(&buf[..end]) {
+                let name = name.trim().to_string();
+                if !name.is_empty() && name != "localhost" {
+                    return name;
+                }
+            }
+        }
+    }
+    "ankayma-desktop".to_string()
 }
 
 #[tauri::command]
