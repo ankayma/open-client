@@ -13,6 +13,9 @@ pub struct EnrollRequest {
     /// Optional reachable "ip:port" the agent advertises to peers.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub endpoint: Option<String>,
+    /// [T:Part B §B.1.4] Canonical workload kind (e.g. "AppServer", "ClientDevice").
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub workload_kind: Option<String>,
 }
 
 /// Control-plane response to a successful enrollment. `[T:B.5.1]`
@@ -23,6 +26,13 @@ pub struct EnrollResponse {
     pub overlay_ip: String,
     pub allowed_ips: Vec<String>,
     pub peers: Vec<PeerInfo>,
+    /// [T:Part D §D.11] Scoped bearer token for GET /api/v1/peers/events.
+    /// TTL 90d; absent if control-plane pre-dates migration 015.
+    #[serde(default)]
+    pub node_service_token: Option<String>,
+    /// RFC3339 expiry of the service token.
+    #[serde(default)]
+    pub token_expires_at: Option<String>,
 }
 
 /// A node entry from the management endpoint `GET /api/v1/nodes`. [T:B.5.2]
@@ -337,6 +347,7 @@ mod tests {
             public_key: "PUBKEY".into(),
             hostname: "laptop".into(),
             endpoint: None,
+            workload_kind: None,
         };
         let v: serde_json::Value = serde_json::to_value(&req).unwrap();
         assert_eq!(v["public_key"], "PUBKEY");

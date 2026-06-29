@@ -562,6 +562,60 @@ pub async fn agent_enroll(
         .map_err(|e| ApiError::Decode(e.to_string()))
 }
 
+/// Open an SSE stream for peer events. `GET /api/v1/peers/events`.
+/// Authenticated with the node service token (not the user session token).
+/// Returns the raw response; the caller reads it as a byte stream.
+/// [T:Part D §D.12]
+pub async fn subscribe_peer_events(
+    http: &reqwest::Client,
+    base_url: &str,
+    node_service_token: &str,
+) -> Result<reqwest::Response, ApiError> {
+    let resp = http
+        .get(url(base_url, "/api/v1/peers/events"))
+        .bearer_auth(node_service_token)
+        .header("accept", "text/event-stream")
+        .send()
+        .await
+        .map_err(|e| ApiError::Transport(e.to_string()))?;
+    if !resp.status().is_success() {
+        return Err(status_error(resp).await);
+    }
+    Ok(resp)
+}
+
+/// Renew the node service token before it expires. `POST /api/v1/nodes/{id}/service-token`.
+/// Authenticated with the current (still-valid) service token.
+/// Returns (new_token, token_expires_at). [T:Part D §D.11]
+pub async fn renew_service_token(
+    http: &reqwest::Client,
+    base_url: &str,
+    node_id: &str,
+    current_service_token: &str,
+) -> Result<(String, Option<String>), ApiError> {
+    #[derive(serde::Deserialize)]
+    struct Resp {
+        node_service_token: String,
+        token_expires_at: Option<String>,
+    }
+    let resp = http
+        .post(url(
+            base_url,
+            &format!("/api/v1/nodes/{node_id}/service-token"),
+        ))
+        .bearer_auth(current_service_token)
+        .send()
+        .await
+        .map_err(|e| ApiError::Transport(e.to_string()))?;
+    if !resp.status().is_success() {
+        return Err(status_error(resp).await);
+    }
+    resp.json::<Resp>()
+        .await
+        .map(|r| (r.node_service_token, r.token_expires_at))
+        .map_err(|e| ApiError::Decode(e.to_string()))
+}
+
 /// Map a non-2xx response to an `ApiError`, surfacing the control plane's `error`
 /// field verbatim when present (so safe-by-default 400/409 reasons reach the user).
 async fn expect_ok(resp: reqwest::Response) -> Result<(), ApiError> {
@@ -784,6 +838,7 @@ mod tests {
             public_key: "x".into(),
             hostname: "h".into(),
             endpoint: None,
+            workload_kind: None,
         };
         let err = enroll(&http, "https://cp.ankayma.com", "bogus-token", &req)
             .await

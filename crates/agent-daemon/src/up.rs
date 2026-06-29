@@ -42,6 +42,16 @@ pub(crate) struct AgentState {
     pub(crate) node_id: String,
     pub(crate) overlay_ip: String,
     pub(crate) listen_port: u16,
+    /// [T:Part D §D.11] Scoped bearer token for GET /api/v1/peers/events.
+    /// TTL 90d. None for nodes enrolled before migration 015.
+    #[serde(default)]
+    pub(crate) service_token: Option<String>,
+    /// RFC3339 string of token expiry. Logged as warning when approaching expiry.
+    #[serde(default)]
+    pub(crate) token_expires_at: Option<String>,
+    /// [T:Part B §B.1.4] Canonical workload kind, e.g. "AppServer".
+    #[serde(default)]
+    pub(crate) workload_kind: Option<String>,
 }
 
 // `PeerEntry` / `Peers` and the tx/rx/timer pump now live in `agent_core::pump`
@@ -49,19 +59,38 @@ pub(crate) struct AgentState {
 // host-specific plumbing: opening utun + assigning the overlay IP + per-peer routes.
 
 /// `agent up [--token <t>] [--control-plane <url>] [--port <n>] [--state <path>]`
+///
+/// `--token` is required for the first enrollment. On subsequent runs, the persisted
+/// `agent.json` carries a scoped node service token and `--token` is optional.
 pub async fn run(args: &[String]) -> Result<()> {
     let cfg = Config::parse(args)?;
-
     let http = reqwest::Client::new();
-    let token = cfg.token.clone().ok_or_else(|| {
-        anyhow!("a session token is required: pass --token <t> or set ANKAYMA_TOKEN")
-    })?;
 
-    // 1. Identity: reuse persisted state, else generate + enroll.
-    let state = load_or_enroll(&http, &cfg, &token).await?;
+    // 1. Identity: reuse persisted state, else generate + enroll (needs --token).
+    let state = load_or_enroll(&http, &cfg).await?;
 
-    // 2. Initial roster, then run the data plane with a live peer-refresh loop.
-    let initial = adapters::peers(&http, &cfg.control_plane, &token)
+    // Service token: prefer persisted node service token (scoped, D.11);
+    // fall back to --token for nodes enrolled before migration 015.
+    let service_token = match state.service_token.clone() {
+        Some(t) => {
+            // Warn if expiry is known (Phase 1: display only, no auto-renew).
+            if let Some(ref exp) = state.token_expires_at {
+                eprintln!(
+                    "node service token expires at {exp} — renew before that date with: \
+                     agent renew-token"
+                );
+            }
+            t
+        }
+        None => cfg.token.clone().ok_or_else(|| {
+            anyhow!(
+                "no node service token in agent.json — pass --token <session_token> to re-enroll"
+            )
+        })?,
+    };
+
+    // 2. Initial roster via GET /api/v1/peers.
+    let initial = adapters::peers(&http, &cfg.control_plane, &service_token)
         .await
         .map_err(|e| anyhow!("fetch peers: {e}"))?;
 
@@ -71,19 +100,20 @@ pub async fn run(args: &[String]) -> Result<()> {
         RefreshCtx {
             http,
             control_plane: cfg.control_plane.clone(),
-            token,
+            service_token,
         },
     )
     .await
 }
 
-/// Context for the `agent up` peer-refresh loop. (`agent ci-deploy` uses a
+/// Context for the `agent up` peer-event loop. (`agent ci-deploy` uses a
 /// separate userspace data plane — see `netstack` — so there is no one-shot
 /// variant here; this path is the kernel-TUN long-running agent only.)
 pub(crate) struct RefreshCtx {
     pub http: reqwest::Client,
     pub control_plane: String,
-    pub token: String,
+    /// Node service token for GET /api/v1/peers/events. [T:Part D §D.11]
+    pub service_token: String,
 }
 
 /// Bring the WireGuard overlay online for `state` and move packets. Shared by
@@ -156,7 +186,7 @@ pub(crate) async fn serve_dataplane(
     let resolver = crate::resolver::Resolver::new();
     crate::resolver::serve(resolver.clone());
     let resolver_zone =
-        match adapters::resolve_subdomains(&ctx.http, &ctx.control_plane, &ctx.token).await {
+        match adapters::resolve_subdomains(&ctx.http, &ctx.control_plane, &ctx.service_token).await {
             Ok(t) => {
                 resolver.set(resolve_entries(&t));
                 crate::resolver::install_scoped_resolver(&t.zone);
@@ -165,9 +195,11 @@ pub(crate) async fn serve_dataplane(
             Err(_) => None,
         };
 
-    // Keep the roster fresh: peers that enroll after us appear here.
+    // [T:Part D §D.12] SSE event loop: replaces the 5s poll loop.
+    // CP pushes peer_added when a CI runner enrolls; we add the peer immediately.
+    // On disconnect: exponential backoff + full resync before reconnect.
     let refresh = {
-        let (http, cp, token) = (ctx.http, ctx.control_plane, ctx.token);
+        let (http, cp, svc_token) = (ctx.http, ctx.control_plane, ctx.service_token);
         let (peers, index, udp) = (peers.clone(), index.clone(), udp.clone());
         let dev_name = dev_name.clone();
         let resolver = resolver.clone();
@@ -177,9 +209,10 @@ pub(crate) async fn serve_dataplane(
             state.listen_port,
         );
         async move {
+            let mut backoff_secs: u64 = 1;
             loop {
-                tokio::time::sleep(Duration::from_secs(5)).await;
-                if let Ok(list) = adapters::peers(&http, &cp, &token).await {
+                // Full resync before (re)connecting SSE — guarantees no missed events.
+                if let Ok(list) = adapters::peers(&http, &cp, &svc_token).await {
                     let added = add_new_peers(
                         &peers,
                         &index,
@@ -190,15 +223,41 @@ pub(crate) async fn serve_dataplane(
                         &dev_name,
                     );
                     if added > 0 {
-                        println!("discovered {added} new peer(s)");
+                        println!("discovered {added} peer(s) on sync");
                     }
                 }
-                // [F-3] Refresh the private-DNS table alongside the roster.
-                if let Ok(t) = adapters::resolve_subdomains(&http, &cp, &token).await {
+                if let Ok(t) = adapters::resolve_subdomains(&http, &cp, &svc_token).await {
                     resolver.set(resolve_entries(&t));
                 }
-                // Heartbeat + fresh roster for the GUI status reader.
                 write_status(&node_id, &overlay_s, port, &peers);
+
+                // Subscribe to SSE.
+                match adapters::subscribe_peer_events(&http, &cp, &svc_token).await {
+                    Ok(resp) => {
+                        backoff_secs = 1; // reset on successful connect
+                        if let Err(e) = consume_peer_sse(
+                            resp,
+                            &peers,
+                            &index,
+                            &static_private,
+                            self_overlay,
+                            &udp,
+                            &dev_name,
+                            &node_id,
+                            &overlay_s,
+                            port,
+                        )
+                        .await
+                        {
+                            eprintln!("SSE stream ended: {e} — reconnecting in {backoff_secs}s");
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("SSE connect error: {e} — retry in {backoff_secs}s");
+                    }
+                }
+                tokio::time::sleep(Duration::from_secs(backoff_secs)).await;
+                backoff_secs = (backoff_secs * 2).min(60);
             }
         }
     };
@@ -214,6 +273,84 @@ pub(crate) async fn serve_dataplane(
         crate::resolver::remove_scoped_resolver(&zone);
     }
     Ok(())
+}
+
+/// Read an SSE stream from the control plane and apply peer events.
+/// Returns when the stream ends or an error occurs; caller handles reconnect.
+#[allow(clippy::too_many_arguments)]
+async fn consume_peer_sse(
+    resp: reqwest::Response,
+    peers: &Peers,
+    index: &std::sync::Arc<std::sync::Mutex<u32>>,
+    static_private: &StaticSecret,
+    self_overlay: std::net::IpAddr,
+    udp: &std::sync::Arc<std::net::UdpSocket>,
+    dev_name: &str,
+    node_id: &str,
+    overlay_s: &str,
+    port: u16,
+) -> anyhow::Result<()> {
+    use futures::StreamExt as _;
+    let mut stream = resp.bytes_stream();
+    let mut buf = String::new();
+    let mut evt_type = String::new();
+    let mut evt_data = String::new();
+
+    while let Some(chunk) = stream.next().await {
+        let bytes = chunk.map_err(|e| anyhow!("SSE read: {e}"))?;
+        buf.push_str(&String::from_utf8_lossy(&bytes));
+        // Process complete lines.
+        while let Some(nl) = buf.find('\n') {
+            let line = buf[..nl].trim_end_matches('\r').to_string();
+            buf.drain(..=nl);
+            if line.is_empty() {
+                // Dispatch event on blank line.
+                if evt_type == "peer_added" && !evt_data.is_empty() {
+                    #[derive(serde::Deserialize)]
+                    struct SsePeer {
+                        node_id: String,
+                        public_key: String,
+                        overlay_ip: String,
+                        hostname: String,
+                        endpoint: Option<String>,
+                    }
+                    if let Ok(p) = serde_json::from_str::<SsePeer>(&evt_data) {
+                        let peer_info = agent_core::domain::PeerInfo {
+                            node_id: p.node_id,
+                            public_key: p.public_key,
+                            overlay_ip: p.overlay_ip,
+                            hostname: p.hostname,
+                            endpoint: p.endpoint,
+                        };
+                        let added = add_new_peers(
+                            peers,
+                            index,
+                            static_private,
+                            self_overlay,
+                            &[peer_info],
+                            udp,
+                            dev_name,
+                        );
+                        if added > 0 {
+                            println!("SSE: added {added} new peer(s)");
+                            write_status(node_id, overlay_s, port, peers);
+                        }
+                    }
+                }
+                // peer_removed: Phase 1 — full resync on reconnect handles stale peers.
+                // (Removing a WireGuard peer requires the public key, which would need
+                // a lookup; defer to the resync-on-reconnect path for now.)
+                evt_type.clear();
+                evt_data.clear();
+            } else if let Some(v) = line.strip_prefix("event: ") {
+                evt_type = v.to_string();
+            } else if let Some(v) = line.strip_prefix("data: ") {
+                evt_data = v.to_string();
+            }
+            // SSE comments (":") and other fields are silently ignored.
+        }
+    }
+    Err(anyhow!("SSE stream closed by server"))
 }
 
 /// Map the control plane's resolve table into (fqdn → overlay address) entries,
@@ -330,13 +467,18 @@ fn write_status(node_id: &str, overlay_ip: &str, listen_port: u16, peers: &Peers
 
 /// Reuse a persisted identity if present; otherwise generate a keypair, enroll
 /// (advertising our LAN endpoint so peers can reach us), and persist the result.
-async fn load_or_enroll(http: &reqwest::Client, cfg: &Config, token: &str) -> Result<AgentState> {
+/// `--token` is required only for the initial enrollment.
+async fn load_or_enroll(http: &reqwest::Client, cfg: &Config) -> Result<AgentState> {
     if let Ok(bytes) = std::fs::read(&cfg.state_path) {
         if let Ok(state) = serde_json::from_slice::<AgentState>(&bytes) {
             println!("reusing identity from {}", cfg.state_path);
             return Ok(state);
         }
     }
+
+    let token = cfg.token.clone().ok_or_else(|| {
+        anyhow!("initial enrollment requires --token <session_token> or ANKAYMA_TOKEN")
+    })?;
 
     let kp = WgKeypair::generate();
     let lan_ip = detect_lan_ip().context("detect this machine's LAN IP")?;
@@ -347,10 +489,19 @@ async fn load_or_enroll(http: &reqwest::Client, cfg: &Config, token: &str) -> Re
         public_key: kp.public_b64.clone(),
         hostname: hostname(),
         endpoint: Some(endpoint),
+        // [T:Part B §B.1.4] server nodes default to AppServer.
+        workload_kind: Some("AppServer".to_string()),
     };
-    let resp = adapters::enroll(http, &cfg.control_plane, token, &req)
+    let resp = adapters::enroll(http, &cfg.control_plane, &token, &req)
         .await
         .map_err(|e| anyhow!("enroll: {e}"))?;
+
+    if resp.node_service_token.is_none() {
+        eprintln!(
+            "warning: control-plane did not return a node service token (pre-migration 015). \
+             Re-enroll after updating the control plane."
+        );
+    }
 
     let state = AgentState {
         private_b64: kp.private_b64,
@@ -358,6 +509,9 @@ async fn load_or_enroll(http: &reqwest::Client, cfg: &Config, token: &str) -> Re
         node_id: resp.node_id,
         overlay_ip: resp.overlay_ip,
         listen_port: cfg.listen_port,
+        service_token: resp.node_service_token,
+        token_expires_at: resp.token_expires_at,
+        workload_kind: Some("AppServer".to_string()),
     };
     if let Some(dir) = std::path::Path::new(&cfg.state_path).parent() {
         let _ = std::fs::create_dir_all(dir);

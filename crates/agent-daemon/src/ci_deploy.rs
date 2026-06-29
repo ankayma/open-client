@@ -102,6 +102,10 @@ pub async fn run(args: &[String]) -> Result<()> {
         node_id: resp.node_id,
         overlay_ip: resp.overlay_ip,
         listen_port: cfg.listen_port,
+        // Ephemeral CI node — no persistent service token.
+        service_token: None,
+        token_expires_at: None,
+        workload_kind: Some("BatchWorker".to_string()),
     };
     // The data plane is blocking (smoltcp poll loop + std process spawn); run it off
     // the async runtime so we don't stall the executor.
