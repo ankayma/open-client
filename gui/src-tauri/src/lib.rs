@@ -55,6 +55,9 @@ struct EnrolledNode {
 struct AppState {
     http: reqwest::Client,
     base_url: String,
+    /// Platform-correct data directory; Tauri resolves this per-OS so it works in
+    /// the iOS sandbox (where $HOME is unreliable). [T:A.1.9]
+    data_dir: std::path::PathBuf,
     session: Mutex<Option<String>>,
     /// Signed-in account email, surfaced in the tray menu. None when signed out.
     email: Mutex<Option<String>>,
@@ -74,13 +77,15 @@ struct AppState {
 }
 
 impl AppState {
-    fn new() -> Self {
+    fn new(data_dir: std::path::PathBuf) -> Self {
         let base_url = std::env::var("ANKAYMA_CONTROL_PLANE")
             .unwrap_or_else(|_| DEFAULT_CONTROL_PLANE.to_string());
+        let session = load_session_from_disk(&data_dir);
         AppState {
             http: reqwest::Client::new(),
             base_url,
-            session: Mutex::new(None),
+            data_dir,
+            session: Mutex::new(session),
             email: Mutex::new(None),
             node: Mutex::new(None),
             pending_token: Mutex::new(None),
@@ -139,6 +144,41 @@ impl AppState {
     fn set_email(&self, email: Option<String>) {
         *self.email.lock().expect("email lock poisoned") = email;
     }
+}
+
+// --- Session persistence (survive app restarts without re-login) ---
+// Token is stored as plain text in $HOME/.ankayma/session (mode 600 on Unix).
+// On macOS the file sits in the user's home dir (under user-level protection);
+// on iOS it sits in the app sandbox (inaccessible to other apps). The token is
+// server-validated on every startup via check_auth_state, so a revoked/expired
+// token is caught and the file is cleared automatically.
+
+fn session_file_path(data_dir: &std::path::Path) -> std::path::PathBuf {
+    data_dir.join("session")
+}
+
+fn save_session_to_disk(data_dir: &std::path::Path, token: &str) {
+    let path = session_file_path(data_dir);
+    if let Some(p) = path.parent() {
+        let _ = std::fs::create_dir_all(p);
+    }
+    if std::fs::write(&path, token.as_bytes()).is_ok() {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+        }
+    }
+}
+
+fn load_session_from_disk(data_dir: &std::path::Path) -> Option<String> {
+    let tok = std::fs::read_to_string(session_file_path(data_dir)).ok()?;
+    let tok = tok.trim().to_string();
+    if tok.is_empty() { None } else { Some(tok) }
+}
+
+fn clear_session_from_disk(data_dir: &std::path::Path) {
+    let _ = std::fs::remove_file(session_file_path(data_dir));
 }
 
 // --- Domain types (mirror Part B §B.1 subset needed by GUI) ---
@@ -344,6 +384,7 @@ async fn check_auth_state(app: AppHandle, state: State<'_, AppState>) -> Result<
                 AuthState::Authenticated { user: s.into() }
             }
             Err(_) => {
+                clear_session_from_disk(&state.data_dir);
                 state.set_token(None);
                 state.set_email(None);
                 AuthState::Unauthenticated
@@ -424,6 +465,7 @@ async fn apply_session_token(app: &AppHandle, token: String) -> Result<User, Str
         .await
         .map_err(|e| e.to_string())?;
     state.set_email(Some(info.email.clone()));
+    save_session_to_disk(&state.data_dir, &token);
     state.set_token(Some(token));
     let user: User = info.into();
     apply_connection_change(app);
@@ -508,6 +550,7 @@ fn handle_deep_links(app: &AppHandle, urls: Vec<url::Url>) {
 
 #[tauri::command]
 async fn sign_out(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
+    clear_session_from_disk(&state.data_dir);
     state.set_token(None);
     state.set_email(None);
     disconnect_inner(&state);
@@ -1033,6 +1076,15 @@ async fn invite_member(
     .map_err(|e| e.to_string())
 }
 
+/// Drain the held `ankayma://join-team?token=…` invite token. The welcome page calls
+/// this on cold start: the `join-team-pending` event fired before the JS listener
+/// registered (and was lost), but the token is safely held in the Rust mutex until
+/// explicitly drained. Returns None if not present or already consumed.
+#[tauri::command]
+async fn take_pending_join_team(state: State<'_, AppState>) -> Result<Option<String>, String> {
+    Ok(state.take_pending_join_team())
+}
+
 /// Member magic-link join (no session, no OTP): redeem the emailed invite token — which
 /// IS the credential — to mint + store an email-rooted session → signed in. ZERO confirm
 /// at redeem (Part D §A invite-flow §Cases, doc lines 28-30). [T:Part D §A]
@@ -1343,7 +1395,15 @@ pub fn run() {
     builder
         .plugin(tauri_plugin_deep_link::init())
         .setup(|app| {
-            app.manage(AppState::new());
+            // app_data_dir() is platform-aware: on iOS it resolves to the app
+            // sandbox container; on macOS to ~/Library/Application Support/<id>.
+            // Fallback to $HOME/.ankayma so cargo run / CI still works. [T:A.1.9]
+            let data_dir = app.path().app_data_dir().unwrap_or_else(|_| {
+                std::env::var("HOME")
+                    .map(|h| std::path::PathBuf::from(h).join(".ankayma"))
+                    .unwrap_or_default()
+            });
+            app.manage(AppState::new(data_dir));
 
             // iOS: start tracking the installed tunnel's status so the UI shows the
             // real state on launch. [T:A.1.9]
@@ -1418,6 +1478,7 @@ pub fn run() {
             check_auth_state,
             sign_in_github,
             poll_login,
+            take_pending_join_team,
             join_team_link,
             submit_session_token,
             sign_out,

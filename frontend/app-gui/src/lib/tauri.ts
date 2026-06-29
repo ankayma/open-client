@@ -211,6 +211,12 @@ export async function joinTeam(invite: string): Promise<void> {
 export async function joinTeamLink(token: string): Promise<AuthState> {
   return invoke<AuthState>("join_team_link", { token });
 }
+// Drain the pending join-team invite token from Rust. The welcome page calls this on
+// cold start: the JS event fires before the listener registers (and is lost), but the
+// Rust mutex holds the token until this command explicitly drains it.
+export async function takePendingJoinTeam(): Promise<string | null> {
+  return invoke<string | null>("take_pending_join_team");
+}
 export async function removeMember(userId: string): Promise<void> {
   return invoke("remove_member", { userId });
 }

@@ -3,7 +3,7 @@
 	import { onMount, onDestroy } from 'svelte';
 	import { get } from 'svelte/store';
 	import { auth, pendingInvite } from '$lib/stores';
-	import { signInGithub, pollLogin, submitSessionToken, joinTeamLink } from '$lib/tauri';
+	import { signInGithub, pollLogin, submitSessionToken, joinTeamLink, takePendingJoinTeam } from '$lib/tauri';
 	import { listen } from '@tauri-apps/api/event';
 
 	// idle   → initial screen with GitHub button
@@ -100,21 +100,37 @@
 		token = '';
 	}
 
-	let unsubCancel: (() => void) | undefined;
+	let cleanups: (() => void)[] = [];
 	onMount(async () => {
-		// Arrived via a join-team invite deep link while signed out → redeem it directly.
-		// The token (delivered to the invitee's email) is the credential; no OTP, no GitHub.
+		// Warm-start path: layout's join-team-pending listener already set the store.
 		const inv = get(pendingInvite);
 		if (inv?.type === 'join-team') {
 			pendingInvite.set(null);
 			redeemInvite(inv.token);
+		} else {
+			// Cold-start path: the join-team-pending event fired before the JS listener
+			// registered (lost), but Rust holds the token in its mutex until we drain it.
+			try {
+				const tok = await takePendingJoinTeam();
+				if (tok) redeemInvite(tok);
+			} catch { /* Tauri not available in browser dev */ }
 		}
-		const unsub = await listen('auth-cancelled', () => reset());
-		unsubCancel = unsub;
+
+		// Warm-start while already on welcome: deep link arrives → auth-pending fires →
+		// check Rust for a newly-stored invite token and redeem immediately.
+		const unsubPending = await listen('auth-pending', async () => {
+			if (step === 'joining') return;
+			try {
+				const tok = await takePendingJoinTeam();
+				if (tok) redeemInvite(tok);
+			} catch { /* browser dev */ }
+		});
+		const unsubCancel = await listen('auth-cancelled', () => reset());
+		cleanups.push(unsubPending, unsubCancel);
 	});
 	onDestroy(() => {
 		stopPoll();
-		unsubCancel?.();
+		for (const off of cleanups) off();
 	});
 </script>
 
