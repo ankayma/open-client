@@ -323,6 +323,7 @@ async fn connect_inner(state: &AppState) -> Result<(), String> {
         public_key: kp.public_b64.clone(),
         hostname: device_hostname(),
         endpoint: None,
+        workload_kind: Some("ClientDevice".to_string()),
     };
     let resp = adapters::enroll(&state.http, &state.base_url, &tok, &req)
         .await
@@ -830,8 +831,8 @@ fn bring_up_dataplane(
     // Session token is hex, control-plane is a URL — no shell metacharacters.
     // Single-quote paths (an .app bundle path may contain spaces).
     let sh = format!(
-        "nohup '{bin}' up --token {token} --control-plane '{control_plane}' \
-         >> /tmp/ankayma-agent.log 2>&1 &"
+        "'{bin}' up --token {token} --control-plane '{control_plane}' \
+         >> /tmp/ankayma-agent.log 2>&1 </dev/null &"
     );
     let script = format!("do shell script \"{sh}\" with administrator privileges");
     let out = std::process::Command::new("osascript")

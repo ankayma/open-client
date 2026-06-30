@@ -14,6 +14,7 @@
 		type DataplaneStatus,
 		vpnConnect,
 		vpnDisconnect,
+		vpnStatus,
 		getPlatform
 	} from '$lib/tauri';
 	import type { PathProof } from '$lib/types';
@@ -22,18 +23,21 @@
 	let connectError = $state<string | null>(null);
 	let proof = $state<PathProof | null>(null);
 	let proving = $state(false);
-	let tunnelBusy = $state(false);
-	let tunnelMsg = $state<string | null>(null);
 	let dp = $state<DataplaneStatus | null>(null);
 	// iOS runs the data plane in-app (Packet Tunnel extension); desktop hands off to
 	// the privileged daemon. The connect toggle picks the path from this. [T:A.1.9]
 	let isIos = $state(false);
 
-	// [slice 2] Poll the daemon's live status so the card reflects the REAL tunnel
-	// (heartbeat fresh = up), not just enrollment.
+	// Poll tunnel status — macOS uses the daemon heartbeat; iOS uses NEVPNStatus.
 	async function refreshDataplane() {
 		try {
-			dp = await getDataplaneStatus();
+			if (isIos) {
+				const s = await vpnStatus();
+				const running = s.status === 'connected' || s.status === 'reasserting';
+				dp = running ? { running: true, peers: [] } : null;
+			} else {
+				dp = await getDataplaneStatus();
+			}
 		} catch {
 			dp = null;
 		}
@@ -41,42 +45,12 @@
 	let dpTimer: ReturnType<typeof setInterval> | undefined;
 	onMount(() => {
 		getPlatform()
-			.then((os) => (isIos = os === 'ios'))
+			.then((os) => { isIos = os === 'ios'; refreshDataplane(); })
 			.catch(() => (isIos = false));
 		refreshDataplane();
 		dpTimer = setInterval(refreshDataplane, 4000);
 	});
 	onDestroy(() => clearInterval(dpTimer));
-
-	// [milestone 1.2] Bring up / tear down the real WireGuard tunnel via the
-	// privileged daemon (macOS admin prompt). The GUI enrolls; the daemon owns the
-	// utun (needs root).
-	async function startTunnel() {
-		tunnelBusy = true;
-		tunnelMsg = null;
-		try {
-			await startDataplane();
-			tunnelMsg = 'Secure tunnel daemon launched — bringing the tunnel up…';
-			setTimeout(refreshDataplane, 1500);
-		} catch (e) {
-			tunnelMsg = e instanceof Error ? e.message : String(e);
-		} finally {
-			tunnelBusy = false;
-		}
-	}
-
-	async function stopTunnel() {
-		tunnelBusy = true;
-		tunnelMsg = null;
-		try {
-			await stopDataplane();
-			setTimeout(refreshDataplane, 1000);
-		} catch (e) {
-			tunnelMsg = e instanceof Error ? e.message : String(e);
-		} finally {
-			tunnelBusy = false;
-		}
-	}
 
 	// [F-5 "Prove it"] On demand, show that traffic is peer-to-peer and the vendor is
 	// never on the data path (A.1.1) — the differentiator, demoable from F0.
@@ -97,24 +71,25 @@
 		try {
 			const conn = $connection;
 			if (conn.status === 'connected') {
-				// iOS tears down the in-app Packet Tunnel; desktop just un-enrolls
-				// (the daemon tunnel is stopped via stopTunnel).
-				if (isIos) await vpnDisconnect();
-				else await disconnect();
+				if (isIos) {
+					await vpnDisconnect();
+				} else {
+					try { await stopDataplane(); } catch { /* ignore — daemon may not be running */ }
+					await disconnect();
+				}
 				connection.set({ status: 'disconnected' });
 			} else {
 				connection.set({ status: 'connecting' });
-				// iOS: enroll + bring the Packet Tunnel up in one step. Desktop: enroll
-				// only (the real tunnel comes up via the daemon / startTunnel).
-				if (isIos) await vpnConnect();
-				else await connect();
-				// Reflect the real post-enrollment status (Connected + node_id).
+				if (isIos) {
+					await vpnConnect();
+				} else {
+					await connect();
+					await startDataplane();
+				}
 				connection.set(await getConnectionStatus());
 			}
 		} catch (e) {
 			connection.set({ status: 'disconnected' });
-			// Surface the control plane's reason (e.g. device quota reached) instead
-			// of failing silently — on mobile there's no console to inspect.
 			connectError = e instanceof Error ? e.message : String(e);
 		} finally {
 			toggling = false;
@@ -193,32 +168,10 @@
 			<p class="connect-error">{connectError}</p>
 		{/if}
 
-		{#if $connection.status === 'connected'}
-			{#if dp?.running}
-				<p style="margin-top:10px;font-size:13px;color:var(--c-success, #34d399);text-align:center;">
-					🔒 Secure tunnel up · {dp.peers.length} peer{dp.peers.length === 1 ? '' : 's'}
-				</p>
-				<button
-					class="tunnel-btn"
-					style="margin-top:8px;padding:10px 16px;border:1px solid var(--c-border);border-radius:8px;font-size:13px;color:var(--c-text-dim);background:transparent;"
-					onclick={stopTunnel}
-					disabled={tunnelBusy}
-				>
-					{tunnelBusy ? 'Stopping…' : 'Stop tunnel'}
-				</button>
-			{:else}
-				<button
-					class="tunnel-btn"
-					style="margin-top:10px;padding:10px 16px;border:1px solid var(--c-border);border-radius:8px;font-size:13px;color:var(--c-text);background:var(--c-surface);"
-					onclick={startTunnel}
-					disabled={tunnelBusy}
-				>
-					{tunnelBusy ? 'Starting…' : 'Bring up secure tunnel (admin)'}
-				</button>
-			{/if}
-			{#if tunnelMsg}
-				<p style="font-size:12px;color:var(--c-text-dim);text-align:center;margin-top:6px;overflow-wrap:anywhere;max-width:100%;">{tunnelMsg}</p>
-			{/if}
+		{#if $connection.status === 'connected' && dp?.running}
+			<p style="margin-top:10px;font-size:13px;color:var(--c-success, #34d399);text-align:center;">
+				🔒 Secure tunnel up · {dp.peers.length} peer{dp.peers.length === 1 ? '' : 's'}
+			</p>
 		{/if}
 	</section>
 

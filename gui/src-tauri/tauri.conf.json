@@ -7,7 +7,7 @@
     "frontendDist": "../../frontend/app-gui/build",
     "devUrl": "http://localhost:5173",
     "beforeDevCommand": "cd ../frontend/app-gui && npm run dev",
-    "beforeBuildCommand": "cd ../frontend/app-gui && npm run build"
+    "beforeBuildCommand": "cd ../frontend/app-gui && npm run build && cd ../../ && cargo build --release --bin agent && cp target/release/agent target/release/agent-aarch64-apple-darwin"
   },
   "app": {
     "windows": [
@@ -30,7 +30,10 @@
     "deep-link": {
       "desktop": {
         "schemes": ["ankayma"]
-      }
+      },
+      "mobile": [
+        { "scheme": "ankayma" }
+      ]
     }
   },
   "bundle": {
@@ -42,6 +45,9 @@
       "icons/128x128@2x.png",
       "icons/icon.icns",
       "icons/icon.ico"
+    ],
+    "externalBin": [
+      "../../target/release/agent"
     ],
     "android": {
       "minSdkVersion": 24,
