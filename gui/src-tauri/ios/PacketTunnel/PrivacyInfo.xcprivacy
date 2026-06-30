@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Privacy manifest — Ankayma Packet Tunnel extension (com.ankayma.app.tunnel).
+  [T:Apple-PrivacyManifest 2024] The extension only reads the config the host app
+  already wrote to the shared App Group (PacketTunnelProvider.loadConfig) and pumps
+  encrypted WireGuard packets — it collects no data of its own, so
+  NSPrivacyCollectedDataTypes is empty. NSPrivacyAccessedAPITypes derived from a real
+  `nm -u` scan of the built .appex binary (identical stat/fstat/lstat/fstatat symbols
+  as the host app — see ../AppSupport/PrivacyInfo.xcprivacy). [A: re-scan after any
+  dependency bump; verify via Xcode Organizer "Validate App" before submission]
+-->
+<plist version="1.0">
+<dict>
+	<key>NSPrivacyTracking</key>
+	<false/>
+	<key>NSPrivacyTrackingDomains</key>
+	<array/>
+	<key>NSPrivacyCollectedDataTypes</key>
+	<array/>
+	<key>NSPrivacyAccessedAPITypes</key>
+	<array>
+		<dict>
+			<key>NSPrivacyAccessedAPIType</key>
+			<string>NSPrivacyAccessedAPICategoryFileTimestamp</string>
+			<key>NSPrivacyAccessedAPITypeReasons</key>
+			<array>
+				<string>C617.1</string>
+			</array>
+		</dict>
+	</array>
+</dict>
+</plist>
