@@ -38,7 +38,7 @@
 					<path d="M9 18l6-6-6-6"/>
 				</svg>
 			</button>
-			<button class="next-item" onclick={() => goto('/dashboard')}>
+			<button class="next-item" onclick={() => goto('/services')}>
 				<span class="next-icon">📊</span>
 				<div>
 					<strong>Go to dashboard</strong>

@@ -38,10 +38,10 @@
 				connection.set(status);
 				goto('/connected');
 			} else {
-				goto('/dashboard');
+				goto('/services');
 			}
 		} catch {
-			goto('/dashboard');
+			goto('/services');
 		}
 	});
 
@@ -90,7 +90,7 @@
 		{#if failed}
 			<div class="error-box">
 				<p>{error || 'Connection failed. Please try again.'}</p>
-				<button onclick={() => goto('/dashboard')}>Back to dashboard</button>
+				<button onclick={() => goto('/services')}>Back to dashboard</button>
 			</div>
 		{/if}
 

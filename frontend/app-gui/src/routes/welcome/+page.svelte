@@ -24,7 +24,7 @@
 		try {
 			const state = await joinTeamLink(inviteToken);
 			auth.set(state);
-			goto('/dashboard');
+			goto('/services');
 		} catch (e) {
 			error = e instanceof Error ? e.message : 'Could not join the team — the invite may have expired';
 			step = 'idle';
@@ -53,7 +53,7 @@
 				if (state) {
 					stopPoll();
 					auth.set(state);
-					goto('/dashboard');
+					goto('/services');
 				}
 			} catch {
 				// transient network blip — keep polling
@@ -86,7 +86,7 @@
 			const state = await submitSessionToken(token.trim());
 			stopPoll();
 			auth.set(state);
-			goto('/dashboard');
+			goto('/services');
 		} catch (e) {
 			error = e instanceof Error ? e.message : 'Invalid token';
 			busy = false;

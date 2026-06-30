@@ -19,7 +19,15 @@ export type AuthState =
 export type ConnectionState =
   | { status: "disconnected" }
   | { status: "connecting" }
-  | { status: "connected"; node_id: string; endpoint: string };
+  | {
+      status: "connected";
+      node_id: string;
+      endpoint: string;
+      // TODO[A]: no Tauri command returns these yet — UI hides the row until
+      // get_connection_status (or a new command) starts populating them.
+      cert_expires_days?: number;
+      aal?: string;
+    };
 
 export interface Quota {
   bandwidth_bytes_used: number;
@@ -112,6 +120,10 @@ export interface AccessService {
   label: string;
   node: string;
   rule_ref: string;
+  // TODO[A]: my_access doesn't return these yet — UI hides them until the
+  // command grows the field. tags/status mirror the mockup's pill/dot states.
+  tags?: string[];
+  status?: "online" | "offline" | "denied";
 }
 export interface MyAccess {
   principal: string;

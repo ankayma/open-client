@@ -20,7 +20,7 @@
 
 		<div class="actions">
 			<button class="btn-primary" onclick={() => goto('/upgrade')}>Try again</button>
-			<button class="btn-ghost" onclick={() => goto('/dashboard')}>Back to dashboard</button>
+			<button class="btn-ghost" onclick={() => goto('/services')}>Back to dashboard</button>
 		</div>
 
 		<div class="free-note">

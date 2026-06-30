@@ -9,6 +9,7 @@
 	import { STRINGS, type Lang } from '$lib/i18n';
 	import type { ConnectionState } from '$lib/types';
 	import StepUpModal from '$lib/StepUpModal.svelte';
+	import BottomTabBar from '$lib/components/BottomTabBar.svelte';
 
 	let { children } = $props();
 
@@ -26,7 +27,7 @@
 			const authState = await checkAuthState();
 			auth.set(authState);
 			if (authState.status === 'authenticated') {
-				goto('/dashboard');
+				goto('/services');
 			} else if (!silent) {
 				goto('/welcome');
 			}
@@ -119,8 +120,9 @@
 	let userEmail = $derived($auth.status === 'authenticated' ? $auth.user.email : '');
 	let path      = $derived(page.url.pathname);
 
-	function active(href: string): boolean {
-		return path === href || path.startsWith(href + '/');
+	function active(href: string | string[]): boolean {
+		const hrefs = Array.isArray(href) ? href : [href];
+		return hrefs.some((h) => path === h || path.startsWith(h + '/'));
 	}
 
 	function getInitials(email: string): string {
@@ -160,40 +162,22 @@
 				Ankayma
 			</div>
 			<nav>
-				<button class="nav-item" class:active={active('/dashboard')} onclick={() => goto('/dashboard')}>
-					<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M3 12l9-9 9 9M5 10v10h14V10"/></svg>
-					<span>Dashboard</span>
+				<button class="nav-item" class:active={active('/services')} onclick={() => goto('/services')}>
+					<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M3 7h18M3 12h18M3 17h18"/><circle cx="7" cy="7" r="0.5"/></svg>
+					<span>{STRINGS[lang].nav_services}</span>
 				</button>
 				<button class="nav-item" class:active={active('/devices')} onclick={() => goto('/devices')}>
 					<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="2" y="4" width="20" height="14" rx="2"/><path d="M8 21h8M12 18v3"/></svg>
 					<span>{STRINGS[lang].nav_nodes}</span>
 				</button>
-				<button class="nav-item" class:active={active('/services')} onclick={() => goto('/services')}>
-					<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M3 7h18M3 12h18M3 17h18"/><circle cx="7" cy="7" r="0.5"/></svg>
-					<span>{STRINGS[lang].nav_services}</span>
-				</button>
-				<button class="nav-item" class:active={active('/subdomains')} onclick={() => goto('/subdomains')}>
-					<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="9"/><path d="M3.6 9h16.8M3.6 15h16.8M12 3a15 15 0 010 18"/></svg>
-					<span>Subdomains</span>
-				</button>
-				<button class="nav-item" class:active={active('/members')} onclick={() => goto('/members')}>
-					<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 00-3-3.87M16 3.13a4 4 0 010 7.75"/></svg>
-					<span>{STRINGS[lang].nav_users}</span>
-				</button>
-				<button class="nav-item" class:active={active('/access')} onclick={() => goto('/access')}>
+				<button
+					class="nav-item"
+					class:active={active(['/admin', '/subdomains', '/members', '/access', '/policies'])}
+					onclick={() => goto('/admin')}
+				>
 					<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0110 0v4"/></svg>
-					<span>Access</span>
+					<span>{STRINGS[lang].nav_admin}</span>
 				</button>
-				<button class="nav-item" class:active={active('/policies')} onclick={() => goto('/policies')}>
-					<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 17l6-6-6-6M12 19h8"/></svg>
-					<span>Deploy Rules</span>
-				</button>
-				{#if tier === 'F0'}
-					<button class="nav-item" class:active={active('/upgrade')} onclick={() => goto('/upgrade')}>
-						<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
-						<span>Upgrade</span>
-					</button>
-				{/if}
 				<button class="nav-item nav-settings" class:active={active('/settings')} onclick={() => goto('/settings')}>
 					<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 11-2.83 2.83l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 11-2.83-2.83l.06-.06A1.65 1.65 0 004.6 15a1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 112.83-2.83l.06.06A1.65 1.65 0 009 4.6a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 112.83 2.83l-.06.06a1.65 1.65 0 00-.33 1.82V12a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z"/></svg>
 					<span>{STRINGS[lang].nav_settings}</span>
@@ -226,9 +210,13 @@
 		</aside>
 	{/if}
 
-	<div class="view">
+	<div class="view" class:with-tabbar={signedIn}>
 		{@render children()}
 	</div>
+
+	{#if signedIn}
+		<BottomTabBar />
+	{/if}
 </div>
 
 <!-- Global step-up OTP modal (Part D §Authority model) — appears for gated actions. -->
@@ -381,6 +369,20 @@
 		color: var(--c-text);
 	}
 
+	/* Shared pill for service tags / rule refs — one definition, reused by
+	   service cards and the connection card. */
+	:global(.tag) {
+		display: inline-block;
+		padding: 2px 9px;
+		border-radius: 999px;
+		background: var(--c-surface);
+		border: 1px solid var(--c-border);
+		color: var(--c-text-dim);
+		font-size: 11px;
+		font-weight: 600;
+		white-space: nowrap;
+	}
+
 	/* Mobile-first: single column, sidebar hidden. */
 	.app {
 		min-height: 100dvh;
@@ -400,6 +402,12 @@
 
 	.sidebar {
 		display: none;
+	}
+
+	/* Room for the fixed BottomTabBar (mobile-only — the bar itself hides
+	   at >=760px, so this padding only matters below that breakpoint). */
+	.view.with-tabbar {
+		padding-bottom: 56px;
 	}
 
 	/* Desktop chrome: left nav rail + scrollable content area. */
@@ -425,6 +433,8 @@
 		.app.with-sidebar .view {
 			height: 100dvh;
 			overflow-y: auto;
+			/* BottomTabBar is mobile-only — undo the mobile reserve padding. */
+			padding-bottom: 0;
 		}
 
 		/* Use the desktop window: pages cap at a mobile column (480px) by default;

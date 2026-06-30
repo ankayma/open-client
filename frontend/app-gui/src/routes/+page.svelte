@@ -1,5 +1,5 @@
 <script lang="ts">
-	// Layout handles redirect to /welcome or /dashboard on mount
+	// Layout handles redirect to /welcome or /services on mount
 </script>
 
 <div class="loading">

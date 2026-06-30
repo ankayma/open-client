@@ -12,7 +12,7 @@
 		} catch { /* non-blocking */ }
 
 		// Auto-navigate to dashboard after 3s
-		setTimeout(() => goto('/dashboard'), 3000);
+		setTimeout(() => goto('/services'), 3000);
 	});
 </script>
 
@@ -49,7 +49,7 @@
 
 		<p class="redirect-note">Taking you to your dashboard…</p>
 
-		<button class="btn" onclick={() => goto('/dashboard')}>Go to dashboard now</button>
+		<button class="btn" onclick={() => goto('/services')}>Go to dashboard now</button>
 	</div>
 </main>
 
