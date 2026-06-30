@@ -122,6 +122,166 @@ App Group `group.com.ankayma.app`, cả 2 bật Network Extensions + App Groups.
 
 ---
 
+## 7. Owner checklist — App Store Connect submission (2026-06-30)
+
+> Code-side đã xong (Network Extension entitlement ✅, bridge JS↔Swift ✅, `PrivacyInfo.xcprivacy`
+> ✅ commit `5c250ea`, version sync ✅ commit `ef6725a` — xem §5/§6 + `part-d-infrastructure.md`
+> §7). 7 việc dưới đây **chỉ làm được trên web Apple Developer / App Store Connect bằng tài
+> khoản Account Holder/Admin** — tool không tự động hoá được. Làm theo thứ tự (2 → 6 là chuỗi
+> phụ thuộc; 1/3/4/5 làm song song lúc chờ).
+
+### 7.1 Distribution provisioning profile
+
+Hiện chỉ có **Development** profile (`get-task-allow: true`). Cần **App Store Distribution**
+profile cho cả 2 App ID. Cách nhanh nhất — để Xcode tự lo:
+
+1. `open gui/src-tauri/gen/apple/ankayma-gui.xcodeproj` (chạy `scripts/ios-postinit.sh` trước
+   nếu vừa `cargo tauri ios init` lại).
+2. Chọn target **ankayma-gui_iOS** → tab **Signing & Capabilities** → Team =
+   **VIET NAM ADVANCED SOFTWARE** (`8UF87JS6WW`, KHÔNG phải Personal Team) → tick
+   **Automatically manage signing**. Lặp lại cho target **ankayma-gui_PacketTunnel**.
+3. Trên thanh device chọn **"Any iOS Device (arm64)"** (không phải simulator).
+4. **Product → Archive**. Lần đầu archive với team đúng + automatic signing, Xcode tự tạo
+   **Apple Distribution** certificate + **App Store** provisioning profile cho cả 2 App ID nếu
+   chưa có — không cần làm tay trên portal.
+
+Nếu automatic signing báo lỗi (vd "no account with App Store Distribution capability"), làm tay:
+`developer.apple.com` → **Certificates, IDs & Profiles** (nhớ đổi team selector sang
+VIET NAM ADVANCED SOFTWARE trước) → **Certificates → +** → *Apple Distribution* → tạo CSR qua
+**Keychain Access → Certificate Assistant → Request a Certificate from a CA** → upload → download
+cert → double-click cài vào Keychain. Rồi **Profiles → +** → *App Store* (mục Distribution) →
+chọn App ID `com.ankayma.app` → chọn cert Distribution vừa tạo → đặt tên → Generate → Download →
+double-click cài. Lặp lại cho `com.ankayma.app.tunnel`.
+
+> ⚠️ Rủi ro đã thấy trong `gen/apple/project.yml` (file generated, không phải source của ta):
+> `CODE_SIGN_IDENTITY: "iPhone Developer"` bị set cứng cho **mọi** config (không tách Debug/
+> Release) — nếu Xcode không tự override sang `Apple Distribution` khi Archive (Automatic
+> signing thường override được), build Release sẽ ký nhầm bằng cert Development. Nếu Archive
+> báo "profile doesn't match the entitlements"/"wrong signing identity", đây là nghi phạm đầu
+> tiên — confirm bằng cách mở Signing & Capabilities lúc Archive xem identity thật là gì.
+
+### 7.2 App Store Connect — app record + metadata + screenshots + age rating
+
+1. `appstoreconnect.apple.com` → **My Apps → "+" → New App**. Platform iOS, Name **"Ankayma"**
+   (check trùng tên trước), Primary language English (hoặc Vietnamese nếu owner muốn thị trường
+   VN trước), Bundle ID chọn **`com.ankayma.app`** (đã đăng ký sẵn), SKU tự đặt (vd
+   `ankayma-ios-001`), User Access Full Access → Create.
+2. **App Information**: Category gợi ý *Utilities* hoặc *Productivity* (VPN thường để Utilities).
+3. **Pricing and Availability**: Free (hay theo tier F0/F1 — billing chưa live nên để Free trước,
+   sửa sau khi Stripe milestone 1.3 xong).
+4. **App Store tab → 1.0 Prepare for Submission**:
+   - **Description** (draft tiếng Anh — owner sửa lại giọng văn trước khi submit, đừng paste
+     y nguyên):
+     ```
+     Ankayma connects your devices into a private, encrypted mesh — no port-forwarding,
+     no manual WireGuard config, no servers to manage.
+
+     • One-tap connect — sign in, tap Connect, you're on the mesh.
+     • True peer-to-peer — traffic flows directly between your devices over WireGuard,
+       encrypted end-to-end. We never see the content of your tunnel.
+     • Cross-platform — macOS, Linux, Windows, iOS, and Android share the same mesh.
+     • Built on WireGuard — the modern, audited VPN protocol, not custom crypto.
+
+     Ankayma is for developers, remote teams, and anyone who wants to reach their own
+     devices — a home server, a NAS, a laptop — securely from anywhere, without exposing
+     them to the public internet.
+
+     Sign-in required (GitHub account) to enroll devices into your mesh.
+     ```
+   - **Keywords** (draft, ≤100 ký tự tổng): `vpn,mesh,wireguard,private network,remote access,
+     encrypted,devops,self-hosted` — **không** dùng tên đối thủ cạnh tranh làm keyword (rủi ro
+     trademark/keyword-stuffing reject), owner tự cân nhắc thêm bớt.
+   - **Support URL**: `https://ankayma.com` (hoặc trang support riêng nếu có).
+     **Marketing URL**: tuỳ chọn.
+   - **Screenshots** — bắt buộc ≥3 ảnh cho size lớn nhất (hiện Apple yêu cầu 6.9"/6.7" iPhone;
+     app có hỗ trợ iPad — `UISupportedInterfaceOrientations~ipad` trong Info.plist — nên cũng
+     cần bộ iPad 13"/12.9"). Lấy nhanh qua Simulator, không cần device thật:
+     ```bash
+     xcrun simctl list devicetypes | grep -i "iPhone 16 Pro Max\|iPad Pro"
+     open -a Simulator   # boot iPhone 16 Pro Max (hoặc đời mới nhất 6.9")
+     # chạy app trong simulator (cargo tauri ios dev, target = simulator), chụp từng màn:
+     xcrun simctl io booted screenshot ~/Desktop/shot-welcome.png
+     ```
+     Chụp tối thiểu: Welcome/Sign-in, Dashboard khi Connected (hiện overlay IP/node), danh sách
+     device. Lặp lại cho iPad.
+   - **Age Rating**: Edit → trả lời questionnaire — VPN app không nội dung người lớn/cờ bạc/bạo
+     lực, "Unrestricted Web Access" chọn **No** (Tauri WebView chỉ render UI nội bộ, không phải
+     trình duyệt cho user) → kết quả thường ra **4+**.
+
+### 7.3 Export compliance (encryption — ECCN)
+
+Hỏi lúc upload build hoặc ở **App Store Connect → app → version đang chuẩn bị → App Encryption
+Documentation**. Ankayma dùng WireGuard (ChaCha20Poly1305/Curve25519) — thuật toán mã hoá chuẩn,
+công khai, không tự phát triển. Luồng câu hỏi điển hình (đa số app VPN dùng WireGuard/IPSec chọn
+như sau, nhưng **đây không phải tư vấn pháp lý** — owner/legal tự quyết, đặc biệt vì pháp nhân là
+**công ty Việt Nam** chứ không phải Mỹ nên áp dụng EAR có thể khác case-by-case):
+- "Does your app use encryption?" → **Yes**.
+- "Does your app qualify for any of the exemptions provided in Category 5, Part 2 of the EAR?"
+  → phần lớn app dùng thuật toán mã hoá chuẩn/công khai (không phải tự chế, không nhắm chính phủ/
+  quân sự) chọn **Yes — qualifies (mass market / standard encryption)**.
+- Nếu chọn Yes-exempt, ASC thường không bắt nộp CCATS, chỉ lưu tự khai (self-classification).
+- **Việc owner nên làm thêm** (ngoài ASC): xác nhận có cần nộp **annual self-classification
+  report** cho US BIS không (áp dụng nếu xuất khẩu từ Mỹ theo License Exception TSU 740.13(e)) —
+  hỏi luật sư/đơn vị tư vấn xuất khẩu nếu muốn chắc chắn, nhất là vì pháp nhân VN.
+
+### 7.4 EU DSA Trader status
+
+Bắt buộc từ 2024 nếu app phân phối ở EU. Vị trí trong App Store Connect hay đổi UI — tìm theo từ
+khoá **"Trader"** trong mục **Business**/**Agreements, Tax, and Banking**, hoặc banner nhắc ngay
+khi mở app record nếu chưa khai. Nội dung cần điền (owner tự quyết, vì đây là dữ liệu pháp nhân
+thật, sẽ **hiển thị công khai cho user EU**):
+- Trạng thái: **Trader** (vì Ankayma là sản phẩm của một pháp nhân — VIET NAM ADVANCED SOFTWARE
+  COMPANY LIMITED — không phải cá nhân làm app nghiệp dư).
+- Tên pháp nhân, địa chỉ đăng ký kinh doanh, email + số điện thoại liên hệ (sẽ public).
+- Nếu công ty **không có hiện diện tại EU**, mục DSA yêu cầu cân nhắc thêm "EU representative"
+  hoặc giới hạn phân phối ngoài EU để tránh nghĩa vụ Trader đầy đủ — đây là quyết định kinh
+  doanh, không phải kỹ thuật, owner tự chọn.
+
+### 7.5 Build cho App Store Connect
+
+Sau khi §7.1 (Distribution profile) xong:
+
+```bash
+cd gui/src-tauri
+export APPLE_DEVELOPMENT_TEAM=8UF87JS6WW
+export PATH="$HOME/.cargo/bin:$PATH"
+cargo tauri ios build --export-method app-store-connect
+```
+
+Ra `.ipa` ở `gen/apple/build/arm64/*.ipa` (đường dẫn chính xác in ra cuối log build). Nếu lỗi
+ký (xem cảnh báo §7.1), mở Xcode build Archive bằng tay thay vì CLI.
+
+**Validate trước khi upload** (bắt được lỗi privacy manifest/capability sớm, đỡ bị ASC reject
+sau khi đã upload): Xcode → **Window → Organizer → Archives** → chọn archive vừa tạo (archive
+cũng được lưu khi build qua `cargo tauri ios build`, hoặc tự **Product → Archive** trong Xcode)
+→ **Validate App** → chọn App Store Connect distribution → chạy xong sửa lỗi nếu có, validate
+lại tới khi sạch.
+
+### 7.6 Upload
+
+Cách đỡ vướng nhất (không cần escalate quyền ASC API key):
+- **Xcode Organizer** → sau Validate App thành công → **Distribute App → App Store Connect →
+  Upload**. Dùng Apple ID đăng nhập sẵn trong Xcode, không cần API key.
+- Hoặc **Transporter.app** (free, Mac App Store): kéo `.ipa` vào, đăng nhập Apple ID (2FA) → Deliver.
+- Nếu muốn CLI/automation (`xcrun altool`/`scripts/release-ios.sh`): key hiện có (`THT92BMM4Y`)
+  là **read-only** (App Manager/Admin role mới upload được) → cần tạo key mới: **App Store
+  Connect → Users and Access → Integrations → App Store Connect API → Generate API Key**, role
+  **App Manager** trở lên. `.p8` chỉ tải được **1 lần** lúc tạo — lưu ngay vào `~/.private/`.
+
+> **Verified 2026-06-30**: build → sign → validate → upload chạy được **full vòng thật** trên
+> máy founder, ra kết quả "Ankayma 0.1.0 (0.1.0) uploaded". §7.1 (Distribution profile) +
+> §7.2 (app record) đều được **Xcode tự tạo** trong lúc Validate/Distribute — không cần làm tay
+> trên portal/ASC như mô tả gốc bên dưới (giữ lại làm phương án dự phòng nếu auto-create lỗi).
+
+### 7.7 Sau khi build lên App Store Connect
+
+Vào **TestFlight** trước (build tự xuất hiện sau vài phút xử lý) — tự test bằng chính account
++ device thật trước khi "Submit for Review". Khi submit, đính kèm note cho reviewer
+(**App Review Information**) trỏ tới cách đăng nhập (paste reviewer token, §7.4 của
+`part-d-infrastructure.md`, hoặc field "Notes": *"Tap 'Paste session token', use: <token>"*).
+
+---
+
 ### Log
 - 2026-06-25 — Tạo prep checklist. Target = iOS App Store (owner chốt). Build chưa chạy
   (membership expired). Flag rào Network Extension (boringtun → Packet Tunnel Provider).
@@ -131,3 +291,34 @@ App Group `group.com.ankayma.app`, cả 2 bật Network Extensions + App Groups.
   end-to-end (task 1→5): agent-core pump + agent-ios-ptp FFI + Swift provider + extension
   target + app TunnelManager. Extension BUILD SUCCEEDED (sim). Còn bridge JS↔Swift + device +
   App Store 5.4. Provisioning (2 App ID + App Group) đã tạo. Thêm §5/§6.
+- 2026-06-30 — Bridge JS↔Swift + device build xong (xem `part-d-infrastructure.md` §6-7).
+  Code-side blockers đóng: version sync extension (commit `ef6725a`), `PrivacyInfo.xcprivacy`
+  app+extension dựa trên scan symbol thật `nm -u` (commit `5c250ea`). Thêm **§7 owner
+  checklist** — 7 việc còn lại chỉ làm được trên Apple Developer/App Store Connect web (không
+  tự động hoá được): Distribution profile, app record + metadata/screenshot/age-rating, export
+  compliance (ECCN), EU DSA Trader status, build `--export-method app-store-connect` +
+  Validate App, upload, post-upload TestFlight + reviewer note.
+- 2026-06-30 (sau) — **Chạy thật pipeline §7.5-7.6 trên máy founder, end-to-end thành công**:
+  Validate App PASS, Distribute App → Upload → "Ankayma 0.1.0 (0.1.0) uploaded". App record +
+  Distribution profile được **Xcode tự tạo**, không cần làm tay. 4 gotcha thật gặp khi build,
+  đều đã fix trong code (không phải chỉ ghi chú):
+  1. Xcode (mở GUI, không qua terminal) không thấy `~/.cargo/bin` → `cargo`/`rustc`/
+     `cargo-tauri` not found trong build script. Fix máy-cục-bộ (không phải code): symlink
+     3 binary đó vào `/usr/local/bin` (PATH mặc định mọi process macOS thấy được).
+  2. `scripts/ios-postinit.sh` chỉ patch `gen/apple/project.yml` **nếu extension target chưa
+     có** — sửa `ios/PacketTunnel.target.yml` (vd thêm `CFBundleShortVersionString`) sau khi
+     target đã từng được apply **không có tác dụng** tới khi `rm -rf gen/apple &&
+     cargo tauri ios init` lại từ đầu. Không phải bug cần fix script (regenerate-từ-đầu là
+     quy trình đúng đã ghi ở §5 "Lưu ý quy trình"), nhưng dễ quên — đã trả giá 1 lần build.
+  3. App build báo `cargo: command not found`/sau đó `Connection refused` từ
+     `cargo tauri ios xcode-script` nếu Archive bằng tay trong Xcode (Product → Archive) thay
+     vì qua CLI `cargo tauri ios build` — script đó là **client** nối ngược về WebSocket server
+     mà chỉ CLI khởi động. Phải dùng CLI, Xcode chỉ dùng để set Team/Capabilities.
+  4. `tauri.conf.json` có `bundle.externalBin: ["../../target/release/agent"]` áp dụng cho
+     **mọi platform** — nhưng sidecar `agent` daemon chỉ macOS/Linux/Windows
+     (`bring_up_dataplane` đã `#[cfg(target_os = "macos")]`), iOS dùng Packet Tunnel Provider
+     thay thế → build iOS đòi `agent-aarch64-apple-ios` không tồn tại. **Fix code thật**:
+     thêm `gui/src-tauri/tauri.ios.conf.json` override `externalBin: []` cho riêng iOS
+     (commit `43711b8`, Tauri 2 tự merge file theo platform).
+  Còn lại trước Submit for Review: app icon thật (đang placeholder), export compliance
+  (đang trả lời dialog ASC), metadata/screenshot/age-rating, EU DSA Trader status.
