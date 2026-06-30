@@ -696,6 +696,20 @@ async fn create_join_link(
     .map_err(|e| e.to_string())
 }
 
+/// Build the CLI command to enroll a headless node (server/VPS, no Ankayma app) —
+/// `agent up --token <session_token> --control-plane <url>`. Read-only: the GUI
+/// never runs this, only displays it for the user to copy onto the server's shell.
+/// TODO[A]: reuses the full session token, same as `bring_up_dataplane` does for
+/// this device — `agent up` has no `--join-token` flag yet to redeem the scoped
+/// join-link instead. Verify-by: ship `--join-token` support on `agent up`
+/// (it can reuse `enroll_via_join_token`, already used by `join_enroll_node`),
+/// then swap this to a scoped token.
+#[tauri::command]
+async fn get_server_enroll_command(state: State<'_, AppState>) -> Result<String, String> {
+    let tok = state.token().ok_or("not signed in")?;
+    Ok(format!("agent up --token {tok} --control-plane {}", state.base_url))
+}
+
 #[tauri::command]
 async fn request_step_up(state: State<'_, AppState>, purpose: String) -> Result<String, String> {
     // Ask the control plane to email an OTP for a sensitive action; returns the
@@ -1519,6 +1533,7 @@ pub fn run() {
             list_nodes,
             delete_node,
             create_join_link,
+            get_server_enroll_command,
             request_step_up,
             join_enroll_node,
             start_dataplane,

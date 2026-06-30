@@ -232,6 +232,12 @@ export async function createJoinLink(ttlSeconds?: number, proof?: StepUpProof): 
   });
 }
 
+// Headless node (server/VPS) enrollment: a copy-paste `agent up --token ...` command
+// for a shell with no Ankayma app. Read-only — the GUI never runs it.
+export async function getServerEnrollCommand(): Promise<string> {
+  return invoke<string>("get_server_enroll_command");
+}
+
 // Recipient side of a node invite (`ankayma://join?token=…`): enroll THIS device
 // into the invite's tenant using only the join token (no session). [A] invite-flow.
 export async function joinEnrollNode(joinToken: string, hostname: string): Promise<void> {
