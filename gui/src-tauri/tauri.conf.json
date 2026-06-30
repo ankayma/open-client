@@ -32,7 +32,7 @@
         "schemes": ["ankayma"]
       },
       "mobile": [
-        { "scheme": "ankayma" }
+        { "scheme": ["ankayma"], "host": "*" }
       ]
     }
   },
