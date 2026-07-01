@@ -206,3 +206,26 @@ Gap 3 và Gap 2 **không phụ thuộc Gap 1** — có thể fix ngay với osas
 | `gui/src-tauri/macos/PrivilegedHelper/launchd.plist` | Gap 1 (tạo mới) |
 | `Cargo.toml` (workspace root) | Gap 1 |
 | `gui/src-tauri/tauri.conf.json` | Gap 1 |
+
+---
+
+## Status — shipped 2026-07-01 (commit `38d9d98`)
+
+Cả 3 gap đã fix, cùng 1 commit (Gap 2/3 dùng chung `stop_dataplane_inner` với Gap 1 nên tách commit không có lợi).
+
+**Gap 2 + Gap 3**: đúng như plan — tách `stop_dataplane_inner()`, gọi từ tray toggle-disconnect và từ `tauri::RunEvent::Exit`.
+
+**Gap 1**: đổi hướng so với plan gốc — dùng **Unix domain socket** (`/var/run/com.ankayma.helper.sock`, peer-uid + home-dir-ownership authorization) thay vì XPC literal. Lý do: crate XPC Rust duy nhất còn được maintain (`xpc-connection`) đã cũ (2018) và chỉ hỗ trợ client-side, muốn làm listener-side daemon phải tự viết FFI libxpc từ đầu. Cùng property bảo mật (chỉ GUI của đúng user mới điều khiển được daemon), rủi ro implementation thấp hơn nhiều. Dùng crate `smappservice-rs` (wrap `SMAppService`) để register/check-status daemon.
+
+Bundle layout thực tế: helper binary tại `Contents/MacOS/ankayma-helper`, plist tại `Contents/Library/LaunchDaemons/com.ankayma.helper.plist` (dùng key `BundleProgram` — relative path trong bundle — thay vì `Program` tuyệt đối, để chạy được bất kể app cài ở đâu).
+
+### Live-tested trên máy thật, phát hiện 2 bug thật (không chỉ code review)
+
+1. **`smappservice-rs` 0.1.3 map sai error code**: enum `ServiceManagementError` của crate dùng lại numeric code của `SMErrors.h` (API `SMJobBless` cũ), không khớp với code thật mà `SMAppService` (API mới) trả về — lần register thứ 2 (daemon đã Enabled) trả về `Unknown(1)` thay vì `AlreadyRegistered` mà crate map, khiến Connect báo lỗi giả "register helper daemon: unknown error 1". **Fix**: check `svc.status()` trước khi gọi `register()`, không dựa vào match error variant.
+2. **Daemon cũ (orphan từ osascript trước đây) không chết với SIGTERM**: `libc::kill(pid, SIGTERM)` trả về thành công nhưng process vẫn sống. Nguyên nhân: `crates/agent-daemon/src/up.rs` chỉ handle `tokio::signal::ctrl_c()` (SIGINT), không có handler SIGTERM nào cả — có khả năng authorization trampoline của `osascript ... with administrator privileges` để lại SIGTERM bị ignore qua `exec()`. **Fix**: sau SIGTERM, verify bằng `kill(pid, 0)` sau 500ms, escalate SIGKILL nếu vẫn còn sống.
+
+### Việc còn tồn đọng — cần QC sau lần reboot/logout tự nhiên tiếp theo
+
+Sau khi rebuild binary helper + cài lại `.app`, `sudo launchctl kickstart -k system/com.ankayma.helper` **không** làm daemon đang chạy nạp lại binary mới (pid không đổi trước/sau). Do đó nhánh SIGTERM-verify-SIGKILL-escalation trong `stop_agent()` (main.rs) **chưa được re-verify sống** với daemon build cuối — chỉ mới verify logic + đã confirm daemon cũ (build trước fix) không tự chết với SIGTERM đúng như dự đoán. Việc reload LaunchDaemon tin cậy nhất là reboot/logout (không ép máy làm giữa chừng session này).
+
+**QC checklist khi có dịp reboot**: Connect → Disconnect qua tray → Disconnect qua UI → Quit app (Cmd+Q) — mỗi lần xác nhận `ps aux | grep 'agent up'` không còn process nào sống sót, và `/tmp/ankayma-helper.log` log đúng nhánh (kill thành công hay phải escalate SIGKILL).
