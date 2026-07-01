@@ -77,6 +77,14 @@ jobs:
           set -euo pipefail
           VERSION="$(sed -n 's/^version *= *"\(.*\)"/\1/p' Cargo.toml | head -1)"
 
+          # GNUPGHOME set ONCE, before import, so every gpg/aptly/rpm call below
+          # (import, aptly publish, rpm --addsign, detached-sign) sees the same
+          # homedir [T — 2026-07-02 CI run: setting it only before `aptly` left
+          # the import in the default ~/.gnupg, so aptly found an empty keyring].
+          export GNUPGHOME="$RUNNER_TEMP/.gnupg"
+          mkdir -p "$GNUPGHOME"
+          chmod 700 "$GNUPGHOME"
+
           # Subkey-only import (master never touches CI — see header).
           echo "$GPG_PRIVATE_KEY" | base64 -d | gpg --batch --pinentry-mode loopback --passphrase "$GPG_PASSPHRASE" --import
           gpg --armor --export "$GPG_KEY_ID" > "dist/$VERSION/ankayma.gpg.asc"
@@ -90,7 +98,6 @@ jobs:
           nfpm package -f /tmp/nfpm.yaml -p rpm -t "dist/${VERSION}/ankayma-${VERSION}.x86_64.rpm"
 
           # ── APT repo (aptly, GPG inline-signed InRelease) ───────────────
-          export GNUPGHOME="$RUNNER_TEMP/.gnupg"
           aptly repo create -distribution=stable -component=main ankayma
           aptly repo add ankayma "dist/${VERSION}/ankayma_${VERSION}_amd64.deb"
           aptly publish repo -gpg-key="$GPG_KEY_ID" -passphrase="$GPG_PASSPHRASE" -batch ankayma
