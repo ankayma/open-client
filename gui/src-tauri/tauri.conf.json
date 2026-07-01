@@ -7,7 +7,7 @@
     "frontendDist": "../../frontend/app-gui/build",
     "devUrl": "http://localhost:5173",
     "beforeDevCommand": "cd ../frontend/app-gui && npm run dev",
-    "beforeBuildCommand": "cd ../frontend/app-gui && npm run build && cd ../../ && cargo build --release --bin agent && cp target/release/agent target/release/agent-aarch64-apple-darwin"
+    "beforeBuildCommand": "cd ../frontend/app-gui && npm run build && cd ../../ && cargo build --release --bin agent --bin ankayma-helper && cp target/release/agent target/release/agent-aarch64-apple-darwin"
   },
   "app": {
     "windows": [
@@ -49,6 +49,12 @@
     "externalBin": [
       "../../target/release/agent"
     ],
+    "macOS": {
+      "files": {
+        "MacOS/ankayma-helper": "../../target/release/ankayma-helper",
+        "Library/LaunchDaemons/com.ankayma.helper.plist": "macos/com.ankayma.helper.plist"
+      }
+    },
     "android": {
       "minSdkVersion": 24,
       "debugApplicationIdSuffix": ".debug"

@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>com.ankayma.helper</string>
+	<!-- BundleProgram (not Program/ProgramArguments) is app-bundle-relative and
+	     only honored for plists installed via SMAppService — this makes the
+	     daemon work regardless of where the .app is actually installed, instead
+	     of hardcoding /Applications/Ankayma.app. [T:launchd.plist(5)-BundleProgram] -->
+	<key>BundleProgram</key>
+	<string>Contents/MacOS/ankayma-helper</string>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>KeepAlive</key>
+	<true/>
+	<!-- Modern SMAppService trust anchor: lets the daemon register without the
+	     legacy SMPrivilegedExecutables/SMAuthorizedClients Info.plist dance.
+	     [A] not yet verified against a real signed .app install cycle. -->
+	<key>AssociatedBundleIdentifiers</key>
+	<array>
+		<string>com.ankayma.app</string>
+	</array>
+</dict>
+</plist>

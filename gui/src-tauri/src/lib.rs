@@ -174,7 +174,11 @@ fn save_session_to_disk(data_dir: &std::path::Path, token: &str) {
 fn load_session_from_disk(data_dir: &std::path::Path) -> Option<String> {
     let tok = std::fs::read_to_string(session_file_path(data_dir)).ok()?;
     let tok = tok.trim().to_string();
-    if tok.is_empty() { None } else { Some(tok) }
+    if tok.is_empty() {
+        None
+    } else {
+        Some(tok)
+    }
 }
 
 fn clear_session_from_disk(data_dir: &std::path::Path) {
@@ -587,9 +591,7 @@ fn device_hostname() -> String {
     #[cfg(unix)]
     {
         let mut buf = [0u8; 256];
-        let ret = unsafe {
-            libc::gethostname(buf.as_mut_ptr() as *mut libc::c_char, buf.len())
-        };
+        let ret = unsafe { libc::gethostname(buf.as_mut_ptr() as *mut libc::c_char, buf.len()) };
         if ret == 0 {
             let end = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
             if let Ok(name) = std::str::from_utf8(&buf[..end]) {
@@ -707,7 +709,10 @@ async fn create_join_link(
 #[tauri::command]
 async fn get_server_enroll_command(state: State<'_, AppState>) -> Result<String, String> {
     let tok = state.token().ok_or("not signed in")?;
-    Ok(format!("agent up --token {tok} --control-plane {}", state.base_url))
+    Ok(format!(
+        "agent up --token {tok} --control-plane {}",
+        state.base_url
+    ))
 }
 
 #[tauri::command]
@@ -833,34 +838,138 @@ fn locate_agent_binary() -> Result<std::path::PathBuf, String> {
     Err("agent daemon binary not found (looked next to the app and in target/)".into())
 }
 
-/// Launch the privileged `agent` daemon (utun + boringtun need root). macOS shows
-/// one admin prompt; the daemon detaches and reuses ~/.ankayma/agent.json.
+/// Root-owned LaunchDaemon IPC (A.1.7 gap 1). Replaces the earlier osascript
+/// `with administrator privileges` quick-fix, which prompted for the admin
+/// password on EVERY connect/disconnect, couldn't be scripted/automated, and
+/// (per docs/hotfix-macos-dataplane-gaps.md) is a pattern Apple rejects from a
+/// sandboxed App Store build. `com.ankayma.helper` installs once via
+/// SMAppService (one admin prompt total, not per action) and stays resident;
+/// the GUI then just talks to its Unix socket. See
+/// `gui/src-tauri/macos/PrivilegedHelper/src/main.rs` for the daemon itself.
+#[cfg(target_os = "macos")]
+mod helper_ipc {
+    use std::io::{BufRead, BufReader, Write};
+    use std::os::unix::net::UnixStream;
+    use std::time::Duration;
+
+    const SOCKET_PATH: &str = "/var/run/com.ankayma.helper.sock";
+    const HELPER_PLIST_NAME: &str = "com.ankayma.helper.plist";
+
+    /// Idempotent via `status()`, NOT via matching `register()`'s error variant —
+    /// live-tested 2026-07-01 and a repeat `SMAppService.register()` call on an
+    /// already-registered daemon surfaced as a bare "unknown error 1", not
+    /// smappservice-rs's mapped `AlreadyRegistered`. [A] that crate's
+    /// ServiceManagementError enum (0.1.3) reuses the legacy `SMErrors.h`
+    /// (SMJobBless) numeric codes, which don't line up with what the modern
+    /// SMAppService API actually returns — checking status first sidesteps the
+    /// mismatch entirely instead of depending on it. macOS 13+ only.
+    pub fn ensure_registered() -> Result<(), String> {
+        use smappservice_rs::{AppService, ServiceStatus, ServiceType};
+        let svc = AppService::new(ServiceType::Daemon {
+            plist_name: HELPER_PLIST_NAME,
+        });
+        match svc.status() {
+            ServiceStatus::Enabled => Ok(()),
+            ServiceStatus::RequiresApproval => {
+                AppService::open_system_settings_login_items();
+                Err(
+                    "helper daemon needs approval — enable Ankayma in System Settings > Login Items, then try again"
+                        .into(),
+                )
+            }
+            ServiceStatus::NotRegistered | ServiceStatus::NotFound => svc
+                .register()
+                .map_err(|e| format!("register helper daemon: {e}")),
+        }
+    }
+
+    #[derive(serde::Serialize)]
+    #[serde(tag = "command", rename_all = "lowercase")]
+    enum Request<'a> {
+        Start {
+            agent_bin: &'a str,
+            token: &'a str,
+            control_plane: &'a str,
+            home: &'a str,
+        },
+        Stop {
+            home: &'a str,
+        },
+    }
+
+    #[derive(serde::Deserialize)]
+    struct Response {
+        ok: bool,
+        error: Option<String>,
+    }
+
+    fn send(req: &Request) -> Result<(), String> {
+        // First launch after ensure_registered() races launchd actually binding
+        // the socket — retry briefly instead of failing the user's first click.
+        let mut last_err = String::new();
+        let mut stream = None;
+        for _ in 0..10 {
+            match UnixStream::connect(SOCKET_PATH) {
+                Ok(s) => {
+                    stream = Some(s);
+                    break;
+                }
+                Err(e) => {
+                    last_err = e.to_string();
+                    std::thread::sleep(Duration::from_millis(200));
+                }
+            }
+        }
+        let mut stream = stream.ok_or_else(|| format!("connect helper: {last_err}"))?;
+        stream.set_read_timeout(Some(Duration::from_secs(5))).ok();
+        let body = serde_json::to_string(req).map_err(|e| e.to_string())?;
+        writeln!(stream, "{body}").map_err(|e| format!("send helper: {e}"))?;
+        let mut line = String::new();
+        BufReader::new(&stream)
+            .read_line(&mut line)
+            .map_err(|e| format!("read helper: {e}"))?;
+        let resp: Response =
+            serde_json::from_str(line.trim()).map_err(|e| format!("bad helper response: {e}"))?;
+        if resp.ok {
+            Ok(())
+        } else {
+            Err(resp
+                .error
+                .unwrap_or_else(|| "helper reported failure".into()))
+        }
+    }
+
+    pub fn start(
+        agent_bin: &str,
+        token: &str,
+        control_plane: &str,
+        home: &str,
+    ) -> Result<(), String> {
+        send(&Request::Start {
+            agent_bin,
+            token,
+            control_plane,
+            home,
+        })
+    }
+
+    pub fn stop(home: &str) -> Result<(), String> {
+        send(&Request::Stop { home })
+    }
+}
+
+/// Launch the privileged `agent` daemon (utun + boringtun need root) via the
+/// `com.ankayma.helper` LaunchDaemon. First call registers the daemon (one
+/// admin prompt); every call after that is password-free.
 #[cfg(target_os = "macos")]
 fn bring_up_dataplane(
     agent_bin: &std::path::Path,
     token: &str,
     control_plane: &str,
 ) -> Result<(), String> {
-    let bin = agent_bin.to_string_lossy();
-    // Session token is hex, control-plane is a URL — no shell metacharacters.
-    // Single-quote paths (an .app bundle path may contain spaces).
-    let sh = format!(
-        "'{bin}' up --token {token} --control-plane '{control_plane}' \
-         >> /tmp/ankayma-agent.log 2>&1 </dev/null &"
-    );
-    let script = format!("do shell script \"{sh}\" with administrator privileges");
-    let out = std::process::Command::new("osascript")
-        .arg("-e")
-        .arg(script)
-        .output()
-        .map_err(|e| format!("launch privileged daemon: {e}"))?;
-    if !out.status.success() {
-        return Err(format!(
-            "data plane launch failed: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
-        ));
-    }
-    Ok(())
+    helper_ipc::ensure_registered()?;
+    let home = std::env::var("HOME").map_err(|_| "HOME not set".to_string())?;
+    helper_ipc::start(&agent_bin.to_string_lossy(), token, control_plane, &home)
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -882,33 +991,23 @@ async fn start_dataplane(state: State<'_, AppState>) -> Result<(), String> {
 
 /// Tear down the data plane (stop the privileged daemon). Killing a root-owned
 /// process needs admin — macOS prompts once. Prefer the recorded PID (clean),
-/// fall back to a name match.
+/// fall back to a name match. Plain sync fn (no `.await` inside) so it's callable
+/// from non-command contexts too: tray disconnect (A.1.7 gap 3) and app-exit
+/// cleanup (A.1.7 gap 2), not just the `stop_dataplane` Tauri command.
+#[cfg(target_os = "macos")]
+fn stop_dataplane_inner() -> Result<(), String> {
+    let home = std::env::var("HOME").unwrap_or_default();
+    helper_ipc::stop(&home)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn stop_dataplane_inner() -> Result<(), String> {
+    Err("data plane is macOS-only".into())
+}
+
 #[tauri::command]
 async fn stop_dataplane() -> Result<(), String> {
-    #[cfg(target_os = "macos")]
-    {
-        let home = std::env::var("HOME").unwrap_or_default();
-        let pid = std::fs::read(format!("{home}/.ankayma/agent-status.json"))
-            .ok()
-            .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
-            .and_then(|v| v.get("pid").and_then(|p| p.as_u64()));
-        let kill = match pid {
-            Some(p) => format!("kill {p} 2>/dev/null || pkill -f 'agent up' || true"),
-            None => "pkill -f 'agent up' || true".to_string(),
-        };
-        let script = format!("do shell script \"{kill}\" with administrator privileges");
-        let out = std::process::Command::new("osascript")
-            .arg("-e")
-            .arg(script)
-            .output()
-            .map_err(|e| format!("stop daemon: {e}"))?;
-        if !out.status.success() {
-            return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
-        }
-        Ok(())
-    }
-    #[cfg(not(target_os = "macos"))]
-    Err("data plane is macOS-only".into())
+    stop_dataplane_inner()
 }
 
 #[derive(serde::Serialize)]
@@ -1395,6 +1494,12 @@ fn handle_tray_menu(app: &AppHandle, event: tauri::menu::MenuEvent) {
                     ConnectionState::Connected { .. }
                 );
                 if connected {
+                    // Stop the daemon first (A.1.7 — a "disconnected" UI must not
+                    // leave a live tunnel behind). Failure doesn't block clearing
+                    // UI state; just warn, matching stop_dataplane's own semantics.
+                    if let Err(e) = stop_dataplane_inner() {
+                        log::warn!("tray disconnect: stop daemon failed: {e}");
+                    }
                     disconnect_inner(&state);
                 } else if let Err(e) = connect_inner(&state).await {
                     log::error!("tray connect failed: {e}");
@@ -1557,8 +1662,21 @@ pub fn run() {
             vpn::vpn_disconnect,
             vpn::vpn_status,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|_app_handle, event| {
+            // App quit must not orphan the privileged daemon (A.1.7 gap 2): the
+            // daemon is launched detached (`&`), so plain process exit leaves it
+            // running until reboot. RunEvent::Exit fires right before the process
+            // dies — still time for one last cleanup call. stop_dataplane_inner is
+            // plain sync (no async runtime needed at this point in shutdown).
+            #[cfg(desktop)]
+            if let tauri::RunEvent::Exit = event {
+                if let Err(e) = stop_dataplane_inner() {
+                    log::warn!("app exit: stop daemon failed: {e}");
+                }
+            }
+        });
 }
 
 #[cfg(test)]

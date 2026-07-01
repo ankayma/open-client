@@ -10,6 +10,7 @@ members = [
     "crates/agent-ios-ptp",  # [T:A.1.9] iOS Packet Tunnel FFI staticlib (extension links it)
     "crates/cli",
     "gui/src-tauri",  # [T:Part D §D.3] Tauri 2 GUI shell — initialized milestone 1.1
+    "gui/src-tauri/macos/PrivilegedHelper",  # [A per docs/hotfix-macos-dataplane-gaps.md Gap 1] root LaunchDaemon; macOS-only body, no-op stub elsewhere so Linux CI still builds it
 ]
 
 [workspace.package]

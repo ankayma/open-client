@@ -46,3 +46,6 @@ libc = "0.2"
 # single-instance is desktop-only (the crate has no mobile target).
 [target.'cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))'.dependencies]
 tauri-plugin-single-instance = { version = "2", features = ["deep-link"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+smappservice-rs = "0.1.3"
