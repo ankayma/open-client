@@ -95,6 +95,21 @@
 		</span>
 	</div>
 
+	<button
+		class="toggle-btn"
+		class:active={$connection.status === 'connected'}
+		onclick={toggleConnection}
+		disabled={toggling || $connection.status === 'connecting'}
+		aria-label={$connection.status === 'connected' ? 'Disconnect' : 'Connect'}
+	>
+		<svg width="32" height="32" viewBox="0 0 24 24" fill="currentColor">
+			<path d="M13 3h-2v10h2V3zm4.83 2.17l-1.42 1.42A6.92 6.92 0 0119 12c0 3.87-3.13 7-7 7A7 7 0 015 12c0-1.68.59-3.22 1.58-4.42L5.17 6.17A8.932 8.932 0 003 12c0 4.97 4.03 9 9 9s9-4.03 9-9c0-2.74-1.23-5.18-3.17-6.83z"/>
+		</svg>
+	</button>
+	{#if $connection.status !== 'connected'}
+		<span class="hint">{$connection.status === 'connecting' ? 'Connecting…' : 'Tap to connect'}</span>
+	{/if}
+
 	<div class="kv">
 		{#if hostname}
 			<div class="kv-row"><span class="k">Device</span><span class="v mono">{hostname}</span></div>
@@ -110,15 +125,6 @@
 			{/if}
 		{/if}
 	</div>
-
-	<button
-		class="btn-danger toggle"
-		class:primary={$connection.status !== 'connected'}
-		onclick={toggleConnection}
-		disabled={toggling || $connection.status === 'connecting'}
-	>
-		{$connection.status === 'connected' ? 'Disconnect' : 'Connect'}
-	</button>
 
 	{#if connectError}
 		<p class="error">{connectError}</p>
@@ -136,9 +142,10 @@
 		background: var(--c-surface);
 		border: 1px solid var(--c-border);
 		border-radius: var(--radius);
-		padding: 16px;
+		padding: 24px 16px;
 		display: flex;
 		flex-direction: column;
+		align-items: center;
 		gap: 12px;
 	}
 	.row.head {
@@ -172,10 +179,41 @@
 	.status.connected {
 		color: var(--c-success);
 	}
+	.toggle-btn {
+		width: 80px;
+		height: 80px;
+		border-radius: 50%;
+		background: var(--c-border);
+		color: var(--c-text-dim);
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		flex-shrink: 0;
+		transition: background 0.2s, color 0.2s, box-shadow 0.2s;
+	}
+	.toggle-btn.active {
+		background: color-mix(in srgb, var(--c-success) 20%, var(--c-surface));
+		color: var(--c-success);
+		box-shadow: 0 0 24px color-mix(in srgb, var(--c-success) 30%, transparent);
+	}
+	.toggle-btn:hover:not(:disabled) {
+		background: var(--c-accent);
+		color: #fff;
+	}
+	.toggle-btn:disabled {
+		opacity: 0.5;
+		cursor: not-allowed;
+	}
+	.hint {
+		font-size: 13px;
+		color: var(--c-text-dim);
+		margin-top: -4px;
+	}
 	.kv {
 		display: flex;
 		flex-direction: column;
 		gap: 6px;
+		width: 100%;
 	}
 	.kv-row {
 		display: flex;
@@ -198,25 +236,17 @@
 	.v.ok {
 		color: var(--c-success);
 	}
-	.toggle {
-		width: 100%;
-		padding: 11px 14px;
-		font-size: 14px;
-		text-align: center;
-	}
-	.toggle.primary {
-		background: var(--c-accent);
-		color: #fff;
-		border-color: var(--c-accent);
-	}
 	.error {
+		width: 100%;
 		font-size: 13px;
 		color: var(--c-danger);
 		background: color-mix(in srgb, var(--c-danger) 10%, transparent);
 		border: 1px solid color-mix(in srgb, var(--c-danger) 30%, transparent);
 		padding: 10px 14px;
 		border-radius: 8px;
+		text-align: center;
 		overflow-wrap: anywhere;
+		box-sizing: border-box;
 	}
 	.tunnel {
 		font-size: 13px;
