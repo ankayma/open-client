@@ -1535,7 +1535,9 @@ fn handle_tray_menu(app: &AppHandle, event: tauri::menu::MenuEvent) {
 
 #[cfg(all(desktop, not(debug_assertions)))]
 async fn check_for_update(app: AppHandle) -> tauri_plugin_updater::Result<()> {
-    use tauri_plugin_process::ProcessExt;
+    // AppHandle::restart() is inherent to tauri core (2.11+) — no
+    // tauri-plugin-process/ProcessExt needed [T — that plugin only exports
+    // `init()`; verified via docs.rs, no ProcessExt at its crate root].
     use tauri_plugin_updater::UpdaterExt;
 
     let Some(update) = app.updater()?.check().await? else {
@@ -1568,9 +1570,8 @@ pub fn run() {
             }))
             // Auto-update (Part D release pipeline §3.3): checks `plugins.updater.endpoints`
             // in tauri.conf.json, verifies the minisign signature, and swaps the binary.
-            // `tauri-plugin-process` provides `app.restart()` to relaunch into it.
-            .plugin(tauri_plugin_updater::Builder::new().build())
-            .plugin(tauri_plugin_process::init());
+            // Relaunch via AppHandle::restart() (inherent to tauri core).
+            .plugin(tauri_plugin_updater::Builder::new().build());
     }
 
     builder

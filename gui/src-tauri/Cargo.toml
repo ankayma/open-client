@@ -43,14 +43,16 @@ open = "5"
 # but must be declared directly for use in this crate. [T:A.1.21]
 libc = "0.2"
 
-# single-instance, updater and process (restart-after-update) are desktop-only
-# (none of these crates has a mobile target). Auto-update ships for macOS first
-# (Part D release pipeline §3.3); Linux distributes via apt/yum instead (§4), so
-# the endpoint/pubkey config in tauri.conf.json is inert there for now.
+# single-instance + updater are desktop-only (neither crate has a mobile
+# target). Auto-update ships for macOS first (Part D release pipeline §3.3);
+# Linux distributes via apt/yum instead (§4), so the endpoint/pubkey config in
+# tauri.conf.json is inert there for now. Restart-after-update uses
+# AppHandle::restart(), inherent to tauri core (2.11+) — no
+# tauri-plugin-process needed [T — verified via docs.rs, that crate only
+# exports `init()`, no ProcessExt].
 [target.'cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))'.dependencies]
 tauri-plugin-single-instance = { version = "2", features = ["deep-link"] }
 tauri-plugin-updater = "2"
-tauri-plugin-process = "2"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 smappservice-rs = "0.1.3"
