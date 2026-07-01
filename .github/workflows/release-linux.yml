@@ -58,14 +58,14 @@ jobs:
 
       - name: Install nfpm + aptly + createrepo_c
         env:
-          NFPM_VERSION: 2.41.1     # [A — pin, verify latest at https://github.com/goreleaser/nfpm/releases]
-          APTLY_VERSION: 1.6.1     # [A — pin, verify latest at https://github.com/aptly-dev/aptly/releases]
+          NFPM_VERSION: 2.41.1     # [T — verified against actual release 2026-07-01 CI run]
+          APTLY_VERSION: 1.6.3     # [T — verified against actual release 2026-07-01 CI run; asset is .zip, not .tar.gz]
         run: |
-          sudo apt-get install -y -qq gnupg createrepo-c rpm
+          sudo apt-get install -y -qq gnupg createrepo-c rpm unzip
           curl -sSfL "https://github.com/goreleaser/nfpm/releases/download/v${NFPM_VERSION}/nfpm_${NFPM_VERSION}_amd64.deb" -o /tmp/nfpm.deb
           sudo apt-get install -y -qq /tmp/nfpm.deb
-          curl -sSfL "https://github.com/aptly-dev/aptly/releases/download/v${APTLY_VERSION}/aptly_${APTLY_VERSION}_linux_amd64.tar.gz" -o /tmp/aptly.tar.gz
-          tar -xzf /tmp/aptly.tar.gz -C /tmp
+          curl -sSfL "https://github.com/aptly-dev/aptly/releases/download/v${APTLY_VERSION}/aptly_${APTLY_VERSION}_linux_amd64.zip" -o /tmp/aptly.zip
+          unzip -q /tmp/aptly.zip -d /tmp
           sudo install -m0755 "/tmp/aptly_${APTLY_VERSION}_linux_amd64/aptly" /usr/local/bin/aptly
 
       - name: Package .deb/.rpm + sign apt/yum repos
