@@ -185,10 +185,25 @@ pub(crate) async fn serve_dataplane(
     // the control plane's table → private-default + revoke come for free.
     let resolver = crate::resolver::Resolver::new();
     crate::resolver::serve(resolver.clone());
+    // [F-3 auto-TLS, Slice 3] For each branded subdomain THIS node owns
+    // (target_node_id == our node_id), keep a CSR on file + a local
+    // TLS-terminating relay running once a cert lands — peer-to-peer, no
+    // vendor edge in the data path (A.1.1).
+    let relay = crate::tls_relay::Relay::new();
     let resolver_zone =
-        match adapters::resolve_subdomains(&ctx.http, &ctx.control_plane, &ctx.service_token).await {
+        match adapters::resolve_subdomains(&ctx.http, &ctx.control_plane, &ctx.service_token).await
+        {
             Ok(t) => {
                 resolver.set(resolve_entries(&t));
+                spawn_owned_subdomain_tasks(
+                    &relay,
+                    &ctx.http,
+                    &ctx.control_plane,
+                    &ctx.service_token,
+                    &t,
+                    &state.node_id,
+                    self_overlay,
+                );
                 crate::resolver::install_scoped_resolver(&t.zone);
                 Some(t.zone)
             }
@@ -203,6 +218,7 @@ pub(crate) async fn serve_dataplane(
         let (peers, index, udp) = (peers.clone(), index.clone(), udp.clone());
         let dev_name = dev_name.clone();
         let resolver = resolver.clone();
+        let relay = relay.clone();
         let (node_id, overlay_s, port) = (
             state.node_id.clone(),
             state.overlay_ip.clone(),
@@ -228,6 +244,15 @@ pub(crate) async fn serve_dataplane(
                 }
                 if let Ok(t) = adapters::resolve_subdomains(&http, &cp, &svc_token).await {
                     resolver.set(resolve_entries(&t));
+                    spawn_owned_subdomain_tasks(
+                        &relay,
+                        &http,
+                        &cp,
+                        &svc_token,
+                        &t,
+                        &node_id,
+                        self_overlay,
+                    );
                 }
                 write_status(&node_id, &overlay_s, port, &peers);
 
@@ -340,6 +365,20 @@ async fn consume_peer_sse(
                 // peer_removed: Phase 1 — full resync on reconnect handles stale peers.
                 // (Removing a WireGuard peer requires the public key, which would need
                 // a lookup; defer to the resync-on-reconnect path for now.)
+                if evt_type == "cert_issued" && !evt_data.is_empty() {
+                    #[derive(serde::Deserialize)]
+                    struct SseCert {
+                        fqdn: String,
+                        cert_pem: String,
+                    }
+                    if let Ok(c) = serde_json::from_str::<SseCert>(&evt_data) {
+                        // Persist immediately; the relay listener itself starts on the
+                        // next resync pass (same belt-and-suspenders gap as peer_removed
+                        // above — acceptable, bounded by the reconnect backoff).
+                        crate::tls_relay::on_cert_issued(&c.fqdn, &c.cert_pem);
+                        println!("SSE: cert issued for {}", c.fqdn);
+                    }
+                }
                 evt_type.clear();
                 evt_data.clear();
             } else if let Some(v) = line.strip_prefix("event: ") {
@@ -360,6 +399,36 @@ fn resolve_entries(t: &agent_core::domain::ResolveTable) -> Vec<(String, IpAddr)
         .iter()
         .filter_map(|n| n.overlay_ip.parse().ok().map(|ip| (n.fqdn.clone(), ip)))
         .collect()
+}
+
+/// For every branded subdomain THIS node owns (`target_node_id == my_node_id`),
+/// drive it toward a running local TLS relay: CSR → cert → listener. Safe to
+/// call every resync cycle — `Relay` dedupes CSR submission per fqdn.
+/// `[T:F-3 auto-TLS, Slice 3]`
+#[allow(clippy::too_many_arguments)]
+fn spawn_owned_subdomain_tasks(
+    relay: &crate::tls_relay::Relay,
+    http: &reqwest::Client,
+    control_plane: &str,
+    service_token: &str,
+    table: &agent_core::domain::ResolveTable,
+    my_node_id: &str,
+    overlay_ip: IpAddr,
+) {
+    for n in table
+        .names
+        .iter()
+        .filter(|n| n.target_node_id == my_node_id)
+    {
+        relay.spawn_owner_task(
+            http.clone(),
+            control_plane.to_string(),
+            service_token.to_string(),
+            n.fqdn.clone(),
+            n.target_port,
+            overlay_ip,
+        );
+    }
 }
 
 struct Config {

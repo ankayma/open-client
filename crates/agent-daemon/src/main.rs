@@ -21,6 +21,7 @@ mod netstack;
 mod resolve;
 mod resolver;
 mod ssh;
+mod tls_relay;
 mod tun;
 mod up;
 

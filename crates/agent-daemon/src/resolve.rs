@@ -141,6 +141,8 @@ mod tests {
                 fqdn: "epos.acme.int.ankayma.com".into(),
                 label: "epos".into(),
                 overlay_ip: "fd00::2".into(),
+                target_node_id: "node-1".into(),
+                target_port: 80,
             }],
         }
     }

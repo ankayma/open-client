@@ -12,6 +12,7 @@ import type {
   CiPolicyDraft,
   PeerBrief,
   Subdomain,
+  SubdomainCert,
   MembersView,
   PolicyView,
   MyAccess,
@@ -181,8 +182,9 @@ export async function listSubdomains(): Promise<Subdomain[]> {
 export async function createSubdomain(
   label: string,
   targetNodeId: string,
+  targetPort: number,
 ): Promise<string> {
-  return invoke<string>("create_subdomain", { label, targetNodeId });
+  return invoke<string>("create_subdomain", { label, targetNodeId, targetPort });
 }
 
 export async function deleteSubdomain(label: string): Promise<void> {
@@ -191,6 +193,11 @@ export async function deleteSubdomain(label: string): Promise<void> {
 
 export async function openSubdomain(fqdn: string): Promise<void> {
   return invoke("open_subdomain", { fqdn });
+}
+
+// Auto-TLS (Slice 3) issuance-state poll — fallback to the cert_issued SSE push.
+export async function getSubdomainCert(fqdn: string): Promise<SubdomainCert> {
+  return invoke<SubdomainCert>("get_subdomain_cert", { fqdn });
 }
 
 // F1 team membership.

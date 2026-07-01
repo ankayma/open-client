@@ -1156,14 +1156,27 @@ async fn list_subdomains(state: State<'_, AppState>) -> Result<Vec<domain::Subdo
 async fn create_subdomain(
     label: String,
     target_node_id: String,
+    target_port: u16,
     state: State<'_, AppState>,
 ) -> Result<String, String> {
     let tok = state.token().ok_or("not signed in")?;
     let req = domain::SubdomainReq {
         label: label.trim().to_string(),
         target_node_id,
+        target_port,
     };
     adapters::register_subdomain(&state.http, &state.base_url, &tok, &req)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn get_subdomain_cert(
+    fqdn: String,
+    state: State<'_, AppState>,
+) -> Result<domain::SubdomainCert, String> {
+    let tok = state.token().ok_or("not signed in")?;
+    adapters::get_subdomain_cert(&state.http, &state.base_url, &tok, &fqdn)
         .await
         .map_err(|e| e.to_string())
 }
@@ -1177,7 +1190,8 @@ async fn delete_subdomain(label: String, state: State<'_, AppState>) -> Result<(
 }
 
 /// Open a branded name in the browser. It resolves only on an enrolled device once
-/// the mesh resolver is active (and TLS once auto-TLS lands) — best-effort today.
+/// the mesh resolver is active; TLS works once the node's own relay has an issued
+/// cert (see `get_subdomain_cert` / `cert_status`) — best-effort until then.
 #[tauri::command]
 async fn open_subdomain(fqdn: String) -> Result<(), String> {
     open_url(&format!("https://{fqdn}"))
@@ -1650,6 +1664,7 @@ pub fn run() {
             create_subdomain,
             delete_subdomain,
             open_subdomain,
+            get_subdomain_cert,
             list_members,
             invite_member,
             join_team,

@@ -17,6 +17,7 @@
 	let showAddForm = $state(false);
 	let newLabel = $state('');
 	let newTarget = $state('');
+	let newPort = $state('80');
 	let adding = $state(false);
 	let error = $state('');
 
@@ -36,11 +37,12 @@
 	}
 
 	async function addSubdomain() {
-		if (!isValidLabel(newLabel) || !newTarget) return;
+		const port = Number(newPort);
+		if (!isValidLabel(newLabel) || !newTarget || !isValidPort(port)) return;
 		adding = true;
 		error = '';
 		try {
-			await createSubdomain(newLabel.trim().toLowerCase(), newTarget);
+			await createSubdomain(newLabel.trim().toLowerCase(), newTarget, port);
 			newLabel = '';
 			showAddForm = false;
 			await load();
@@ -71,6 +73,20 @@
 		const l = s.trim();
 		return /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/.test(l);
 	}
+
+	function isValidPort(p: number) {
+		return Number.isInteger(p) && p > 0 && p <= 65535;
+	}
+
+	// Auto-TLS (Slice 3) issuance state — badge label + tone per cert_status.
+	function certLabel(status?: string) {
+		switch (status) {
+			case 'issued': return 'TLS ready';
+			case 'pending': return 'Issuing TLS…';
+			case 'failed': return 'TLS failed';
+			default: return 'No TLS yet';
+		}
+	}
 </script>
 
 <main>
@@ -87,7 +103,7 @@
 		<div class="body">
 			<p class="desc">
 				Map a private name onto one of your mesh nodes. It resolves <strong>only on enrolled devices</strong> and the traffic goes direct over the overlay — no public port, no vendor on the path.
-				<span class="note-inline">Transparent name resolution + auto-TLS land in an upcoming release; the registry is live.</span>
+				<span class="note-inline">Auto-TLS issues a certificate for your node to terminate locally; not yet live-validated end-to-end.</span>
 			</p>
 
 			{#if loadError}
@@ -110,7 +126,10 @@
 								<div class="entry-meta">
 									<span class="badge">private</span>
 									<span class="arrow">→</span>
-									<span class="target">{nodeName(entry.target_node_id)}</span>
+									<span class="target">{nodeName(entry.target_node_id)}:{entry.target_port ?? 80}</span>
+								</div>
+								<div class="entry-meta">
+									<span class="badge cert-{entry.cert_status ?? 'none'}">{certLabel(entry.cert_status)}</span>
 								</div>
 							</div>
 							<div class="entry-actions">
@@ -157,6 +176,17 @@
 						{/if}
 					</label>
 
+					<label class="field">
+						<span>Local port on that node</span>
+						<input
+							type="number"
+							bind:value={newPort}
+							placeholder="80"
+							min="1"
+							max="65535"
+						/>
+					</label>
+
 					{#if error}
 						<p class="form-error">{error}</p>
 					{/if}
@@ -165,7 +195,7 @@
 						<button
 							class="btn-primary"
 							onclick={addSubdomain}
-							disabled={adding || !isValidLabel(newLabel) || !newTarget}
+							disabled={adding || !isValidLabel(newLabel) || !newTarget || !isValidPort(Number(newPort))}
 						>
 							{#if adding}
 								<span class="spinner"></span> Adding…
@@ -296,6 +326,12 @@
 	.arrow { opacity: 0.5; }
 
 	.target { font-family: 'SF Mono', 'Fira Code', monospace; }
+
+	/* Auto-TLS (Slice 3) issuance-state badge */
+	.badge.cert-issued { background: color-mix(in srgb, #22c55e 15%, transparent); color: #22c55e; }
+	.badge.cert-pending { background: color-mix(in srgb, #eab308 15%, transparent); color: #eab308; }
+	.badge.cert-failed { background: color-mix(in srgb, var(--c-danger) 15%, transparent); color: var(--c-danger); }
+	.badge.cert-none { background: color-mix(in srgb, var(--c-text-dim) 15%, transparent); color: var(--c-text-dim); }
 
 	.entry-actions { display: flex; align-items: center; gap: 4px; flex-shrink: 0; }
 

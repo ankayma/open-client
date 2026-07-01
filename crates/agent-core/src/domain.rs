@@ -215,11 +215,16 @@ pub struct SshSessionReceipt {
 }
 
 /// One private branded name and the overlay address it resolves to. `[T:F-3]`
+/// `target_node_id`/`target_port` ride along so the owning node can recognize
+/// its own entries and relay-terminate TLS locally (Slice 3) — no separate
+/// lookup needed. `[T:F-3 auto-TLS]`
 #[derive(Debug, Clone, Deserialize)]
 pub struct ResolvedName {
     pub fqdn: String,
     pub label: String,
     pub overlay_ip: String,
+    pub target_node_id: String,
+    pub target_port: u16,
 }
 
 /// `GET /api/v1/mesh/resolve` — the tenant's private-default resolve table, served
@@ -240,6 +245,13 @@ pub struct Subdomain {
     pub target_node_id: String,
     #[serde(default)]
     pub created_at: Option<String>,
+    /// The local port on `target_node_id` the node's own TLS relay (Slice 3)
+    /// forwards decrypted traffic to after handshake. `[T:F-3 auto-TLS]`
+    #[serde(default)]
+    pub target_port: Option<u16>,
+    /// `none|pending|issued|failed` — ACME issuance progress. `[T:F-3 auto-TLS]`
+    #[serde(default)]
+    pub cert_status: Option<String>,
 }
 
 /// Create request for a branded subdomain. `POST /api/v1/subdomain` — map `label`
@@ -249,6 +261,27 @@ pub struct Subdomain {
 pub struct SubdomainReq {
     pub label: String,
     pub target_node_id: String,
+    pub target_port: u16,
+}
+
+/// This node's own CSR for its branded subdomain — the private key never
+/// leaves the node; only the CSR (public) travels. `POST
+/// /api/v1/subdomain/{fqdn}/csr`, node-service-token authed. `[T:A.1.1 + F-3 auto-TLS]`
+#[derive(Debug, Clone, Serialize)]
+pub struct SubdomainCsrReq {
+    pub csr_pem: String,
+}
+
+/// ACME issuance state for one subdomain. `GET /api/v1/subdomain/{fqdn}/cert` —
+/// the polling fallback to the `cert_issued` SSE push (belt-and-suspenders,
+/// same lesson as the resolver's stale-table bug). `[T:F-3 auto-TLS]`
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SubdomainCert {
+    pub fqdn: String,
+    pub cert_status: String,
+    pub cert_pem: Option<String>,
+    pub cert_expires_at: Option<String>,
+    pub cert_last_error: Option<String>,
 }
 
 // ── F1 team membership (Slice C) ──────────────────────────────────────────────

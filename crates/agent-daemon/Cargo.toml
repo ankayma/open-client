@@ -35,6 +35,17 @@ serde_json = "1"
 # no_std-capable, owner-reviewable. `[T:smoltcp@0.12]`
 smoltcp = { version = "0.12", default-features = false, features = ["std", "alloc", "medium-ip", "proto-ipv4", "proto-ipv6", "socket-tcp"] }
 
+# [T:F-3 auto-TLS, A.1.1] this node's own TLS keypair + CSR (PKCS#10) for its
+# branded subdomain — the private key is generated and stays HERE; only the CSR
+# (public) ever goes to the control plane. `[T:rcgen@0.14]`
+rcgen = { version = "0.14", default-features = false, features = ["crypto", "pem", "ring"] }
+# TLS termination for the local relay — no HTTP parsing, just a raw byte relay
+# after handshake, so no hyper/axum needed. `[T:tokio-rustls@0.26]`
+tokio-rustls = "0.26"
+# PEM→DER for the issued cert chain — already used elsewhere in this workspace
+# (crypto crate); hand-rolling the base64 codec itself isn't worth it. `[T:base64@0.22]`
+base64 = "0.22"
+
 # [T:A.1.21] utun device on macOS uses raw PF_SYSTEM/UTUN_CONTROL syscalls via
 # libc — no third-party TUN crate, keeps the dependency surface minimal/auditable.
 [target.'cfg(target_os = "macos")'.dependencies]

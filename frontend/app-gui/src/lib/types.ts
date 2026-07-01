@@ -92,6 +92,19 @@ export interface Subdomain {
   label: string;
   target_node_id: string;
   created_at?: string;
+  // Auto-TLS (Slice 3): the local port on target_node_id the node's own TLS
+  // relay forwards decrypted traffic to; issuance progress for that cert.
+  target_port?: number;
+  cert_status?: 'none' | 'pending' | 'issued' | 'failed';
+}
+
+// GET /api/v1/subdomain/{fqdn}/cert — polling fallback for ACME issuance state.
+export interface SubdomainCert {
+  fqdn: string;
+  cert_status: 'none' | 'pending' | 'issued' | 'failed';
+  cert_pem?: string;
+  cert_expires_at?: string;
+  cert_last_error?: string;
 }
 
 // F1 team membership (Slice C).

@@ -4,7 +4,7 @@ use crate::domain::{
     AgentEnrollRequest, AgentEnrollResponse, CiDeployRequest, CiDeployResponse, CiPolicy,
     CiPolicyReq, EnrollRequest, EnrollResponse, MembersView, MyAccess, NodeBrief, PeerInfo,
     PolicyView, Quota, ResolveTable, SessionInfo, SshSessionRequest, SshSessionResponse, Subdomain,
-    SubdomainReq,
+    SubdomainCert, SubdomainCsrReq, SubdomainReq,
 };
 
 /// Errors from the control-plane HTTP client.
@@ -344,6 +344,50 @@ pub async fn register_subdomain(
         .await
         .map(|r| r.fqdn)
         .map_err(|e| ApiError::Decode(e.to_string()))
+}
+
+/// Submit this node's own CSR for a branded subdomain it owns. `POST
+/// /api/v1/subdomain/{fqdn}/csr`, node-service-token authed — the private key
+/// that matches this CSR never leaves the node (A.1.1). `[T:F-3 auto-TLS]`
+pub async fn submit_subdomain_csr(
+    http: &reqwest::Client,
+    base_url: &str,
+    service_token: &str,
+    fqdn: &str,
+    csr_pem: &str,
+) -> Result<(), ApiError> {
+    let req = SubdomainCsrReq {
+        csr_pem: csr_pem.to_string(),
+    };
+    let resp = http
+        .post(url(base_url, &format!("/api/v1/subdomain/{fqdn}/csr")))
+        .bearer_auth(service_token)
+        .json(&req)
+        .send()
+        .await
+        .map_err(|e| ApiError::Transport(e.to_string()))?;
+    if !resp.status().is_success() {
+        return Err(status_error(resp).await);
+    }
+    Ok(())
+}
+
+/// Poll ACME issuance state for a subdomain. `GET /api/v1/subdomain/{fqdn}/cert`
+/// — the fallback to the `cert_issued` SSE push (belt-and-suspenders, same
+/// lesson as the resolver's stale-table bug). `[T:F-3 auto-TLS]`
+pub async fn get_subdomain_cert(
+    http: &reqwest::Client,
+    base_url: &str,
+    token: &str,
+    fqdn: &str,
+) -> Result<SubdomainCert, ApiError> {
+    get_json(
+        http,
+        base_url,
+        &format!("/api/v1/subdomain/{fqdn}/cert"),
+        token,
+    )
+    .await
 }
 
 /// Remove a branded subdomain by label. `DELETE /api/v1/subdomain/{label}`.
