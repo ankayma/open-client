@@ -536,23 +536,66 @@ fn write_status(node_id: &str, overlay_ip: &str, listen_port: u16, peers: &Peers
 
 /// Reuse a persisted identity if present; otherwise generate a keypair, enroll
 /// (advertising our LAN endpoint so peers can reach us), and persist the result.
-/// `--token` is required only for the initial enrollment.
+/// `--token` is required only for the initial enrollment — EXCEPT when the
+/// persisted identity predates node service tokens (migration 015): that
+/// state is otherwise unusable (SSE only ever accepts a node service-token,
+/// never a session, so the daemon would sit in a permanent 401 reconnect
+/// loop) — re-enroll with the SAME keypair (server matches by pubkey,
+/// idempotent — same node_id/overlay_ip come back) to obtain one.
 async fn load_or_enroll(http: &reqwest::Client, cfg: &Config) -> Result<AgentState> {
     if let Ok(bytes) = std::fs::read(&cfg.state_path) {
         if let Ok(state) = serde_json::from_slice::<AgentState>(&bytes) {
-            println!("reusing identity from {}", cfg.state_path);
-            return Ok(state);
+            if state.service_token.is_some() {
+                println!("reusing identity from {}", cfg.state_path);
+                return Ok(state);
+            }
+            match cfg.token.clone() {
+                Some(token) => {
+                    println!(
+                        "reusing identity from {} — missing node service token, \
+                         re-enrolling with the same keypair to fetch one",
+                        cfg.state_path
+                    );
+                    return enroll_and_persist(http, cfg, &token, Some(state)).await;
+                }
+                None => {
+                    eprintln!(
+                        "warning: {} has no node service token (pre-migration 015) — \
+                         SSE peer updates will 401 forever. Pass --token to refresh.",
+                        cfg.state_path
+                    );
+                    return Ok(state);
+                }
+            }
         }
     }
 
     let token = cfg.token.clone().ok_or_else(|| {
         anyhow!("initial enrollment requires --token <session_token> or ANKAYMA_TOKEN")
     })?;
+    enroll_and_persist(http, cfg, &token, None).await
+}
 
-    let kp = WgKeypair::generate();
+/// Enroll (or idempotently re-enroll, if `existing` carries a keypair already
+/// known to the control plane) and persist the resulting identity. Reusing
+/// `existing`'s keypair on re-enroll — rather than generating a new one — is
+/// what makes this idempotent server-side (`find_persistent_node_by_pubkey`).
+async fn enroll_and_persist(
+    http: &reqwest::Client,
+    cfg: &Config,
+    token: &str,
+    existing: Option<AgentState>,
+) -> Result<AgentState> {
+    let kp = match &existing {
+        Some(s) => WgKeypair {
+            private_b64: s.private_b64.clone(),
+            public_b64: s.public_b64.clone(),
+        },
+        None => WgKeypair::generate(),
+    };
     let lan_ip = detect_lan_ip().context("detect this machine's LAN IP")?;
     let endpoint = format!("{lan_ip}:{}", cfg.listen_port);
-    println!("enrolling new node (advertising endpoint {endpoint})…");
+    println!("enrolling node (advertising endpoint {endpoint})…");
 
     let req = EnrollRequest {
         public_key: kp.public_b64.clone(),
@@ -561,7 +604,7 @@ async fn load_or_enroll(http: &reqwest::Client, cfg: &Config) -> Result<AgentSta
         // [T:Part B §B.1.4] server nodes default to AppServer.
         workload_kind: Some("AppServer".to_string()),
     };
-    let resp = adapters::enroll(http, &cfg.control_plane, &token, &req)
+    let resp = adapters::enroll(http, &cfg.control_plane, token, &req)
         .await
         .map_err(|e| anyhow!("enroll: {e}"))?;
 
