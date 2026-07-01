@@ -1,0 +1,19 @@
+[Unit]
+Description=Ankayma mesh agent (data-plane daemon)
+Documentation=https://github.com/ankayma/open-client
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/agent up
+Restart=on-failure
+RestartSec=2
+# The agent brings up a WireGuard-style overlay interface — needs CAP_NET_ADMIN
+# (create/configure /dev/net/tun) rather than full root.
+AmbientCapabilities=CAP_NET_ADMIN
+CapabilityBoundingSet=CAP_NET_ADMIN
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

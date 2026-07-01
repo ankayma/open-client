@@ -1,0 +1,119 @@
+# GitHub Actions — Linux packaging: static musl build (scripts/release-linux.sh,
+# unchanged SSOT) + .deb/.rpm (nfpm) + apt/yum repo signing (GPG).
+#
+# Part D release pipeline §4. Self-contained — does not depend on any other CI
+# system or job; runs the same release-linux.sh a maintainer would run locally,
+# then packages + signs on top. Tool versions below are best-effort pins,
+# unverified against a real run yet [A — verify on first execution, bump if
+# install fails].
+#
+# Required repo secrets (Settings → Secrets and variables → Actions):
+#   COSIGN_PRIVATE_KEY   base64 of cosign.key (`openssl base64 -A -in cosign.key`)
+#   COSIGN_PASSWORD      password for cosign.key
+#   GPG_PRIVATE_KEY       apt/yum repo signing SUBKEY, base64-1-line:
+#                          `gpg --export-secret-subkeys <SUBKEY_ID>! | base64`
+#                          Master key never goes into CI — only the subkey.
+#   GPG_PASSPHRASE        passphrase for that subkey
+#   GPG_KEY_ID            primary key id/fingerprint (not secret — GPG resolves
+#                          the signing-capable subkey automatically from it)
+#
+# `[A]` publish step: apt.ankayma.com / yum.ankayma.com (R2/Pages bucket, DNS)
+# are not provisioned yet (§4.5 open item) — this job keeps `public/`+`yum/` as
+# a GH Actions artifact only. Replace the placeholder once they exist.
+name: release-linux
+
+on:
+  push:
+    tags: ["v*.*.*"]
+  workflow_dispatch: {}
+
+jobs:
+  build-package-sign:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust (pinned via rust-toolchain.toml) + musl target
+        run: |
+          rustup show
+          rustup target add x86_64-unknown-linux-musl
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq musl-tools
+
+      - name: Install cosign
+        env:
+          COSIGN_VERSION: v2.4.1   # [A — pin, verify latest at https://github.com/sigstore/cosign/releases]
+        run: |
+          curl -sSfL "https://github.com/sigstore/cosign/releases/download/${COSIGN_VERSION}/cosign-linux-amd64" -o /usr/local/bin/cosign
+          chmod +x /usr/local/bin/cosign
+
+      - name: Build + Cosign-sign static musl binaries (scripts/release-linux.sh)
+        env:
+          COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}
+        run: |
+          echo "${{ secrets.COSIGN_PRIVATE_KEY }}" | base64 -d > cosign.key
+          bash scripts/release-linux.sh
+          rm -f cosign.key
+
+      - name: Install nfpm + aptly + createrepo_c
+        env:
+          NFPM_VERSION: 2.41.1     # [A — pin, verify latest at https://github.com/goreleaser/nfpm/releases]
+          APTLY_VERSION: 1.6.1     # [A — pin, verify latest at https://github.com/aptly-dev/aptly/releases]
+        run: |
+          sudo apt-get install -y -qq gnupg createrepo-c rpm
+          curl -sSfL "https://github.com/goreleaser/nfpm/releases/download/v${NFPM_VERSION}/nfpm_${NFPM_VERSION}_amd64.deb" -o /tmp/nfpm.deb
+          sudo apt-get install -y -qq /tmp/nfpm.deb
+          curl -sSfL "https://github.com/aptly-dev/aptly/releases/download/v${APTLY_VERSION}/aptly_${APTLY_VERSION}_linux_amd64.tar.gz" -o /tmp/aptly.tar.gz
+          tar -xzf /tmp/aptly.tar.gz -C /tmp
+          sudo install -m0755 "/tmp/aptly_${APTLY_VERSION}_linux_amd64/aptly" /usr/local/bin/aptly
+
+      - name: Package .deb/.rpm + sign apt/yum repos
+        env:
+          GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
+          GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
+          GPG_KEY_ID: ${{ secrets.GPG_KEY_ID }}
+        run: |
+          set -euo pipefail
+          VERSION="$(sed -n 's/^version *= *"\(.*\)"/\1/p' Cargo.toml | head -1)"
+
+          # Subkey-only import (master never touches CI — see header).
+          echo "$GPG_PRIVATE_KEY" | base64 -d | gpg --batch --pinentry-mode loopback --passphrase "$GPG_PASSPHRASE" --import
+          gpg --armor --export "$GPG_KEY_ID" > "dist/$VERSION/ankayma.gpg.asc"
+
+          # ── nfpm: one config → .deb + .rpm ──────────────────────────────
+          VERSION="$VERSION" nfpm package -f packaging/nfpm.yaml -p deb -t "dist/${VERSION}/ankayma_${VERSION}_amd64.deb"
+          VERSION="$VERSION" nfpm package -f packaging/nfpm.yaml -p rpm -t "dist/${VERSION}/ankayma-${VERSION}.x86_64.rpm"
+
+          # ── APT repo (aptly, GPG inline-signed InRelease) ───────────────
+          export GNUPGHOME="$RUNNER_TEMP/.gnupg"
+          aptly repo create -distribution=stable -component=main ankayma
+          aptly repo add ankayma "dist/${VERSION}/ankayma_${VERSION}_amd64.deb"
+          aptly publish repo -gpg-key="$GPG_KEY_ID" -passphrase="$GPG_PASSPHRASE" -batch ankayma
+          mkdir -p public
+          cp -r "$HOME/.aptly/public/." public/
+          cp "dist/$VERSION/ankayma.gpg.asc" public/ankayma.gpg
+
+          # ── YUM/DNF repo (rpm --addsign + createrepo_c + detached repomd sig) ─
+          rpm --define "_gpg_name $GPG_KEY_ID" --define "_gpg_passphrase $GPG_PASSPHRASE" --addsign "dist/${VERSION}/ankayma-${VERSION}.x86_64.rpm"
+          mkdir -p yum
+          cp "dist/${VERSION}/ankayma-${VERSION}.x86_64.rpm" yum/
+          createrepo_c yum/
+          gpg --batch --pinentry-mode loopback --passphrase "$GPG_PASSPHRASE" --detach-sign --armor yum/repodata/repomd.xml
+          cp "dist/$VERSION/ankayma.gpg.asc" "yum/RPM-GPG-KEY-ankayma"
+
+      - name: Remove imported GPG key material
+        if: always()
+        run: rm -rf "$RUNNER_TEMP/.gnupg"
+
+      # TODO[A]: replace with the real upload once apt.ankayma.com/yum.ankayma.com
+      # (R2/Pages bucket, DNS — §4.5 open item) are provisioned.
+      - name: Upload build artifacts (interim — no publish target provisioned yet)
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-release
+          path: |
+            dist/
+            public/
+            yum/
+          retention-days: 30

@@ -1531,6 +1531,23 @@ fn handle_tray_menu(app: &AppHandle, event: tauri::menu::MenuEvent) {
     }
 }
 
+// --- Auto-update (desktop, release builds — see run()) ---
+
+#[cfg(all(desktop, not(debug_assertions)))]
+async fn check_for_update(app: AppHandle) -> tauri_plugin_updater::Result<()> {
+    use tauri_plugin_process::ProcessExt;
+    use tauri_plugin_updater::UpdaterExt;
+
+    let Some(update) = app.updater()?.check().await? else {
+        return Ok(());
+    };
+    log::info!("update available: {}", update.version);
+    update
+        .download_and_install(|_chunk_len, _total_len| {}, || {})
+        .await?;
+    app.restart();
+}
+
 // --- App entry point ---
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -1545,9 +1562,15 @@ pub fn run() {
     // delivers it to the running instance directly.
     #[cfg(desktop)]
     {
-        builder = builder.plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
-            show_main_window(app);
-        }));
+        builder = builder
+            .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+                show_main_window(app);
+            }))
+            // Auto-update (Part D release pipeline §3.3): checks `plugins.updater.endpoints`
+            // in tauri.conf.json, verifies the minisign signature, and swaps the binary.
+            // `tauri-plugin-process` provides `app.restart()` to relaunch into it.
+            .plugin(tauri_plugin_updater::Builder::new().build())
+            .plugin(tauri_plugin_process::init());
     }
 
     builder
@@ -1620,6 +1643,18 @@ pub fn run() {
                         .level(log::LevelFilter::Info)
                         .build(),
                 )?;
+            }
+
+            // Silent check-download-install-restart, release builds only — dev
+            // runs aren't signed so `check()` would just fail noisily every launch.
+            #[cfg(all(desktop, not(debug_assertions)))]
+            {
+                let handle = app.handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    if let Err(e) = check_for_update(handle).await {
+                        log::warn!("update check failed: {e}");
+                    }
+                });
             }
             Ok(())
         })

@@ -1,0 +1,35 @@
+# nfpm.yaml — one config, builds both .deb and .rpm for the Linux daemon/CLI.
+#
+# Inputs are the already-built static musl binaries from scripts/release-linux.sh
+# (dist/${VERSION}/{mesh,agent}-linux-amd64) — this step only PACKAGES them, it
+# does not rebuild. Run from the repo root:
+#   VERSION=$(sed -n 's/^version *= *"\(.*\)"/\1/p' Cargo.toml | head -1) \
+#     nfpm package -f packaging/nfpm.yaml -p deb --target dist/
+#   VERSION=$(sed -n 's/^version *= *"\(.*\)"/\1/p' Cargo.toml | head -1) \
+#     nfpm package -f packaging/nfpm.yaml -p rpm --target dist/
+#
+# See: https://nfpm.goreleaser.com/configuration/
+name: ankayma
+arch: amd64
+platform: linux
+version: ${VERSION}
+maintainer: Ankayma <ops@ankayma.com>
+description: Ankayma mesh client (mesh CLI + agent daemon)
+homepage: https://ankayma.com
+license: Apache-2.0
+contents:
+  - src: dist/${VERSION}/mesh-linux-amd64
+    dst: /usr/bin/mesh
+    file_info:
+      mode: 0755
+  - src: dist/${VERSION}/agent-linux-amd64
+    dst: /usr/bin/agent
+    file_info:
+      mode: 0755
+  - src: packaging/ankayma-agent.service
+    dst: /lib/systemd/system/ankayma-agent.service
+    file_info:
+      mode: 0644
+scripts:
+  postinstall: packaging/postinstall.sh
+  preremove: packaging/preremove.sh
