@@ -2,11 +2,15 @@
 #
 # Inputs are the already-built static musl binaries from scripts/release-linux.sh
 # (dist/${VERSION}/{mesh,agent}-linux-amd64) — this step only PACKAGES them, it
-# does not rebuild. Run from the repo root:
-#   VERSION=$(sed -n 's/^version *= *"\(.*\)"/\1/p' Cargo.toml | head -1) \
-#     nfpm package -f packaging/nfpm.yaml -p deb --target dist/
-#   VERSION=$(sed -n 's/^version *= *"\(.*\)"/\1/p' Cargo.toml | head -1) \
-#     nfpm package -f packaging/nfpm.yaml -p rpm --target dist/
+# does not rebuild.
+#
+# nfpm does NOT expand ${VERSION} in contents[].src on its own [T — observed
+# 2026-07-02 CI run: "glob failed: dist/${VERSION}/... no matching files"] —
+# substitute it into a resolved copy yourself first. Run from the repo root:
+#   VERSION=$(sed -n 's/^version *= *"\(.*\)"/\1/p' Cargo.toml | head -1)
+#   sed "s/\${VERSION}/$VERSION/g" packaging/nfpm.yaml > /tmp/nfpm.yaml
+#   nfpm package -f /tmp/nfpm.yaml -p deb -t "dist/${VERSION}/ankayma_${VERSION}_amd64.deb"
+#   nfpm package -f /tmp/nfpm.yaml -p rpm -t "dist/${VERSION}/ankayma-${VERSION}.x86_64.rpm"
 #
 # See: https://nfpm.goreleaser.com/configuration/
 name: ankayma

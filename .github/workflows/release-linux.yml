@@ -82,8 +82,12 @@ jobs:
           gpg --armor --export "$GPG_KEY_ID" > "dist/$VERSION/ankayma.gpg.asc"
 
           # ── nfpm: one config → .deb + .rpm ──────────────────────────────
-          VERSION="$VERSION" nfpm package -f packaging/nfpm.yaml -p deb -t "dist/${VERSION}/ankayma_${VERSION}_amd64.deb"
-          VERSION="$VERSION" nfpm package -f packaging/nfpm.yaml -p rpm -t "dist/${VERSION}/ankayma-${VERSION}.x86_64.rpm"
+          # nfpm does NOT expand ${VERSION} in contents[].src on its own
+          # [T — observed 2026-07-02 CI run: "glob failed: dist/${VERSION}/..."]
+          # — substitute it ourselves into a resolved copy first.
+          sed "s/\${VERSION}/$VERSION/g" packaging/nfpm.yaml > /tmp/nfpm.yaml
+          nfpm package -f /tmp/nfpm.yaml -p deb -t "dist/${VERSION}/ankayma_${VERSION}_amd64.deb"
+          nfpm package -f /tmp/nfpm.yaml -p rpm -t "dist/${VERSION}/ankayma-${VERSION}.x86_64.rpm"
 
           # ── APT repo (aptly, GPG inline-signed InRelease) ───────────────
           export GNUPGHOME="$RUNNER_TEMP/.gnupg"
