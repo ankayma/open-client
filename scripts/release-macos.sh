@@ -32,7 +32,10 @@ fi
 rustup target add x86_64-apple-darwin >/dev/null 2>&1 || true
 
 echo "→ Building signed + notarized universal DMG (this compiles both arches)…"
-cargo tauri build --target universal-apple-darwin --bundles dmg
+# `app` (alongside `dmg`) is required for Tauri to emit updater artifacts
+# (.app.tar.gz + .sig) — `--bundles dmg` alone skips them entirely ("no
+# updater-enabled targets were built") [T — observed 2026-07-02 CI run].
+cargo tauri build --target universal-apple-darwin --bundles dmg,app
 
 DMG=$(find ../../target/universal-apple-darwin/release/bundle/dmg -iname "*.dmg" 2>/dev/null | head -1)
 if [[ -z "$DMG" ]]; then
