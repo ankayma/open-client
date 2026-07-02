@@ -1117,7 +1117,13 @@ async fn start_dataplane(state: State<'_, AppState>) -> Result<(), String> {
         return Err("not connected — enroll first".into());
     }
     let bin = locate_agent_binary()?;
-    bring_up_dataplane(&bin, &tok, &state.base_url)
+    // bring_up_dataplane blocks (UnixStream connect retry loop with
+    // thread::sleep); run it off the async runtime so it doesn't stall the
+    // Tauri executor (audit 2026-07-02).
+    let base_url = state.base_url.clone();
+    tauri::async_runtime::spawn_blocking(move || bring_up_dataplane(&bin, &tok, &base_url))
+        .await
+        .map_err(|e| format!("dataplane task panicked: {e}"))?
 }
 
 /// Tear down the data plane (stop the privileged daemon). Killing a root-owned
