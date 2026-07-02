@@ -96,8 +96,10 @@ mod tests {
         }
     }
 
-    // A real 44-char base64 X25519 public key (from the live control plane).
-    const REAL_PUBKEY: &str = "n1g1vyzFSN1KXHKHi6sw+L+fe/yxwXJIATSA3w24lB8=";
+    // Synthetic 44-char base64 key that decodes to 32 bytes — enough for the
+    // dialable filter (which only checks the key parses to 32 bytes, see
+    // `to_dialable`). Deliberately an obvious fake (0xAB×32), never a real node.
+    const FAKE_PUBKEY: &str = "q6urq6urq6urq6urq6urq6urq6urq6urq6urq6urq6s=";
 
     #[test]
     fn packet_dst_reads_ipv4_destination_octets() {
@@ -137,9 +139,9 @@ mod tests {
         let me = IpAddr::V4(Ipv4Addr::new(100, 64, 0, 3));
         let peers = vec![
             // self — dropped by overlay match
-            peer("self", REAL_PUBKEY, "100.64.0.3", Some("192.168.1.5:51820")),
+            peer("self", FAKE_PUBKEY, "100.64.0.3", Some("192.168.1.5:51820")),
             // no endpoint — kept as a responder (endpoint = None), e.g. a CI runner.
-            peer("responder", REAL_PUBKEY, "100.64.0.2", None),
+            peer("responder", FAKE_PUBKEY, "100.64.0.2", None),
             // garbage pubkey (not 32 bytes) — boringtun can't use it → dropped.
             peer(
                 "garbage",
@@ -148,7 +150,7 @@ mod tests {
                 Some("192.168.1.6:51820"),
             ),
             // good dialable peer
-            peer("good", REAL_PUBKEY, "100.64.0.9", Some("192.168.1.9:51820")),
+            peer("good", FAKE_PUBKEY, "100.64.0.9", Some("192.168.1.9:51820")),
         ];
         let out = dialable_peers(&peers, me);
         assert_eq!(
@@ -172,13 +174,13 @@ mod tests {
         let peers = vec![
             peer(
                 "self",
-                REAL_PUBKEY,
+                FAKE_PUBKEY,
                 "fd00:a11a:2a2a:5::a",
                 Some("192.168.1.5:51820"),
             ),
             peer(
                 "good6",
-                REAL_PUBKEY,
+                FAKE_PUBKEY,
                 "fd00:a11a:2a2a:9::b",
                 Some("[2001:db8::9]:51820"),
             ),
