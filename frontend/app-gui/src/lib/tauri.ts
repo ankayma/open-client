@@ -152,16 +152,24 @@ export async function listNodes(): Promise<PeerBrief[]> {
   return invoke<PeerBrief[]>("list_nodes");
 }
 
-// A step-up proof (OTP) carried on a sensitive action in a multi-user tenant.
+// A step-up proof carried on a sensitive action in a multi-user tenant — the
+// result of solving a challenge via `verifyStepUp`. [T:part-d-e7-stepup.md §H.5]
 export interface StepUpProof {
-  challengeId: string;
-  code: string;
+  proofToken: string;
 }
 
-// Ask the control plane to email an OTP for `purpose` ('enroll_node' | 'revoke_node');
-// returns the challenge_id to pass back at the action. [Part D §Authority model]
+// Ask the control plane to email an OTP for `purpose` (e.g. 'enroll_node',
+// 'revoke_node', 'invite_member', 'remove_member'); returns the challenge_id to
+// pass to `verifyStepUp`. [Part D §Authority model]
 export async function requestStepUp(purpose: string): Promise<string> {
   return invoke<string>("request_step_up", { purpose });
+}
+
+// Exchange a solved OTP challenge for a short-lived, purpose-scoped proof_token
+// — the generalized step-up interface every gated action retries with.
+// [T:part-d-e7-stepup.md §H.5]
+export async function verifyStepUp(purpose: string, challengeId: string, code: string): Promise<string> {
+  return invoke<string>("verify_step_up", { purpose, challengeId, code });
 }
 
 // Remove one of the tenant's own mesh nodes (retire a device). Tenant-scoped. In a
@@ -169,8 +177,7 @@ export async function requestStepUp(purpose: string): Promise<string> {
 export async function deleteNode(nodeId: string, proof?: StepUpProof): Promise<void> {
   return invoke("delete_node", {
     nodeId,
-    challengeId: proof?.challengeId,
-    code: proof?.code,
+    proofToken: proof?.proofToken,
   });
 }
 
@@ -205,9 +212,14 @@ export async function listMembers(): Promise<MembersView> {
   return invoke<MembersView>("list_members");
 }
 // Invite a member BY EMAIL — the join link is delivered to that email (Part D §A).
-// `ttlSeconds` (optional) overrides the server's default member-invite TTL.
-export async function inviteMember(email: string, ttlSeconds?: number): Promise<string> {
-  return invoke<string>("invite_member", { email, ttlSeconds });
+// `ttlSeconds` (optional) overrides the server's default member-invite TTL. Admin
+// action, gated behind a step-up — pass `proof` on retry (M-1).
+export async function inviteMember(
+  email: string,
+  ttlSeconds?: number,
+  proof?: StepUpProof,
+): Promise<string> {
+  return invoke<string>("invite_member", { email, ttlSeconds, proofToken: proof?.proofToken });
 }
 export async function joinTeam(invite: string): Promise<void> {
   return invoke("join_team", { invite });
@@ -224,8 +236,9 @@ export async function joinTeamLink(token: string): Promise<AuthState> {
 export async function takePendingJoinTeam(): Promise<string | null> {
   return invoke<string | null>("take_pending_join_team");
 }
-export async function removeMember(userId: string): Promise<void> {
-  return invoke("remove_member", { userId });
+// Offboard a member (admin). Gated behind a step-up — pass `proof` on retry (M-4).
+export async function removeMember(userId: string, proof?: StepUpProof): Promise<void> {
+  return invoke("remove_member", { userId, proofToken: proof?.proofToken });
 }
 
 // Mint a single-use `ankayma://join?token=…` node-enrollment link. `ttlSeconds`
@@ -234,8 +247,7 @@ export async function removeMember(userId: string): Promise<void> {
 export async function createJoinLink(ttlSeconds?: number, proof?: StepUpProof): Promise<string> {
   return invoke<string>("create_join_link", {
     ttlSeconds,
-    challengeId: proof?.challengeId,
-    code: proof?.code,
+    proofToken: proof?.proofToken,
   });
 }
 

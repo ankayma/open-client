@@ -19,11 +19,14 @@ pub enum ApiError {
     Server { status: u16, message: String },
     /// Response body could not be decoded.
     Decode(String),
-    /// Server demands a step-up (fresh OTP) before this management action — a
-    /// multi-user tenant minting an invite or revoking a node. The GUI catches this
-    /// to drive the OTP flow, then retries with a challenge_id + code.
-    /// [T:Part D invite-flow §Authority model]
-    StepUpRequired { purpose: String },
+    /// Server demands a step-up proof before this management action — a
+    /// multi-user tenant minting an invite, revoking a node, or an admin
+    /// inviting/offboarding a member. The GUI catches this to drive the step-up
+    /// flow (`verify_step_up` for a solved OTP/TOTP → `proof_token`), then
+    /// retries with the proof. `required_aal` says how strong the proof must be
+    /// (2 = email-OTP/TOTP, 3 = WebAuthn/YubiKey — A.1.10 no-soft-fallback).
+    /// [T:part-d-e7-stepup.md §H.5]
+    StepUpRequired { purpose: String, required_aal: i32 },
 }
 
 impl std::fmt::Display for ApiError {
@@ -33,8 +36,11 @@ impl std::fmt::Display for ApiError {
             ApiError::Status(s) => write!(f, "control-plane returned HTTP {s}"),
             ApiError::Server { message, .. } => write!(f, "{message}"),
             ApiError::Decode(e) => write!(f, "control-plane decode error: {e}"),
-            // Sentinel the GUI matches on to launch the OTP step-up flow.
-            ApiError::StepUpRequired { purpose } => write!(f, "STEP_UP_REQUIRED:{purpose}"),
+            // Sentinel the GUI matches on to launch the step-up flow.
+            ApiError::StepUpRequired {
+                purpose,
+                required_aal,
+            } => write!(f, "STEP_UP_REQUIRED:{purpose}:{required_aal}"),
         }
     }
 }
@@ -195,18 +201,14 @@ pub async fn issue_join_token(
     base_url: &str,
     session_token: &str,
     ttl_seconds: Option<u64>,
-    challenge_id: Option<&str>,
-    code: Option<&str>,
+    proof_token: Option<&str>,
 ) -> Result<String, ApiError> {
     let mut qs: Vec<String> = Vec::new();
     if let Some(ttl) = ttl_seconds {
         qs.push(format!("ttl_seconds={ttl}"));
     }
-    if let Some(c) = challenge_id {
-        qs.push(format!("challenge_id={c}"));
-    }
-    if let Some(k) = code {
-        qs.push(format!("code={k}"));
+    if let Some(p) = proof_token {
+        qs.push(format!("proof_token={p}"));
     }
     let base = url(base_url, "/api/v1/enrollment/token");
     let endpoint = if qs.is_empty() {
@@ -421,14 +423,15 @@ pub async fn list_members(
 }
 
 /// Mint a member invite (admin). `ttl_seconds` optionally overrides the server's
-/// default member-invite TTL (clamped server-side). Returns the
-/// `ankayma://join-team?…` URL.
+/// default member-invite TTL (clamped server-side). Gated behind a step-up proof
+/// (M-1 — part-d-e7-stepup.md H.2#6). Returns the `ankayma://join-team?…` URL.
 pub async fn invite_member(
     http: &reqwest::Client,
     base_url: &str,
     session_token: &str,
     email: &str,
     ttl_seconds: Option<u64>,
+    proof_token: Option<&str>,
 ) -> Result<String, ApiError> {
     #[derive(serde::Deserialize)]
     struct Resp {
@@ -437,7 +440,11 @@ pub async fn invite_member(
     let resp = http
         .post(url(base_url, "/api/v1/members/invite"))
         .bearer_auth(session_token)
-        .json(&serde_json::json!({ "email": email, "ttl_seconds": ttl_seconds }))
+        .json(&serde_json::json!({
+            "email": email,
+            "ttl_seconds": ttl_seconds,
+            "proof_token": proof_token,
+        }))
         .send()
         .await
         .map_err(|e| ApiError::Transport(e.to_string()))?;
@@ -498,15 +505,22 @@ pub async fn join_team(
     Ok(())
 }
 
-/// Remove a member (admin). `DELETE /api/v1/members/{user_id}`.
+/// Remove a member (admin). `DELETE /api/v1/members/{user_id}`. Gated behind a
+/// step-up proof (M-4 — part-d-e7-stepup.md H.2#7).
 pub async fn remove_member(
     http: &reqwest::Client,
     base_url: &str,
     session_token: &str,
     user_id: &str,
+    proof_token: Option<&str>,
 ) -> Result<(), ApiError> {
+    let base = url(base_url, &format!("/api/v1/members/{user_id}"));
+    let endpoint = match proof_token {
+        Some(p) => format!("{base}?proof_token={p}"),
+        None => base,
+    };
     let resp = http
-        .delete(url(base_url, &format!("/api/v1/members/{user_id}")))
+        .delete(endpoint)
         .bearer_auth(session_token)
         .send()
         .await
@@ -680,12 +694,16 @@ async fn status_error(resp: reqwest::Response) -> ApiError {
         #[serde(default)]
         step_up_required: bool,
         purpose: Option<String>,
+        required_aal: Option<i32>,
     }
     match resp.json::<ErrBody>().await {
         // Step-up demand (Part D §Authority model) takes priority — distinct variant
-        // so the GUI can drive the OTP flow rather than show a raw error.
+        // so the GUI can drive the step-up flow rather than show a raw error.
+        // `required_aal` is absent only on the legacy inline shape (a malformed
+        // /stepup/verify call) — 2 is the correct floor for anything gated at all.
         Ok(b) if b.step_up_required => ApiError::StepUpRequired {
             purpose: b.purpose.unwrap_or_default(),
+            required_aal: b.required_aal.unwrap_or(2),
         },
         Ok(ErrBody { error: Some(m), .. }) if !m.trim().is_empty() => ApiError::Server {
             status: code,
@@ -806,22 +824,18 @@ pub async fn delete_ci_policy(
 
 /// Remove one of the tenant's own mesh nodes (retire a device).
 /// `DELETE /api/v1/nodes/{id}` (session-authed, tenant-scoped). In a multi-user
-/// tenant the server gates this behind a step-up; pass `challenge_id` + `code` from
-/// the OTP flow (None for a solo tenant). `[T:A.1.6 + Part D §Authority model]`
+/// tenant the server gates this behind a step-up; pass a `proof_token` from
+/// `verify_step_up` (None for a solo tenant). `[T:A.1.6 + Part D §Authority model]`
 pub async fn delete_node(
     http: &reqwest::Client,
     base_url: &str,
     session_token: &str,
     node_id: &str,
-    challenge_id: Option<&str>,
-    code: Option<&str>,
+    proof_token: Option<&str>,
 ) -> Result<(), ApiError> {
     let mut qs: Vec<String> = Vec::new();
-    if let Some(c) = challenge_id {
-        qs.push(format!("challenge_id={c}"));
-    }
-    if let Some(k) = code {
-        qs.push(format!("code={k}"));
+    if let Some(p) = proof_token {
+        qs.push(format!("proof_token={p}"));
     }
     let base = url(base_url, &format!("/api/v1/nodes/{node_id}"));
     let endpoint = if qs.is_empty() {
@@ -864,6 +878,42 @@ pub async fn request_step_up(
     resp.json::<Resp>()
         .await
         .map(|r| r.challenge_id)
+        .map_err(|e| ApiError::Decode(e.to_string()))
+}
+
+/// `POST /api/v1/stepup/verify` (session-authed) — exchange a solved OTP
+/// challenge for a short-lived, purpose-scoped `proof_token`. This is the
+/// generalized interface every gated action now takes a proof from, instead of
+/// re-verifying `challenge_id`/`code` inline. [T:part-d-e7-stepup.md §H.5]
+pub async fn verify_step_up(
+    http: &reqwest::Client,
+    base_url: &str,
+    session_token: &str,
+    purpose: &str,
+    challenge_id: &str,
+    code: &str,
+) -> Result<String, ApiError> {
+    #[derive(serde::Deserialize)]
+    struct Resp {
+        proof_token: String,
+    }
+    let resp = http
+        .post(url(base_url, "/api/v1/stepup/verify"))
+        .bearer_auth(session_token)
+        .json(&serde_json::json!({
+            "purpose": purpose,
+            "challenge_id": challenge_id,
+            "code": code,
+        }))
+        .send()
+        .await
+        .map_err(|e| ApiError::Transport(e.to_string()))?;
+    if !resp.status().is_success() {
+        return Err(status_error(resp).await);
+    }
+    resp.json::<Resp>()
+        .await
+        .map(|r| r.proof_token)
         .map_err(|e| ApiError::Decode(e.to_string()))
 }
 

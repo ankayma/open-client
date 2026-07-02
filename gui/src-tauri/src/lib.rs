@@ -677,22 +677,20 @@ async fn get_path_proof(state: State<'_, AppState>) -> Result<PathProof, String>
 async fn create_join_link(
     state: State<'_, AppState>,
     ttl_seconds: Option<u64>,
-    challenge_id: Option<String>,
-    code: Option<String>,
+    proof_token: Option<String>,
 ) -> Result<String, String> {
     // Mint a single-use `ankayma://join?token=…` link via the control plane so a
     // second device enrolls into this tenant (A.1.10/A.1.22). `ttl_seconds` lets the
     // admin pick the expiry; the control plane clamps it. In a multi-user tenant the
     // server gates this behind a step-up — on the first call (no proof) it returns
-    // STEP_UP_REQUIRED; the GUI runs the OTP flow and retries with challenge_id+code.
+    // STEP_UP_REQUIRED; the GUI runs the step-up flow and retries with a proof_token.
     let tok = state.token().ok_or("not signed in")?;
     adapters::issue_join_token(
         &state.http,
         &state.base_url,
         &tok,
         ttl_seconds,
-        challenge_id.as_deref(),
-        code.as_deref(),
+        proof_token.as_deref(),
     )
     .await
     .map_err(|e| e.to_string())
@@ -718,11 +716,33 @@ async fn get_server_enroll_command(state: State<'_, AppState>) -> Result<String,
 #[tauri::command]
 async fn request_step_up(state: State<'_, AppState>, purpose: String) -> Result<String, String> {
     // Ask the control plane to email an OTP for a sensitive action; returns the
-    // challenge_id to pass back at the action. [T:Part D §Authority model]
+    // challenge_id to pass back at `verify_step_up`. [T:Part D §Authority model]
     let tok = state.token().ok_or("not signed in")?;
     adapters::request_step_up(&state.http, &state.base_url, &tok, &purpose)
         .await
         .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn verify_step_up(
+    state: State<'_, AppState>,
+    purpose: String,
+    challenge_id: String,
+    code: String,
+) -> Result<String, String> {
+    // Exchange the solved OTP for a proof_token, then retry the original action
+    // with it. [T:part-d-e7-stepup.md §H.5]
+    let tok = state.token().ok_or("not signed in")?;
+    adapters::verify_step_up(
+        &state.http,
+        &state.base_url,
+        &tok,
+        &purpose,
+        &challenge_id,
+        &code,
+    )
+    .await
+    .map_err(|e| e.to_string())
 }
 
 /// Recipient side of the node-invite (`ankayma://join?token=…`): enroll THIS device
@@ -1212,6 +1232,7 @@ async fn invite_member(
     state: State<'_, AppState>,
     email: String,
     ttl_seconds: Option<u64>,
+    proof_token: Option<String>,
 ) -> Result<String, String> {
     let tok = state.token().ok_or("not signed in")?;
     adapters::invite_member(
@@ -1220,6 +1241,7 @@ async fn invite_member(
         &tok,
         email.trim(),
         ttl_seconds,
+        proof_token.as_deref(),
     )
     .await
     .map_err(|e| e.to_string())
@@ -1259,11 +1281,21 @@ async fn join_team(invite: String, state: State<'_, AppState>) -> Result<(), Str
 }
 
 #[tauri::command]
-async fn remove_member(user_id: String, state: State<'_, AppState>) -> Result<(), String> {
+async fn remove_member(
+    user_id: String,
+    state: State<'_, AppState>,
+    proof_token: Option<String>,
+) -> Result<(), String> {
     let tok = state.token().ok_or("not signed in")?;
-    adapters::remove_member(&state.http, &state.base_url, &tok, &user_id)
-        .await
-        .map_err(|e| e.to_string())
+    adapters::remove_member(
+        &state.http,
+        &state.base_url,
+        &tok,
+        &user_id,
+        proof_token.as_deref(),
+    )
+    .await
+    .map_err(|e| e.to_string())
 }
 
 // ── PolicyBlock access + my-access ────────────────────────────────────────────
@@ -1299,19 +1331,17 @@ async fn my_access(state: State<'_, AppState>) -> Result<domain::MyAccess, Strin
 async fn delete_node(
     node_id: String,
     state: State<'_, AppState>,
-    challenge_id: Option<String>,
-    code: Option<String>,
+    proof_token: Option<String>,
 ) -> Result<(), String> {
     // Multi-user tenant gates revoke behind a step-up (Part D §Authority): first call
-    // without proof returns STEP_UP_REQUIRED; the GUI runs the OTP flow and retries.
+    // without proof returns STEP_UP_REQUIRED; the GUI runs the step-up flow and retries.
     let tok = state.token().ok_or("not signed in")?;
     adapters::delete_node(
         &state.http,
         &state.base_url,
         &tok,
         &node_id,
-        challenge_id.as_deref(),
-        code.as_deref(),
+        proof_token.as_deref(),
     )
     .await
     .map_err(|e| e.to_string())?;
@@ -1690,6 +1720,7 @@ pub fn run() {
             create_join_link,
             get_server_enroll_command,
             request_step_up,
+            verify_step_up,
             join_enroll_node,
             start_dataplane,
             stop_dataplane,
