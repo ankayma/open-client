@@ -197,6 +197,30 @@ export async function totpConfirm(code: string): Promise<string[]> {
   return invoke<string[]>("totp_confirm", { code });
 }
 
+// WebAuthn / YubiKey (E-7 StepUp Phase 3 — AAL3). The actual register/assert
+// ceremony runs in $lib/webauthn.ts via the browser's navigator.credentials
+// API; these are opaque JSON pass-throughs to the control plane.
+
+export async function webauthnStatus(): Promise<boolean> {
+  return invoke<boolean>("webauthn_status");
+}
+
+export async function webauthnRegisterStart(): Promise<any> {
+  return invoke("webauthn_register_start");
+}
+
+export async function webauthnRegisterFinish(stateId: string, credential: any, label?: string): Promise<void> {
+  return invoke("webauthn_register_finish", { stateId, credential, label });
+}
+
+export async function webauthnAuthenticateStart(): Promise<any> {
+  return invoke("webauthn_authenticate_start");
+}
+
+export async function verifyStepUpWebauthn(purpose: string, stateId: string, credential: any): Promise<string> {
+  return invoke<string>("verify_step_up_webauthn", { purpose, stateId, credential });
+}
+
 // Remove one of the tenant's own mesh nodes (retire a device). Tenant-scoped. In a
 // multi-user tenant the server gates this behind a step-up — pass `proof` on retry.
 export async function deleteNode(nodeId: string, proof?: StepUpProof): Promise<void> {

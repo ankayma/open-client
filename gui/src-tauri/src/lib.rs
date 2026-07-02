@@ -785,6 +785,77 @@ async fn totp_confirm(state: State<'_, AppState>, code: String) -> Result<Vec<St
         .map_err(|e| e.to_string())
 }
 
+// ── WebAuthn / YubiKey (Settings → Security + step-up AAL3) ──────────────────
+// The register/assert ceremony itself runs in the frontend via
+// `navigator.credentials` (Tauri's webview exposes it); these commands are
+// opaque JSON pass-throughs to the control plane.
+
+#[tauri::command]
+async fn webauthn_status(state: State<'_, AppState>) -> Result<bool, String> {
+    let tok = state.token().ok_or("not signed in")?;
+    adapters::webauthn_status(&state.http, &state.base_url, &tok)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn webauthn_register_start(state: State<'_, AppState>) -> Result<serde_json::Value, String> {
+    let tok = state.token().ok_or("not signed in")?;
+    adapters::webauthn_register_start(&state.http, &state.base_url, &tok)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn webauthn_register_finish(
+    state: State<'_, AppState>,
+    state_id: String,
+    credential: serde_json::Value,
+    label: Option<String>,
+) -> Result<(), String> {
+    let tok = state.token().ok_or("not signed in")?;
+    adapters::webauthn_register_finish(
+        &state.http,
+        &state.base_url,
+        &tok,
+        &state_id,
+        credential,
+        label.as_deref(),
+    )
+    .await
+    .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn webauthn_authenticate_start(
+    state: State<'_, AppState>,
+) -> Result<serde_json::Value, String> {
+    let tok = state.token().ok_or("not signed in")?;
+    adapters::webauthn_authenticate_start(&state.http, &state.base_url, &tok)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn verify_step_up_webauthn(
+    state: State<'_, AppState>,
+    purpose: String,
+    state_id: String,
+    credential: serde_json::Value,
+) -> Result<String, String> {
+    let tok = state.token().ok_or("not signed in")?;
+    adapters::verify_step_up_webauthn(
+        &state.http,
+        &state.base_url,
+        &tok,
+        &purpose,
+        &state_id,
+        credential,
+    )
+    .await
+    .map_err(|e| e.to_string())
+}
+
 /// Recipient side of the node-invite (`ankayma://join?token=…`): enroll THIS device
 /// into the invite's tenant using only the join token. No session is required — the
 /// token IS the authorization to join (A.1.10/A.1.22), so this works whether or not
@@ -1765,6 +1836,11 @@ pub fn run() {
             totp_status,
             totp_enroll,
             totp_confirm,
+            webauthn_status,
+            webauthn_register_start,
+            webauthn_register_finish,
+            webauthn_authenticate_start,
+            verify_step_up_webauthn,
             join_enroll_node,
             start_dataplane,
             stop_dataplane,

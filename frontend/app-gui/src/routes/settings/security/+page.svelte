@@ -5,7 +5,8 @@
 	// button that does nothing is worse than no button (P.3 honest gap).
 	import { onMount } from 'svelte';
 	import { connection } from '$lib/stores';
-	import { totpStatus, totpEnroll, totpConfirm } from '$lib/tauri';
+	import { totpStatus, totpEnroll, totpConfirm, webauthnStatus } from '$lib/tauri';
+	import { registerSecurityKey, webauthnAvailable } from '$lib/webauthn';
 
 	// idle: not enrolled, offer setup. enrolling: secret shown, awaiting a code
 	// to confirm. backupCodes: just confirmed — show the 10 one-time codes,
@@ -26,7 +27,30 @@
 			// either way, nothing to offer here (P.3 honest gap, no dead button).
 			totpState = 'idle';
 		}
+		try {
+			webauthnRegistered = await webauthnStatus();
+		} catch {
+			webauthnRegistered = false;
+		}
 	});
+
+	// Security key (YubiKey/FIDO2) — E-7 StepUp Phase 3, AAL3.
+	let webauthnRegistered = $state(false);
+	let webauthnBusy = $state(false);
+	let webauthnError = $state('');
+
+	async function registerKey() {
+		webauthnBusy = true;
+		webauthnError = '';
+		try {
+			await registerSecurityKey();
+			webauthnRegistered = true;
+		} catch (e) {
+			webauthnError = e instanceof Error ? e.message : 'Could not register the security key';
+		} finally {
+			webauthnBusy = false;
+		}
+	}
 
 	async function startEnroll() {
 		busy = true;
@@ -142,6 +166,31 @@
 			</div>
 		{/if}
 	</section>
+
+	{#if webauthnAvailable()}
+		<section class="card">
+			<div class="section-label">Security key</div>
+			{#if webauthnRegistered}
+				<div class="row">
+					<span class="label">YubiKey / security key</span>
+					<span class="value">Registered</span>
+				</div>
+			{:else}
+				<div class="row">
+					<span class="value dim">
+						Register a hardware security key (YubiKey or similar) — required once your plan
+						reaches a tier that mandates it, optional before then.
+					</span>
+				</div>
+				<div class="row">
+					<button class="su-primary" onclick={registerKey} disabled={webauthnBusy}>
+						{webauthnBusy ? 'Waiting for key…' : 'Register a security key'}
+					</button>
+				</div>
+				{#if webauthnError}<p class="err">{webauthnError}</p>{/if}
+			{/if}
+		</section>
+	{/if}
 </main>
 
 <style>

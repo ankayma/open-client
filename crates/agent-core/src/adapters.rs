@@ -1023,6 +1023,126 @@ pub async fn totp_confirm(
         .map_err(|e| ApiError::Decode(e.to_string()))
 }
 
+// ── WebAuthn / YubiKey (E-7 StepUp Phase 3 — AAL3) ────────────────────────────
+// The actual register/assert ceremony runs in the frontend via the browser's
+// `navigator.credentials` API (Tauri's webview exposes it — no Rust crate
+// needed here). These adapters are opaque JSON pass-throughs between that
+// frontend code and the control plane; the shapes match webauthn-rs's own
+// wire format 1:1 (it's designed to mirror the browser API's camelCase JSON).
+
+/// `GET /api/v1/stepup/webauthn/status` — whether the caller has any
+/// registered security key.
+pub async fn webauthn_status(
+    http: &reqwest::Client,
+    base_url: &str,
+    session_token: &str,
+) -> Result<bool, ApiError> {
+    #[derive(serde::Deserialize)]
+    struct Resp {
+        registered: bool,
+    }
+    let r: Resp = get_json(
+        http,
+        base_url,
+        "/api/v1/stepup/webauthn/status",
+        session_token,
+    )
+    .await?;
+    Ok(r.registered)
+}
+
+/// `POST /api/v1/stepup/webauthn/register/start` — returns the raw
+/// `{state_id, options}` JSON; the frontend converts `options.publicKey` into
+/// `navigator.credentials.create()`'s argument.
+pub async fn webauthn_register_start(
+    http: &reqwest::Client,
+    base_url: &str,
+    session_token: &str,
+) -> Result<serde_json::Value, ApiError> {
+    let resp = http
+        .post(url(base_url, "/api/v1/stepup/webauthn/register/start"))
+        .bearer_auth(session_token)
+        .send()
+        .await
+        .map_err(|e| ApiError::Transport(e.to_string()))?;
+    if !resp.status().is_success() {
+        return Err(status_error(resp).await);
+    }
+    resp.json::<serde_json::Value>()
+        .await
+        .map_err(|e| ApiError::Decode(e.to_string()))
+}
+
+/// `POST /api/v1/stepup/webauthn/register/finish` — `credential` is the
+/// frontend's base64url-encoded `RegisterPublicKeyCredential` JSON, opaque here.
+pub async fn webauthn_register_finish(
+    http: &reqwest::Client,
+    base_url: &str,
+    session_token: &str,
+    state_id: &str,
+    credential: serde_json::Value,
+    label: Option<&str>,
+) -> Result<(), ApiError> {
+    let resp = http
+        .post(url(base_url, "/api/v1/stepup/webauthn/register/finish"))
+        .bearer_auth(session_token)
+        .json(&serde_json::json!({
+            "state_id": state_id,
+            "credential": credential,
+            "label": label,
+        }))
+        .send()
+        .await
+        .map_err(|e| ApiError::Transport(e.to_string()))?;
+    expect_ok(resp).await
+}
+
+/// `POST /api/v1/stepup/webauthn/authenticate/start` — returns the raw
+/// `{state_id, options}` JSON for `navigator.credentials.get()`.
+pub async fn webauthn_authenticate_start(
+    http: &reqwest::Client,
+    base_url: &str,
+    session_token: &str,
+) -> Result<serde_json::Value, ApiError> {
+    let resp = http
+        .post(url(base_url, "/api/v1/stepup/webauthn/authenticate/start"))
+        .bearer_auth(session_token)
+        .send()
+        .await
+        .map_err(|e| ApiError::Transport(e.to_string()))?;
+    if !resp.status().is_success() {
+        return Err(status_error(resp).await);
+    }
+    resp.json::<serde_json::Value>()
+        .await
+        .map_err(|e| ApiError::Decode(e.to_string()))
+}
+
+/// Same exchange as `verify_step_up`/`verify_step_up_totp`, against a WebAuthn
+/// assertion (AAL3). `credential` is the frontend's base64url-encoded
+/// `PublicKeyCredential` JSON.
+pub async fn verify_step_up_webauthn(
+    http: &reqwest::Client,
+    base_url: &str,
+    session_token: &str,
+    purpose: &str,
+    state_id: &str,
+    credential: serde_json::Value,
+) -> Result<String, ApiError> {
+    post_stepup_verify(
+        http,
+        base_url,
+        session_token,
+        &serde_json::json!({
+            "factor": "webauthn",
+            "purpose": purpose,
+            "state_id": state_id,
+            "credential": credential,
+        }),
+    )
+    .await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

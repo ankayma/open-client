@@ -11,6 +11,7 @@
 
 import { writable } from "svelte/store";
 import { requestStepUp, verifyStepUp, verifyStepUpTotp, totpStatus, type StepUpProof } from "./tauri";
+import { verifyWithSecurityKey } from "./webauthn";
 
 export interface StepUpState {
   purpose: string;
@@ -53,12 +54,13 @@ export function purposeLabel(p: string): string {
 }
 
 // Run `action`, transparently satisfying a server step-up demand. `action` is invoked
-// first with no proof; on STEP_UP_REQUIRED we check whether the user has a confirmed
-// TOTP credential (skip straight to code entry) or fall back to emailing an OTP,
-// drive the modal, exchange the entered code for a proof_token, and retry
-// `action({proofToken})` until it succeeds, the user cancels, or a non-recoverable
-// error surfaces. `requiredAal` is surfaced on the state for the modal (Phase 3 will
-// branch to WebAuthn here when it's 3 and a key is registered).
+// first with no proof; on STEP_UP_REQUIRED we branch on the demanded AAL:
+//   - requiredAal >= 3 (F2+, no-soft-fallback — A.1.10): the browser's own WebAuthn
+//     UI (Touch ID / "insert your key") handles the prompt, no modal of ours needed.
+//   - requiredAal 2: check whether the user has a confirmed TOTP credential (skip
+//     straight to code entry) or fall back to emailing an OTP, drive the modal.
+// Either way we exchange the proof for a proof_token and retry `action({proofToken})`
+// until it succeeds, the user cancels, or a non-recoverable error surfaces.
 export async function runWithStepUp<T>(
   purpose: string,
   action: (proof?: StepUpProof) => Promise<T>,
@@ -69,6 +71,14 @@ export async function runWithStepUp<T>(
   } catch (e) {
     if (!isStepUpRequired(e)) throw e;
     requiredAal = parseStepUpRequired(e).requiredAal;
+  }
+
+  if (requiredAal >= 3) {
+    // No modal — the authenticator ceremony IS the UI. A failure/cancel here
+    // propagates as a normal rejected promise (no soft-fallback to a weaker
+    // factor is correct per A.1.10).
+    const proofToken = await verifyWithSecurityKey(purpose);
+    return await action({ proofToken });
   }
 
   let factor: "totp" | "otp" = (await totpStatus().catch(() => false)) ? "totp" : "otp";
