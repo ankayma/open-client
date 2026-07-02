@@ -259,7 +259,14 @@ fn tls_server_config(cert_pem: &str, key_pem: &str) -> Result<tokio_rustls::rust
         .collect();
     let keypair = rcgen::KeyPair::from_pem(key_pem).context("parse relay TLS key")?;
     let key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(keypair.serialize_der()));
-    ServerConfig::builder()
+    // `ServerConfig::builder()` picks a CryptoProvider from whichever rustls
+    // crypto backend feature is compiled in — but this process links both
+    // `ring` (rcgen) and, transitively, `aws-lc-rs` (via other deps' rustls
+    // usage), so the ambiguous default panics. Name the provider explicitly.
+    let provider = std::sync::Arc::new(tokio_rustls::rustls::crypto::ring::default_provider());
+    ServerConfig::builder_with_provider(provider)
+        .with_safe_default_protocol_versions()
+        .context("select TLS protocol versions")?
         .with_no_client_auth()
         .with_single_cert(certs, key)
         .context("build rustls ServerConfig")
