@@ -933,7 +933,19 @@ fn write_handoff_state(
 ) -> Result<(), String> {
     let home = std::env::var("HOME").map_err(|_| "HOME not set".to_string())?;
     let dir = std::path::Path::new(&home).join(".ankayma");
-    std::fs::create_dir_all(&dir).map_err(|e| format!("mkdir ~/.ankayma: {e}"))?;
+    write_handoff_state_to(&dir, private_b64, public_b64, node_id, overlay_ip)
+}
+
+/// Dir-parameterized body of `write_handoff_state`, testable without touching
+/// the process-global HOME.
+fn write_handoff_state_to(
+    dir: &std::path::Path,
+    private_b64: &str,
+    public_b64: &str,
+    node_id: &str,
+    overlay_ip: &str,
+) -> Result<(), String> {
+    std::fs::create_dir_all(dir).map_err(|e| format!("mkdir ~/.ankayma: {e}"))?;
     let state = serde_json::json!({
         "private_b64": private_b64,
         "public_b64": public_b64,
@@ -942,7 +954,39 @@ fn write_handoff_state(
         "listen_port": DATAPLANE_LISTEN_PORT,
     });
     let bytes = serde_json::to_vec_pretty(&state).map_err(|e| e.to_string())?;
-    std::fs::write(dir.join("agent.json"), bytes).map_err(|e| format!("write agent.json: {e}"))
+    let path = dir.join("agent.json");
+    // mode 0o600: the file carries the WG private key — must not be readable
+    // by other local users. Mirrors agent-daemon up.rs, which writes the SAME
+    // file with the same permissions [T:agent-daemon/src/up.rs write path].
+    #[cfg(unix)]
+    let mut f = {
+        use std::os::unix::fs::OpenOptionsExt;
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(&path)
+            .map_err(|e| format!("create agent.json: {e}"))?
+    };
+    // mode() above only applies on create — a pre-existing agent.json written
+    // by an older build kept its 0644, so force 0600 on the open handle too.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        f.set_permissions(std::fs::Permissions::from_mode(0o600))
+            .map_err(|e| format!("chmod agent.json: {e}"))?;
+    }
+    #[cfg(not(unix))]
+    let mut f = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(&path)
+        .map_err(|e| format!("create agent.json: {e}"))?;
+    use std::io::Write;
+    f.write_all(&bytes)
+        .map_err(|e| format!("write agent.json: {e}"))
 }
 
 /// Locate the `agent` daemon binary — next to this app (bundled) or a dev build.
@@ -1890,6 +1934,40 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::{parse_deep_link, DeepLinkKind};
+
+    // agent.json carries the WG private key; anything wider than 0600 leaks
+    // the node identity to other local users (regression guard — this path
+    // used plain fs::write until 2026-07-02).
+    #[cfg(unix)]
+    #[test]
+    fn handoff_state_is_written_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("ankayma-handoff-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        super::write_handoff_state_to(&dir, "privkey", "pubkey", "node-1", "100.64.0.1")
+            .expect("handoff write succeeds");
+        let mode = std::fs::metadata(dir.join("agent.json"))
+            .expect("agent.json exists")
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o600, "agent.json must be owner-only");
+        // Migration path: a pre-existing agent.json from an older build may be
+        // 0644 — a rewrite must tighten it, since OpenOptions::mode() only
+        // applies on create.
+        std::fs::set_permissions(
+            dir.join("agent.json"),
+            std::fs::Permissions::from_mode(0o644),
+        )
+        .expect("widen perms for migration test");
+        super::write_handoff_state_to(&dir, "privkey2", "pubkey2", "node-1", "100.64.0.1")
+            .expect("handoff rewrite succeeds");
+        let mode = std::fs::metadata(dir.join("agent.json"))
+            .expect("agent.json exists")
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o600);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     fn kind_token(s: &str) -> Option<(DeepLinkKind, String)> {
         parse_deep_link(&url::Url::parse(s).expect("test url parses"))
