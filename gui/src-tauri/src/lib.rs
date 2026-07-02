@@ -745,6 +745,46 @@ async fn verify_step_up(
     .map_err(|e| e.to_string())
 }
 
+#[tauri::command]
+async fn verify_step_up_totp(
+    state: State<'_, AppState>,
+    purpose: String,
+    code: String,
+) -> Result<String, String> {
+    // Same exchange, against the enrolled TOTP secret instead of an emailed
+    // challenge. [T:part-d-e7-stepup.md §H.8 Phase 2]
+    let tok = state.token().ok_or("not signed in")?;
+    adapters::verify_step_up_totp(&state.http, &state.base_url, &tok, &purpose, &code)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+// ── TOTP enrollment (Settings → Security) ─────────────────────────────────────
+
+#[tauri::command]
+async fn totp_status(state: State<'_, AppState>) -> Result<bool, String> {
+    let tok = state.token().ok_or("not signed in")?;
+    adapters::totp_status(&state.http, &state.base_url, &tok)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn totp_enroll(state: State<'_, AppState>) -> Result<(String, String), String> {
+    let tok = state.token().ok_or("not signed in")?;
+    adapters::totp_enroll(&state.http, &state.base_url, &tok)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn totp_confirm(state: State<'_, AppState>, code: String) -> Result<Vec<String>, String> {
+    let tok = state.token().ok_or("not signed in")?;
+    adapters::totp_confirm(&state.http, &state.base_url, &tok, &code)
+        .await
+        .map_err(|e| e.to_string())
+}
+
 /// Recipient side of the node-invite (`ankayma://join?token=…`): enroll THIS device
 /// into the invite's tenant using only the join token. No session is required — the
 /// token IS the authorization to join (A.1.10/A.1.22), so this works whether or not
@@ -1721,6 +1761,10 @@ pub fn run() {
             get_server_enroll_command,
             request_step_up,
             verify_step_up,
+            verify_step_up_totp,
+            totp_status,
+            totp_enroll,
+            totp_confirm,
             join_enroll_node,
             start_dataplane,
             stop_dataplane,

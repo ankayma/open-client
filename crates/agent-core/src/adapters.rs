@@ -893,6 +893,45 @@ pub async fn verify_step_up(
     challenge_id: &str,
     code: &str,
 ) -> Result<String, ApiError> {
+    post_stepup_verify(
+        http,
+        base_url,
+        session_token,
+        &serde_json::json!({
+            "factor": "otp",
+            "purpose": purpose,
+            "challenge_id": challenge_id,
+            "code": code,
+        }),
+    )
+    .await
+}
+
+/// Same exchange as `verify_step_up`, but against the user's enrolled TOTP
+/// secret instead of an emailed challenge — no `challenge_id`, no email round
+/// trip. [T:part-d-e7-stepup.md §H.8 Phase 2]
+pub async fn verify_step_up_totp(
+    http: &reqwest::Client,
+    base_url: &str,
+    session_token: &str,
+    purpose: &str,
+    code: &str,
+) -> Result<String, ApiError> {
+    post_stepup_verify(
+        http,
+        base_url,
+        session_token,
+        &serde_json::json!({ "factor": "totp", "purpose": purpose, "code": code }),
+    )
+    .await
+}
+
+async fn post_stepup_verify(
+    http: &reqwest::Client,
+    base_url: &str,
+    session_token: &str,
+    body: &serde_json::Value,
+) -> Result<String, ApiError> {
     #[derive(serde::Deserialize)]
     struct Resp {
         proof_token: String,
@@ -900,11 +939,7 @@ pub async fn verify_step_up(
     let resp = http
         .post(url(base_url, "/api/v1/stepup/verify"))
         .bearer_auth(session_token)
-        .json(&serde_json::json!({
-            "purpose": purpose,
-            "challenge_id": challenge_id,
-            "code": code,
-        }))
+        .json(body)
         .send()
         .await
         .map_err(|e| ApiError::Transport(e.to_string()))?;
@@ -914,6 +949,77 @@ pub async fn verify_step_up(
     resp.json::<Resp>()
         .await
         .map(|r| r.proof_token)
+        .map_err(|e| ApiError::Decode(e.to_string()))
+}
+
+/// `GET /api/v1/stepup/totp/status` — whether the caller has a confirmed TOTP
+/// credential, so the client can drive the step-up modal's TOTP path
+/// (straight to code entry) instead of the email-OTP path (request first).
+pub async fn totp_status(
+    http: &reqwest::Client,
+    base_url: &str,
+    session_token: &str,
+) -> Result<bool, ApiError> {
+    #[derive(serde::Deserialize)]
+    struct Resp {
+        confirmed: bool,
+    }
+    let r: Resp = get_json(http, base_url, "/api/v1/stepup/totp/status", session_token).await?;
+    Ok(r.confirmed)
+}
+
+/// `POST /api/v1/stepup/totp/enroll` — mint a fresh (unconfirmed) TOTP secret.
+/// Returns the `otpauth://` URI + base32 secret for the authenticator app.
+pub async fn totp_enroll(
+    http: &reqwest::Client,
+    base_url: &str,
+    session_token: &str,
+) -> Result<(String, String), ApiError> {
+    #[derive(serde::Deserialize)]
+    struct Resp {
+        otpauth_url: String,
+        secret: String,
+    }
+    let resp = http
+        .post(url(base_url, "/api/v1/stepup/totp/enroll"))
+        .bearer_auth(session_token)
+        .send()
+        .await
+        .map_err(|e| ApiError::Transport(e.to_string()))?;
+    if !resp.status().is_success() {
+        return Err(status_error(resp).await);
+    }
+    resp.json::<Resp>()
+        .await
+        .map(|r| (r.otpauth_url, r.secret))
+        .map_err(|e| ApiError::Decode(e.to_string()))
+}
+
+/// `POST /api/v1/stepup/totp/confirm` — prove the enrolled secret works;
+/// returns the 10 one-time backup codes (H.9 recovery), shown once.
+pub async fn totp_confirm(
+    http: &reqwest::Client,
+    base_url: &str,
+    session_token: &str,
+    code: &str,
+) -> Result<Vec<String>, ApiError> {
+    #[derive(serde::Deserialize)]
+    struct Resp {
+        backup_codes: Vec<String>,
+    }
+    let resp = http
+        .post(url(base_url, "/api/v1/stepup/totp/confirm"))
+        .bearer_auth(session_token)
+        .json(&serde_json::json!({ "code": code }))
+        .send()
+        .await
+        .map_err(|e| ApiError::Transport(e.to_string()))?;
+    if !resp.status().is_success() {
+        return Err(status_error(resp).await);
+    }
+    resp.json::<Resp>()
+        .await
+        .map(|r| r.backup_codes)
         .map_err(|e| ApiError::Decode(e.to_string()))
 }
 

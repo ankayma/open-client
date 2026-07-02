@@ -172,6 +172,31 @@ export async function verifyStepUp(purpose: string, challengeId: string, code: s
   return invoke<string>("verify_step_up", { purpose, challengeId, code });
 }
 
+// Same exchange as verifyStepUp, but against the enrolled TOTP secret — no
+// challenge_id, no email round trip. [T:part-d-e7-stepup.md §H.8 Phase 2]
+export async function verifyStepUpTotp(purpose: string, code: string): Promise<string> {
+  return invoke<string>("verify_step_up_totp", { purpose, code });
+}
+
+// Whether the signed-in user has a confirmed TOTP credential — drives whether
+// the step-up modal goes straight to code entry (TOTP) or requests an emailed
+// code first (OTP).
+export async function totpStatus(): Promise<boolean> {
+  return invoke<boolean>("totp_status");
+}
+
+// Mint a fresh (unconfirmed) TOTP secret. Returns [otpauthUrl, base32Secret]
+// for the authenticator app (manual entry — no QR image dependency).
+export async function totpEnroll(): Promise<[string, string]> {
+  return invoke<[string, string]>("totp_enroll");
+}
+
+// Prove the enrolled secret works; returns the 10 one-time backup codes
+// (H.9 recovery) — shown once, never retrievable again.
+export async function totpConfirm(code: string): Promise<string[]> {
+  return invoke<string[]>("totp_confirm", { code });
+}
+
 // Remove one of the tenant's own mesh nodes (retire a device). Tenant-scoped. In a
 // multi-user tenant the server gates this behind a step-up — pass `proof` on retry.
 export async function deleteNode(nodeId: string, proof?: StepUpProof): Promise<void> {

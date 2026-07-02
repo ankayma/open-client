@@ -27,7 +27,11 @@
 		>
 			<h3 style="font-size:16px;font-weight:700;">Verify it's you</h3>
 			<p style="font-size:14px;line-height:1.5;color:var(--c-text-dim);">
-				For security, enter the code we emailed you to {purposeLabel($stepUp.purpose)}.
+				{#if $stepUp.factor === 'totp'}
+					For security, enter your authenticator app code to {purposeLabel($stepUp.purpose)}.
+				{:else}
+					For security, enter the code we emailed you to {purposeLabel($stepUp.purpose)}.
+				{/if}
 			</p>
 			<input
 				bind:value={code}
@@ -46,7 +50,7 @@
 			<div style="display:flex;justify-content:flex-end;gap:8px;align-items:center;">
 				<button class="su-ghost" onclick={() => $stepUp?.cancel()}>Cancel</button>
 				<button class="su-ghost" onclick={() => $stepUp?.resend()} disabled={$stepUp.sending}>
-					Resend
+					{$stepUp.factor === 'totp' ? 'Use email code instead' : 'Resend'}
 				</button>
 				<button
 					class="su-primary"

@@ -10,14 +10,19 @@
 // transparent pass-through for them.
 
 import { writable } from "svelte/store";
-import { requestStepUp, verifyStepUp, type StepUpProof } from "./tauri";
+import { requestStepUp, verifyStepUp, verifyStepUpTotp, totpStatus, type StepUpProof } from "./tauri";
 
 export interface StepUpState {
   purpose: string;
   requiredAal: number;
+  // "totp": type the authenticator-app code straight away, no request needed.
+  // "otp": the emailed-code path — a challenge has already been requested.
+  factor: "totp" | "otp";
   sending: boolean;
   error: string | null;
   submit: (code: string) => Promise<void>;
+  // OTP mode: mint a fresh emailed challenge (covers expiry/attempt-lock).
+  // TOTP mode: fall back to the emailed OTP instead (lost/uninstalled app).
   resend: () => Promise<void>;
   cancel: () => void;
 }
@@ -48,13 +53,12 @@ export function purposeLabel(p: string): string {
 }
 
 // Run `action`, transparently satisfying a server step-up demand. `action` is invoked
-// first with no proof; on STEP_UP_REQUIRED we request an OTP, drive the modal,
-// exchange the entered code for a proof_token, and retry `action({proofToken})`
-// until it succeeds, the user cancels, or a non-recoverable error surfaces. Wrong
-// code keeps the modal open; "Resend" mints a fresh challenge (covers expiry /
-// attempt-lock). `requiredAal` is surfaced on the state for the modal to pick the
-// right factor UI (Phase 3 will branch to WebAuthn here when it's 3 and a key is
-// registered — today only the AAL2 OTP factor exists).
+// first with no proof; on STEP_UP_REQUIRED we check whether the user has a confirmed
+// TOTP credential (skip straight to code entry) or fall back to emailing an OTP,
+// drive the modal, exchange the entered code for a proof_token, and retry
+// `action({proofToken})` until it succeeds, the user cancels, or a non-recoverable
+// error surfaces. `requiredAal` is surfaced on the state for the modal (Phase 3 will
+// branch to WebAuthn here when it's 3 and a key is registered).
 export async function runWithStepUp<T>(
   purpose: string,
   action: (proof?: StepUpProof) => Promise<T>,
@@ -67,7 +71,8 @@ export async function runWithStepUp<T>(
     requiredAal = parseStepUpRequired(e).requiredAal;
   }
 
-  let challengeId = await requestStepUp(purpose);
+  let factor: "totp" | "otp" = (await totpStatus().catch(() => false)) ? "totp" : "otp";
+  let challengeId = factor === "otp" ? await requestStepUp(purpose) : "";
 
   return await new Promise<T>((resolve, reject) => {
     const patch = (p: Partial<StepUpState>) =>
@@ -77,12 +82,17 @@ export async function runWithStepUp<T>(
     const submit = async (code: string) => {
       const trimmed = code.trim();
       if (!trimmed) {
-        patch({ error: "Enter the code we emailed you." });
+        patch({
+          error: factor === "totp" ? "Enter your authenticator app code." : "Enter the code we emailed you.",
+        });
         return;
       }
       patch({ sending: true, error: null });
       try {
-        const proofToken = await verifyStepUp(purpose, challengeId, trimmed);
+        const proofToken =
+          factor === "totp"
+            ? await verifyStepUpTotp(purpose, trimmed)
+            : await verifyStepUp(purpose, challengeId, trimmed);
         const r = await action({ proofToken });
         close();
         resolve(r);
@@ -92,11 +102,14 @@ export async function runWithStepUp<T>(
       }
     };
 
+    // OTP mode: mint a fresh challenge (expiry/attempt-lock). TOTP mode: give up
+    // on the authenticator app and fall back to an emailed code instead.
     const resend = async () => {
       patch({ sending: true, error: null });
       try {
         challengeId = await requestStepUp(purpose);
-        patch({ sending: false, error: "A new code was sent." });
+        factor = "otp";
+        patch({ sending: false, error: "A new code was sent.", factor: "otp" });
       } catch (e3) {
         patch({ sending: false, error: e3 instanceof Error ? e3.message : String(e3) });
       }
@@ -107,6 +120,6 @@ export async function runWithStepUp<T>(
       reject(new Error("Step-up cancelled"));
     };
 
-    stepUp.set({ purpose, requiredAal, sending: false, error: null, submit, resend, cancel });
+    stepUp.set({ purpose, requiredAal, factor, sending: false, error: null, submit, resend, cancel });
   });
 }
