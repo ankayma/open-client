@@ -40,8 +40,16 @@ mod imp {
     use std::process::{Command, Stdio};
 
     const SOCKET_PATH: &str = "/var/run/com.ankayma.helper.sock";
-    const LOG_PATH: &str = "/tmp/ankayma-helper.log";
-    const AGENT_LOG_PATH: &str = "/tmp/ankayma-agent.log";
+    // Root-owned log dir — NOT /tmp: a fixed world-writable /tmp path lets any
+    // local user pre-plant a symlink for root to append through, and makes the
+    // agent's connection-level log world-readable. /var/log requires root to
+    // create, and the files are opened 0600 + O_NOFOLLOW (see open_log).
+    const LOG_DIR: &str = "/var/log/ankayma";
+    const LOG_PATH: &str = "/var/log/ankayma/helper.log";
+    const AGENT_LOG_PATH: &str = "/var/log/ankayma/agent.log";
+    /// Pid of the agent WE spawned, recorded root-owned at spawn time so
+    /// stop_agent never has to trust the caller-writable status file.
+    const PID_PATH: &str = "/var/run/com.ankayma.agent.pid";
 
     #[derive(Deserialize)]
     #[serde(tag = "command", rename_all = "lowercase")]
@@ -148,17 +156,31 @@ mod imp {
         Ok(())
     }
 
+    /// Open a log file under LOG_DIR: 0600, append, and O_NOFOLLOW so root
+    /// never writes through a planted symlink. [T:open(2)-macOS O_NOFOLLOW]
+    fn open_log(path: &str) -> std::io::Result<fs::File> {
+        use std::os::unix::fs::OpenOptionsExt;
+        fs::create_dir_all(LOG_DIR)?;
+        fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(path)
+    }
+
     /// Spawn the agent daemon directly — no shell, so no shell-metacharacter risk
     /// (the osascript quick-fix it replaces had to single-quote around this).
     fn start_agent(agent_bin: &str, token: &str, control_plane: &str) -> Result<(), String> {
-        let log = fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(AGENT_LOG_PATH)
-            .map_err(|e| format!("open {AGENT_LOG_PATH}: {e}"))?;
+        let log = open_log(AGENT_LOG_PATH).map_err(|e| format!("open {AGENT_LOG_PATH}: {e}"))?;
         let log_err = log.try_clone().map_err(|e| e.to_string())?;
-        Command::new(agent_bin)
-            .args(["up", "--token", token, "--control-plane", control_plane])
+        let child = Command::new(agent_bin)
+            .args(["up", "--control-plane", control_plane])
+            // Token via env, never argv: argv of the long-lived root `agent up`
+            // process is world-visible in `ps` for the whole tunnel lifetime; a
+            // root process's environment is not. `agent up` already reads
+            // $ANKAYMA_TOKEN [T:agent-daemon/src/up.rs Config::parse].
+            .env("ANKAYMA_TOKEN", token)
             .stdin(Stdio::null())
             .stdout(log)
             .stderr(log_err)
@@ -166,8 +188,13 @@ mod imp {
             // Intentionally not reaped/waited: it must outlive this request and this
             // helper daemon's own restarts, same detach semantics the osascript `&`
             // version had.
-            .map(|_child| ())
-            .map_err(|e| format!("spawn agent: {e}"))
+            .map_err(|e| format!("spawn agent: {e}"))?;
+        // Record the pid root-side; best-effort — stop_agent still verifies the
+        // target executable before signalling, so a missing file only means
+        // falling back to the (verified) status-file pid.
+        let _ = fs::write(PID_PATH, child.id().to_string());
+        let _ = fs::set_permissions(PID_PATH, fs::Permissions::from_mode(0o600));
+        Ok(())
     }
 
     /// [T:kill(2)] SIGTERM the recorded pid, then verify it actually died and
@@ -181,14 +208,36 @@ mod imp {
     /// trampoline may leave SIGTERM ignored across exec()). Falls back to a
     /// name match if the recorded pid is stale.
     fn stop_agent(home: &str) -> Result<(), String> {
-        let pid = fs::read(format!("{home}/.ankayma/agent-status.json"))
+        // Pid sources in trust order: the root-owned file WE wrote at spawn,
+        // then the caller-writable status file (agents started by older
+        // builds). Either way the pid is only signalled after is_agent_process
+        // confirms the executable — the status file content is attacker-
+        // controlled (caller owns it), and pids get reused, so an unverified
+        // kill is a kill-as-root primitive.
+        let recorded = fs::read_to_string(PID_PATH)
+            .ok()
+            .and_then(|s| s.trim().parse::<u64>().ok());
+        let claimed = fs::read(format!("{home}/.ankayma/agent-status.json"))
             .ok()
             .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
             .and_then(|v| v.get("pid").and_then(|p| p.as_u64()));
-        log_line(&format!("stop_agent: recorded pid = {pid:?}"));
+        log_line(&format!(
+            "stop_agent: helper-recorded pid = {recorded:?}, status-file pid = {claimed:?}"
+        ));
         let mut killed = false;
-        if let Some(p) = pid {
-            let pid = p as libc::pid_t;
+        for pid in [recorded, claimed].into_iter().flatten() {
+            // pid 0 signals our own process group and pid 1 is launchd — never
+            // valid agent pids regardless of what a file claims. [T:kill(2)]
+            if pid <= 1 || pid > libc::pid_t::MAX as u64 {
+                continue;
+            }
+            let pid = pid as libc::pid_t;
+            if !is_agent_process(pid) {
+                log_line(&format!(
+                    "stop_agent: pid {pid} is not the agent binary, refusing to signal it"
+                ));
+                continue;
+            }
             let ret = unsafe { libc::kill(pid, libc::SIGTERM) };
             log_line(&format!("stop_agent: kill({pid}, SIGTERM) = {ret}"));
             if ret == 0 {
@@ -201,13 +250,40 @@ mod imp {
                     unsafe { libc::kill(pid, libc::SIGKILL) };
                 }
                 killed = true;
+                break;
             }
         }
-        if !killed {
-            log_line("stop_agent: no valid recorded pid, falling back to pkill -f 'agent up'");
-            let _ = Command::new("pkill").args(["-f", "agent up"]).status();
+        if killed {
+            let _ = fs::remove_file(PID_PATH);
+        } else {
+            // Scoped fallback for stale pids: -U 0 restricts the match to
+            // root-owned processes (the agent always runs as root) — an
+            // unscoped `pkill -f 'agent up'` would kill ANY user's process
+            // whose argv happens to contain the pattern.
+            log_line("stop_agent: no valid recorded pid, falling back to pkill -U 0 -f 'agent up'");
+            let _ = Command::new("pkill")
+                .args(["-U", "0", "-f", "agent up"])
+                .status();
+            let _ = fs::remove_file(PID_PATH);
         }
         Ok(())
+    }
+
+    /// True iff `pid` currently runs an executable named `agent`.
+    /// [T:proc_pidpath — macOS libproc; returns the executable path length]
+    fn is_agent_process(pid: libc::pid_t) -> bool {
+        // PROC_PIDPATHINFO_MAXSIZE (4 * MAXPATHLEN) per libproc.h.
+        let mut buf = [0u8; 4096];
+        let n = unsafe {
+            libc::proc_pidpath(pid, buf.as_mut_ptr() as *mut libc::c_void, buf.len() as u32)
+        };
+        if n <= 0 {
+            return false;
+        }
+        let path = String::from_utf8_lossy(&buf[..n as usize]).into_owned();
+        std::path::Path::new(&path)
+            .file_name()
+            .is_some_and(|f| f == "agent")
     }
 
     fn peer_uid(stream: &UnixStream) -> Result<u32, String> {
@@ -222,12 +298,30 @@ mod imp {
     }
 
     fn log_line(msg: &str) {
-        if let Ok(mut f) = fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(LOG_PATH)
-        {
+        if let Ok(mut f) = open_log(LOG_PATH) {
             let _ = writeln!(f, "{msg}");
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        // The kill-guard's whole point: a pid whose executable is NOT the
+        // agent must never be signalled, no matter which file named it.
+        #[test]
+        fn own_test_process_is_not_the_agent() {
+            assert!(!super::is_agent_process(std::process::id() as libc::pid_t));
+        }
+
+        #[test]
+        fn launchd_is_not_the_agent() {
+            assert!(!super::is_agent_process(1));
+        }
+
+        #[test]
+        fn dead_pid_is_not_the_agent() {
+            // pid_t::MAX is far above macOS's pid ceiling (~99999) — proc_pidpath
+            // fails, so the guard refuses.
+            assert!(!super::is_agent_process(libc::pid_t::MAX));
         }
     }
 } // mod imp
