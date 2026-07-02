@@ -57,7 +57,13 @@ fn load_or_generate_keypair(fqdn: &str) -> Result<rcgen::KeyPair> {
 }
 
 fn build_csr_pem(fqdn: &str, keypair: &rcgen::KeyPair) -> Result<String> {
-    let params = rcgen::CertificateParams::new(vec![fqdn.to_string()]).context("CSR params")?;
+    let mut params = rcgen::CertificateParams::new(vec![fqdn.to_string()]).context("CSR params")?;
+    // rcgen::CertificateParams::default() fills the Subject with a placeholder
+    // CommonName ("rcgen self signed cert") meant for throwaway self-signed
+    // certs — Let's Encrypt validates the CN if present and rejects a CSR
+    // whose CN isn't a real identifier. The SAN list above is what ACME
+    // actually authorizes against; clear the CN so it isn't checked at all.
+    params.distinguished_name = rcgen::DistinguishedName::new();
     let csr = params.serialize_request(keypair).context("serialize CSR")?;
     csr.pem().context("PEM-encode CSR")
 }
