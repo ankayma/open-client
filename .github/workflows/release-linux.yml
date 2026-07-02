@@ -17,9 +17,14 @@
 #   GPG_KEY_ID            primary key id/fingerprint (not secret — GPG resolves
 #                          the signing-capable subkey automatically from it)
 #
-# `[A]` publish step: apt.ankayma.com / yum.ankayma.com (R2/Pages bucket, DNS)
-# are not provisioned yet (§4.5 open item) — this job keeps `public/`+`yum/` as
-# a GH Actions artifact only. Replace the placeholder once they exist.
+# R2 publish (§4.5 — buckets + custom domains provisioned 2026-07-02):
+#   R2_ACCESS_KEY_ID / R2_SECRET_ACCESS_KEY / R2_ENDPOINT   R2 S3-compatible API token
+#   R2_BUCKET_MACOS   bucket behind get.ankayma.com — ALSO serves the Linux
+#                      curl|sh channel (dist/<version>/, install.sh) since
+#                      that's the same hostname this repo's install.sh already
+#                      points at; not just macOS despite the secret name.
+#   R2_BUCKET_APT     bucket behind apt.ankayma.com
+#   R2_BUCKET_YUM     bucket behind yum.ankayma.com
 name: release-linux
 
 on:
@@ -117,14 +122,23 @@ jobs:
         if: always()
         run: rm -rf "$RUNNER_TEMP/.gnupg"
 
-      # TODO[A]: replace with the real upload once apt.ankayma.com/yum.ankayma.com
-      # (R2/Pages bucket, DNS — §4.5 open item) are provisioned.
-      - name: Upload build artifacts (interim — no publish target provisioned yet)
-        uses: actions/upload-artifact@v4
-        with:
-          name: linux-release
-          path: |
-            dist/
-            public/
-            yum/
-          retention-days: 30
+      - name: Publish to R2 (apt.ankayma.com / yum.ankayma.com / get.ankayma.com)
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: auto
+        run: |
+          set -euo pipefail
+          VERSION="$(sed -n 's/^version *= *"\(.*\)"/\1/p' Cargo.toml | head -1)"
+          EP="${{ secrets.R2_ENDPOINT }}"
+
+          # curl|sh channel (install.sh + versioned binaries), same bucket as macOS.
+          aws s3 sync "dist/$VERSION/" "s3://${{ secrets.R2_BUCKET_MACOS }}/$VERSION/" --endpoint-url "$EP"
+          aws s3 sync "dist/$VERSION/" "s3://${{ secrets.R2_BUCKET_MACOS }}/latest/"   --endpoint-url "$EP"
+          aws s3 cp "dist/$VERSION/install.sh" "s3://${{ secrets.R2_BUCKET_MACOS }}/install.sh" --endpoint-url "$EP"
+
+          # apt repo (aptly `public/` tree — dists/, pool/, ankayma.gpg).
+          aws s3 sync public/ "s3://${{ secrets.R2_BUCKET_APT }}/" --endpoint-url "$EP"
+
+          # yum repo (repodata/, .rpm, RPM-GPG-KEY-ankayma).
+          aws s3 sync yum/ "s3://${{ secrets.R2_BUCKET_YUM }}/" --endpoint-url "$EP"

@@ -22,10 +22,11 @@
 #   TAURI_SIGNING_PRIVATE_KEY            minisign private key (see `cargo tauri signer generate`)
 #   TAURI_SIGNING_PRIVATE_KEY_PASSWORD   password for the above
 #
-# `[A]` publish step: R2/Pages bucket for get.ankayma.com (§4.5 decision) is not
-# provisioned yet — this workflow uploads the DMG + latest.json as a GH Actions
-# artifact only. Replace the "Publish" step with the real upload once the bucket
-# exists.
+# R2 publish (§4.5 — bucket + custom domain for get.ankayma.com provisioned
+# 2026-07-02):
+#   R2_ACCESS_KEY_ID / R2_SECRET_ACCESS_KEY / R2_ENDPOINT   R2 S3-compatible API token
+#   R2_BUCKET_MACOS   bucket behind get.ankayma.com (also used by
+#                      release-linux.yml for the curl|sh channel at bucket root)
 name: release-macos
 
 on:
@@ -121,12 +122,10 @@ jobs:
           }
           EOF
 
-      # TODO[A]: replace with the real upload once §4.5 (R2/Pages bucket for
-      # get.ankayma.com) is provisioned — e.g. `aws s3 sync publish/ s3://.../macos/
-      # --endpoint-url $R2_ENDPOINT` + Cloudflare cache purge.
-      - name: Upload build artifacts (interim — no publish target provisioned yet)
-        uses: actions/upload-artifact@v4
-        with:
-          name: macos-release
-          path: publish/
-          retention-days: 30
+      - name: Publish to R2 (get.ankayma.com)
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: auto
+        run: |
+          aws s3 sync publish/ "s3://${{ secrets.R2_BUCKET_MACOS }}/macos/" --endpoint-url "${{ secrets.R2_ENDPOINT }}"
