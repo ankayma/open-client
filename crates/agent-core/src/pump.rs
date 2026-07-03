@@ -14,17 +14,42 @@
 //! `NEPacketTunnelNetworkSettings` in Swift on iOS) and stay with the caller. The
 //! caller hands `pump` an already-open fd + a bound UDP socket. `[T:A.1.9]`
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, SocketAddr, UdpSocket};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::dataplane::{self, DialablePeer};
 use crate::domain::PeerInfo;
-use crate::tunnel::{make_tunn, PublicKey, StaticSecret, Tunn, TunnResult};
+use crate::tunnel::{handshake_established, make_tunn, PublicKey, StaticSecret, Tunn, TunnResult};
 
 /// Safe overlay MTU under a typical 1500-byte path. `[T:WireGuard]`
 pub const MTU: usize = 1420;
+
+/// Optional diagnostic sink. The desktop daemon logs to stdout; the iOS Packet
+/// Tunnel extension has no console, so it installs a hook that forwards to the
+/// platform log (NSLog). Used to trace the outbound send path when a peer never
+/// answers — the one place iOS visibility was missing. `[T:A.1.9]`
+static LOG_HOOK: std::sync::OnceLock<fn(&str)> = std::sync::OnceLock::new();
+
+/// Install a diagnostic log sink (idempotent; first caller wins).
+pub fn set_log_hook(f: fn(&str)) {
+    let _ = LOG_HOOK.set(f);
+}
+
+/// Emit a diagnostic line to the installed hook, else stdout.
+fn plog(msg: &str) {
+    match LOG_HOOK.get() {
+        Some(f) => f(msg),
+        None => println!("{msg}"),
+    }
+}
+
+/// Tear down an established session after this much *data* silence — tunnels are
+/// ephemeral, not process-lifetime. `[T:A.1.7 — idle timeout 5-10 min]` The next
+/// outbound packet re-handshakes on demand (boringtun queues it and emits a fresh
+/// initiation), so teardown costs one handshake RTT on resume, nothing else.
+pub const IDLE_TEARDOWN: Duration = Duration::from_secs(300);
 
 /// One peer's live tunnel: metadata + its boringtun state machine + the current
 /// UDP endpoint. For a responder peer (no advertised endpoint, e.g. a CI runner
@@ -35,6 +60,12 @@ pub struct PeerEntry {
     pub peer: DialablePeer,
     endpoint: Mutex<Option<SocketAddr>>,
     tunn: Mutex<Tunn>,
+    /// When *data* (not handshake/keepalive) last crossed this tunnel, either
+    /// direction — drives idle-teardown. `[T:A.1.7]`
+    last_activity: Mutex<Instant>,
+    /// The keepalive this peer's `Tunn` was built with, so an idle-teardown
+    /// rebuild preserves it (NAT'd node keeps 25s, public node keeps None).
+    keepalive: Option<u16>,
 }
 
 impl PeerEntry {
@@ -45,6 +76,12 @@ impl PeerEntry {
     /// Learn/refresh where this peer is reachable (handshake source / roaming).
     fn set_endpoint(&self, ep: SocketAddr) {
         *self.endpoint.lock().expect("endpoint lock") = Some(ep);
+    }
+    fn touch(&self) {
+        *self.last_activity.lock().expect("activity lock") = Instant::now();
+    }
+    fn idle_for(&self) -> Duration {
+        self.last_activity.lock().expect("activity lock").elapsed()
     }
 }
 
@@ -57,6 +94,7 @@ pub type Peers = Arc<Mutex<Vec<Arc<PeerEntry>>>>;
 /// the overlay address of every peer added — the caller routes those into the tun
 /// device (host route on the daemon; `includedRoutes` in Swift on iOS). Routing is
 /// intentionally NOT done here so the pump stays OS-agnostic. `[T:A.1.9]`
+/// `keepalive`: `Some(25)` only when THIS node sits behind NAT (see `make_tunn`).
 pub fn add_tunn_peers(
     peers: &Peers,
     index: &Arc<Mutex<u32>>,
@@ -64,6 +102,7 @@ pub fn add_tunn_peers(
     self_overlay: IpAddr,
     list: &[PeerInfo],
     udp: &Arc<UdpSocket>,
+    keepalive: Option<u16>,
 ) -> Vec<IpAddr> {
     let dialable = dataplane::dialable_peers(list, self_overlay);
     let mut guard = peers.lock().expect("peers lock");
@@ -83,7 +122,7 @@ pub fn add_tunn_peers(
             *i
         };
         let peer_pub = PublicKey::from(d.public_key);
-        let mut tunn = make_tunn(static_private.clone(), peer_pub, idx);
+        let mut tunn = make_tunn(static_private.clone(), peer_pub, idx, keepalive);
 
         // Proactively initiate the handshake if we know where to send it. A
         // responder peer (endpoint None — e.g. a CI runner behind NAT) is left to
@@ -92,7 +131,10 @@ pub fn add_tunn_peers(
             let mut buf = [0u8; 2048];
             if let TunnResult::WriteToNetwork(p) = tunn.format_handshake_initiation(&mut buf, false)
             {
-                let _ = udp.send_to(p, ep);
+                match udp.send_to(p, ep) {
+                    Ok(n) => plog(&format!("handshake→{ep} ({}) sent {n}B", d.hostname)),
+                    Err(e) => plog(&format!("handshake→{ep} ({}) SEND FAILED: {e}", d.hostname)),
+                }
             }
         }
 
@@ -112,6 +154,8 @@ pub fn add_tunn_peers(
             peer: d,
             endpoint: Mutex::new(ep),
             tunn: Mutex::new(tunn),
+            last_activity: Mutex::new(Instant::now()),
+            keepalive,
         }));
         added.push(overlay);
     }
@@ -139,34 +183,256 @@ fn peer_by_source(peers: &Peers, src: SocketAddr) -> Option<Arc<PeerEntry>> {
         .cloned()
 }
 
+/// A self-addressed DNS responder for hosts with no OS-level split-DNS hook (iOS:
+/// `NEDNSSettings.matchDomains` routes matching queries INTO the tunnel instead of
+/// resolving them locally, so they arrive here as ordinary UDP packets). Optional —
+/// `None` on the macOS/Linux daemon, which answers via a separate loopback socket
+/// fed by `/etc/resolver/<zone>` and never sees DNS on the tun fd at all.
+/// `[T: f3-privdomain-ios-plan.md Phase 2]`
+pub struct DnsResponder {
+    /// This node's own overlay address — queries are addressed here, never a peer.
+    pub self_ip: IpAddr,
+    /// name → overlay address, swapped wholesale on each reconnect (Phase 1 model:
+    /// "reconnect to see new devices/services", not a live-refresh channel).
+    pub table: Arc<Mutex<HashMap<String, IpAddr>>>,
+    /// Delegate for names NOT in `table`. iOS needs `matchDomains=[""]` (route ALL
+    /// DNS to us) for the OS to use our resolver at all — so we MUST forward
+    /// non-private queries to the device's real DNS instead of NXDOMAIN'ing them,
+    /// or every website breaks while the tunnel is up. `false` = authoritative-only
+    /// (desktop never uses this responder). The forward goes through the platform
+    /// hook (`FORWARD_HOOK`) — on iOS a plain BSD UDP socket in `agent-ios-ptp`
+    /// (`ios_dns_forward`); raw sockets DO egress a Packet Tunnel Provider, exactly
+    /// like the WG data socket. See docs/f3-ios-dns-forwarding-resolver.md.
+    pub forward: bool,
+}
+
+// ---- DNS forwarding via the platform hook (iOS BSD-socket relay) ----
+//
+// The pump parks the original request under a token, hands the bare query to the
+// platform hook, and the hook calls `dns_reply(token, response)` when the upstream
+// answers — or `dns_fail(token)` when the round-trip fails, which writes a
+// synthesized SERVFAIL back to the tun. NEVER silence: iOS drops a tunnel resolver
+// that fails to answer and won't use it again until the VPN reconnects
+// `[T:Apple-DevForums-114097]`; Tailscale maps every upstream failure to SERVFAIL
+// for the same reason `[T:tailscale forwarder.go — "All such errors map to
+// SERVFAIL at the client level"]`.
+
+/// Sink that hands a forwarded query to the platform. Set by the iOS bridge; unset
+/// on desktop (which never forwards).
+static FORWARD_HOOK: std::sync::OnceLock<fn(u64, &[u8])> = std::sync::OnceLock::new();
+/// token → (original request IP packet, bare DNS query bytes), awaiting the
+/// upstream response. The query is kept so `dns_fail` can synthesize a SERVFAIL
+/// without re-parsing the request.
+type PendingEntry = (Vec<u8>, Vec<u8>);
+static DNS_PENDING: std::sync::OnceLock<Mutex<HashMap<u64, PendingEntry>>> =
+    std::sync::OnceLock::new();
+/// The tun fd to write forwarded replies back to.
+static DNS_TUN_FD: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(-1);
+static DNS_TOKEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+fn dns_pending() -> &'static Mutex<HashMap<u64, PendingEntry>> {
+    DNS_PENDING.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Install the platform forward sink (iOS bridge → `createUDPSession`).
+pub fn set_dns_forward_hook(f: fn(u64, &[u8])) {
+    let _ = FORWARD_HOOK.set(f);
+}
+
+/// Park `request` (the original query IP packet) under a fresh token and hand the
+/// bare DNS `query` to the platform bridge. No-op (drop → OS fallback) if no bridge.
+fn dns_forward(fd: i32, request: &[u8], query: &[u8]) {
+    let Some(hook) = FORWARD_HOOK.get() else {
+        return; // no forwarder (desktop) — drop, OS resolves itself
+    };
+    DNS_TUN_FD.store(fd, std::sync::atomic::Ordering::Relaxed);
+    let token = DNS_TOKEN.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    {
+        let mut pending = dns_pending().lock().expect("dns pending lock");
+        // Reap entries whose hook died without calling `dns_reply`/`dns_fail` (e.g.
+        // a panicked thread). Tokens are monotonic, so anything older than a fixed
+        // window is dead; this bounds the map instead of leaking one per drop.
+        const PENDING_WINDOW: u64 = 256;
+        let low = token.saturating_sub(PENDING_WINDOW);
+        pending.retain(|&t, _| t >= low);
+        pending.insert(token, (request.to_vec(), query.to_vec()));
+    }
+    hook(token, query);
+}
+
+/// The platform bridge calls this with the upstream's raw DNS response for `token`.
+/// Builds the reply IP packet from the parked request and writes it to the tun.
+/// Unknown/duplicate token = dropped.
+pub fn dns_reply(token: u64, response: &[u8]) {
+    let request = dns_pending()
+        .lock()
+        .expect("dns pending lock")
+        .remove(&token);
+    match request {
+        None => plog(&format!(
+            "dns→tun reply token={token} UNKNOWN (expired/dup)"
+        )),
+        Some((req, _query)) => match crate::dns::build_dns_reply(&req, response) {
+            None => plog(&format!(
+                "dns→tun reply token={token} build FAILED ({}B)",
+                response.len()
+            )),
+            Some(reply) => {
+                let fd = DNS_TUN_FD.load(std::sync::atomic::Ordering::Relaxed);
+                let w = if fd >= 0 {
+                    crate::tundev::write_packet(fd, &reply)
+                } else {
+                    Ok(0)
+                };
+                plog(&format!(
+                    "dns→tun reply token={token} wrote={w:?} ({}B)",
+                    reply.len()
+                ));
+            }
+        },
+    }
+}
+
+/// The platform bridge calls this when the upstream round-trip for `token` FAILED
+/// (send error, timeout, no usable reply). Writes a synthesized SERVFAIL back to
+/// the tun so the client always gets an answer — iOS gives up on a tunnel resolver
+/// that stays silent and won't use it again until the VPN reconnects
+/// `[T:Apple-DevForums-114097 — eskimo: "giving up on 'broken' DNS servers" is by
+/// design]`. Mirrors Tailscale: every upstream failure maps to SERVFAIL
+/// `[T:tailscale forwarder.go servfailResponse]`.
+pub fn dns_fail(token: u64) {
+    let request = dns_pending()
+        .lock()
+        .expect("dns pending lock")
+        .remove(&token);
+    match request {
+        None => plog(&format!(
+            "dns→tun servfail token={token} UNKNOWN (expired/dup)"
+        )),
+        Some((req, query)) => {
+            let reply = crate::dns::build_servfail(&query)
+                .and_then(|sf| crate::dns::build_dns_reply(&req, &sf));
+            match reply {
+                None => plog(&format!("dns→tun servfail token={token} build FAILED")),
+                Some(reply) => {
+                    let fd = DNS_TUN_FD.load(std::sync::atomic::Ordering::Relaxed);
+                    let w = if fd >= 0 {
+                        crate::tundev::write_packet(fd, &reply)
+                    } else {
+                        Ok(0)
+                    };
+                    plog(&format!("dns→tun SERVFAIL token={token} wrote={w:?}"));
+                }
+            }
+        }
+    }
+}
+
 /// tun → encapsulate → UDP. Reads bare IP packets, routes by destination.
-pub fn spawn_tx(fd: i32, udp: Arc<UdpSocket>, peers: Peers) {
+/// `dns`: if a packet is a query addressed at our own overlay IP on port 53,
+/// answer it locally and never route it to a peer (self_ip is never a mesh peer).
+pub fn spawn_tx(fd: i32, udp: Arc<UdpSocket>, peers: Peers, dns: Option<DnsResponder>) {
     std::thread::spawn(move || {
         let mut pkt = [0u8; MTU + 80];
-        let mut enc = [0u8; MTU + 80];
+        // Encapsulate needs src.len()+32 of headroom `[T:boringtun@0.7 session.rs]`
+        // — undersizing PANICS inside boringtun (not an Err), which killed all
+        // three pump threads via poisoned locks on 2026-07-03 (ssh key-exchange
+        // packets at the interface-default 1500 MTU were the reproducer).
+        let mut enc = [0u8; MTU + 80 + 32];
         loop {
             let n = match crate::tundev::read_packet(fd, &mut pkt) {
                 Ok(0) => continue,
                 Ok(n) => n,
                 Err(e) => {
-                    eprintln!("tun read error: {e}");
+                    // Fatal only: tundev absorbs EAGAIN/EINTR itself (poll-and-retry
+                    // — a non-blocking packetFlow fd killed this thread on the FIRST
+                    // drained queue on-device 2026-07-03). plog, not eprintln: the
+                    // iOS extension has no stderr, and a silent thread death here
+                    // looks exactly like "iOS stopped routing DNS to us".
+                    plog(&format!("tun read FATAL: {e} — tx loop exiting"));
                     break;
                 }
             };
+            if n > MTU {
+                // Oversized for one encrypted datagram — configure_interface clamps
+                // the device MTU so this shouldn't happen; drop loudly rather than
+                // truncate-and-corrupt or panic inside boringtun.
+                plog(&format!(
+                    "tun packet {n}B exceeds overlay MTU {MTU} — dropped"
+                ));
+                continue;
+            }
+            if let Some(responder) = &dns {
+                if let Some(query) = crate::dns::dns_query_payload(&pkt[..n], responder.self_ip) {
+                    // Own the name (a private mesh subdomain)? Answer authoritatively.
+                    // Otherwise delegate to the device's real resolver — required
+                    // because iOS routes ALL DNS here (matchDomains=[""]), so an
+                    // NXDOMAIN for a public name would break every website.
+                    let owned = crate::dns::query_name(query)
+                        .map(|name| {
+                            responder
+                                .table
+                                .lock()
+                                .expect("dns table lock")
+                                .contains_key(&name)
+                        })
+                        .unwrap_or(false);
+                    if owned {
+                        let answer = {
+                            let table = responder.table.lock().expect("dns table lock");
+                            crate::dns::respond(&table, query)
+                        };
+                        if let Some(reply) =
+                            answer.and_then(|a| crate::dns::build_dns_reply(&pkt[..n], &a))
+                        {
+                            let _ = crate::tundev::write_packet(fd, &reply);
+                        }
+                        plog("tun→dns private answered");
+                    } else if responder.forward {
+                        // Hand the query to the platform hook (iOS BSD-socket relay);
+                        // it calls `dns_reply(token, …)` on success or `dns_fail(token)`
+                        // on failure (→ SERVFAIL). No blocking here, and never silence:
+                        // an unanswered query makes iOS drop our resolver until
+                        // reconnect `[T:Apple-DevForums-114097]`.
+                        plog(&format!(
+                            "tun→dns forward {}",
+                            crate::dns::query_name(query).unwrap_or_default()
+                        ));
+                        dns_forward(fd, &pkt[..n], query);
+                    } else {
+                        // No forwarder (desktop never hits this path) — NXDOMAIN.
+                        let answer = {
+                            let table = responder.table.lock().expect("dns table lock");
+                            crate::dns::respond(&table, query)
+                        };
+                        if let Some(reply) =
+                            answer.and_then(|a| crate::dns::build_dns_reply(&pkt[..n], &a))
+                        {
+                            let _ = crate::tundev::write_packet(fd, &reply);
+                        }
+                    }
+                    continue; // handled (answered / forwarded / dropped) — never a peer
+                }
+            }
             let Some(dst) = dataplane::packet_dst(&pkt[..n]) else {
                 continue; // not a routable IPv4/IPv6 packet (truncated / unknown version)
             };
             let Some(entry) = peer_by_overlay(&peers, dst) else {
+                plog(&format!("tun→pkt dst {dst} — NO PEER owns it (dropped)"));
                 continue; // no peer owns this overlay address
             };
+            plog(&format!("tun→pkt dst {dst} → {}", entry.peer.hostname));
             let mut tunn = entry.tunn.lock().expect("tunn lock");
             match tunn.encapsulate(&pkt[..n], &mut enc) {
                 TunnResult::WriteToNetwork(out) => {
                     if let Some(ep) = entry.endpoint() {
                         let _ = udp.send_to(out, ep);
                     }
+                    // Outbound data (or the handshake it triggered) — the tunnel
+                    // is in use, so it must not be torn down as idle.
+                    entry.touch();
                 }
-                TunnResult::Err(e) => eprintln!("encapsulate error: {e:?}"),
+                TunnResult::Err(e) => plog(&format!("encapsulate error: {e:?}")),
                 _ => {}
             }
         }
@@ -183,10 +449,11 @@ pub fn spawn_rx(fd: i32, udp: Arc<UdpSocket>, peers: Peers) {
             let (n, src) = match udp.recv_from(&mut datagram) {
                 Ok(v) => v,
                 Err(e) => {
-                    eprintln!("udp recv error: {e}");
+                    plog(&format!("udp recv FATAL: {e} — rx loop exiting"));
                     break;
                 }
             };
+            plog(&format!("udp rx {n}B from {src}"));
             // Pick the owning peer. Fast path: a peer whose learned endpoint matches
             // the source. Fallback: trial-decapsulate against every peer — needed
             // when more than one *responder* peer has no endpoint yet (e.g. a NAT'd
@@ -217,6 +484,9 @@ pub fn spawn_rx(fd: i32, udp: Arc<UdpSocket>, peers: Peers) {
                         TunnResult::WriteToTunnelV4(pkt, _)
                         | TunnResult::WriteToTunnelV6(pkt, _) => {
                             let _ = crate::tundev::write_packet(fd, pkt);
+                            // Inbound data decrypted — tunnel in use (handshake
+                            // and keepalive frames don't reach this arm).
+                            entry.touch();
                             break;
                         }
                         TunnResult::Err(_) => break,
@@ -229,25 +499,78 @@ pub fn spawn_rx(fd: i32, udp: Arc<UdpSocket>, peers: Peers) {
     });
 }
 
-/// Drive WireGuard timers (rekey, keepalive, handshake retries).
-/// `[T:WireGuard-whitepaper §6]` the protocol is timer-driven.
-pub fn spawn_timers(udp: Arc<UdpSocket>, peers: Peers) {
+/// Drive WireGuard timers (rekey, keepalive, handshake retries) and enforce
+/// idle-teardown. `[T:WireGuard-whitepaper §6]` the protocol is timer-driven.
+///
+/// Idle-teardown `[T:A.1.7]`: an *established* session that has moved no data for
+/// `IDLE_TEARDOWN` gets its `Tunn` replaced with a fresh one — session keys and
+/// handshake state are dropped, so nothing stays hot while unused. The peer entry,
+/// its learned endpoint, and the host route all remain: the next outbound packet
+/// re-handshakes on demand. `static_private`/`index` are needed to rebuild.
+pub fn spawn_timers(
+    udp: Arc<UdpSocket>,
+    peers: Peers,
+    static_private: StaticSecret,
+    index: Arc<Mutex<u32>>,
+) {
     std::thread::spawn(move || {
         let mut buf = [0u8; 2048];
         loop {
             std::thread::sleep(Duration::from_millis(250));
             let snapshot: Vec<Arc<PeerEntry>> =
                 peers.lock().expect("peers lock").iter().cloned().collect();
+            teardown_idle(&snapshot, &static_private, &index, IDLE_TEARDOWN);
             for entry in snapshot {
                 let mut tunn = entry.tunn.lock().expect("tunn lock");
                 if let TunnResult::WriteToNetwork(p) = tunn.update_timers(&mut buf) {
                     if let Some(ep) = entry.endpoint() {
-                        let _ = udp.send_to(p, ep);
+                        match udp.send_to(p, ep) {
+                            Ok(n) => plog(&format!("timer→{ep} ({}) {n}B", entry.peer.hostname)),
+                            Err(e) => plog(&format!(
+                                "timer→{ep} ({}) SEND FAILED: {e}",
+                                entry.peer.hostname
+                            )),
+                        }
                     }
                 }
             }
         }
     });
+}
+
+/// One idle sweep: replace the `Tunn` of every peer whose session is established
+/// but has moved no data for `limit`. Factored out of the timer thread so the
+/// decision + effect are unit-testable without threads. `[T:A.1.7]`
+fn teardown_idle(
+    snapshot: &[Arc<PeerEntry>],
+    static_private: &StaticSecret,
+    index: &Arc<Mutex<u32>>,
+    limit: Duration,
+) {
+    for entry in snapshot {
+        {
+            let tunn = entry.tunn.lock().expect("tunn lock");
+            // No session → nothing to tear down (a fresh Tunn holds no keys and
+            // boringtun stops retrying its handshake on its own).
+            if !handshake_established(&tunn) || entry.idle_for() < limit {
+                continue;
+            }
+        }
+        let idx = {
+            let mut i = index.lock().expect("index lock");
+            *i += 1;
+            *i
+        };
+        let peer_pub = PublicKey::from(entry.peer.public_key);
+        *entry.tunn.lock().expect("tunn lock") =
+            make_tunn(static_private.clone(), peer_pub, idx, entry.keepalive);
+        entry.touch(); // restart the clock; don't re-tear a fresh Tunn every tick
+        println!(
+            "peer {} idle {}s — session torn down (re-handshakes on demand)",
+            entry.peer.hostname,
+            limit.as_secs()
+        );
+    }
 }
 
 #[cfg(test)]
@@ -270,7 +593,9 @@ mod tests {
                 endpoint,
             },
             endpoint: Mutex::new(endpoint),
-            tunn: Mutex::new(make_tunn(sp, pp, 1)),
+            tunn: Mutex::new(make_tunn(sp, pp, 1, None)),
+            last_activity: Mutex::new(Instant::now()),
+            keepalive: None,
         })
     }
 
@@ -297,5 +622,68 @@ mod tests {
             entry("10.0.0.2", None),
         ]));
         assert!(peer_by_source(&peers, "9.9.9.9:1".parse().unwrap()).is_none());
+    }
+
+    /// Build an entry whose Tunn has a COMPLETED handshake (in-memory Noise
+    /// roundtrip against a throwaway responder — same recipe as tunnel.rs).
+    fn entry_with_established_session() -> Arc<PeerEntry> {
+        let a_priv = StaticSecret::random_from_rng(OsRng);
+        let b_priv = StaticSecret::random_from_rng(OsRng);
+        let a_pub = PublicKey::from(&a_priv);
+        let b_pub = PublicKey::from(&b_priv);
+        let mut a = make_tunn(a_priv, b_pub, 1, None);
+        let mut b = make_tunn(b_priv, a_pub, 2, None);
+        let mut buf = [0u8; 2048];
+        let init = match a.format_handshake_initiation(&mut buf, false) {
+            TunnResult::WriteToNetwork(p) => p.to_vec(),
+            _ => panic!("no initiation"),
+        };
+        let mut buf2 = [0u8; 2048];
+        let resp = match b.decapsulate(None, &init, &mut buf2) {
+            TunnResult::WriteToNetwork(p) => p.to_vec(),
+            _ => panic!("no response"),
+        };
+        let _ = a.decapsulate(None, &resp, &mut buf);
+        assert!(crate::tunnel::handshake_established(&a));
+        Arc::new(PeerEntry {
+            peer: DialablePeer {
+                node_id: "n".into(),
+                hostname: "h".into(),
+                public_key: b_pub.to_bytes(),
+                public_key_b64: "k".into(),
+                overlay_ip: "10.0.0.1".parse().unwrap(),
+                endpoint: None,
+            },
+            endpoint: Mutex::new(None),
+            tunn: Mutex::new(a),
+            last_activity: Mutex::new(Instant::now()),
+            keepalive: None,
+        })
+    }
+
+    // A.1.7: an established-but-idle session is torn down (fresh Tunn, no
+    // session); an active or never-handshaked one is left alone. `[T:A.1.7]`
+    #[test]
+    fn idle_established_session_is_torn_down() {
+        let established = entry_with_established_session();
+        let never_handshaked = entry("10.0.0.2", Some("1.2.3.4:51820"));
+        let snapshot = vec![established.clone(), never_handshaked.clone()];
+        let sp = StaticSecret::random_from_rng(OsRng);
+        let index = Arc::new(Mutex::new(10u32));
+
+        // limit > 0: nothing is idle yet → no teardown.
+        teardown_idle(&snapshot, &sp, &index, Duration::from_secs(300));
+        assert!(crate::tunnel::handshake_established(
+            &established.tunn.lock().unwrap()
+        ));
+
+        // limit 0: the established session counts as idle → torn down.
+        teardown_idle(&snapshot, &sp, &index, Duration::ZERO);
+        assert!(
+            !crate::tunnel::handshake_established(&established.tunn.lock().unwrap()),
+            "idle session must be replaced by a fresh Tunn"
+        );
+        // never-handshaked peer must be untouched (index only advanced once).
+        assert_eq!(*index.lock().unwrap(), 11);
     }
 }

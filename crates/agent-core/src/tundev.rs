@@ -25,44 +25,102 @@ pub fn write_packet(fd: i32, packet: &[u8]) -> io::Result<usize> {
 // macOS + iOS: utun prepends a 4-byte address-family header. Both get the fd as a
 // utun device (iOS via the extension's tunnelFileDescriptor), so framing is
 // identical. `[T:Apple-XNU net/if_utun.h]`
+//
+// The fd may be NON-BLOCKING: the iOS `packetFlow` fd is managed by Apple's own
+// dispatch machinery and read() returns EAGAIN the moment the queued packets are
+// drained. Treating that as a fatal error killed the pump's tun-read thread right
+// after the first packet on-device (2026-07-03: exactly one `tun→pkt` line per
+// connect, then silence, while mDNSResponder kept retrying queries into utun5) —
+// which looked exactly like "iOS stops routing DNS to us". The reference stack
+// keeps the fd non-blocking and WAITS for readiness instead (wireguard-go wraps
+// the same stolen fd in os.File → Go netpoller polls it
+// `[T:wireguard-go tun/tun_darwin.go — CreateTUNFromFile]`). We do the same with
+// poll(2): EAGAIN/EWOULDBLOCK → poll for readiness → retry; EINTR → retry.
+// `[T:poll(2); POSIX read(2) EAGAIN on O_NONBLOCK]`
 #[cfg(any(target_os = "macos", target_os = "ios"))]
 mod imp {
     use std::io;
 
-    /// Read one IP packet, stripping the 4-byte AF header utun prepends (big-endian).
-    pub fn read_packet(fd: i32, buf: &mut [u8]) -> io::Result<usize> {
-        let mut framed = [0u8; 2048];
-        // SAFETY: read into a valid local buffer with a correct length.
-        let n = unsafe {
-            libc::read(
+    /// Block until `fd` is ready for `events` (POLLIN/POLLOUT). Infinite timeout —
+    /// each pump loop owns a dedicated thread. EINTR retries.
+    fn wait_ready(fd: i32, events: libc::c_short) -> io::Result<()> {
+        loop {
+            let mut pfd = libc::pollfd {
                 fd,
-                framed.as_mut_ptr() as *mut libc::c_void,
-                framed.len().min(buf.len() + 4),
-            )
-        };
-        if n < 0 {
-            return Err(io::Error::last_os_error());
+                events,
+                revents: 0,
+            };
+            // SAFETY: one valid pollfd, count 1, blocking indefinitely.
+            let r = unsafe { libc::poll(&mut pfd, 1, -1) };
+            if r >= 0 {
+                return Ok(());
+            }
+            let e = io::Error::last_os_error();
+            if e.kind() != io::ErrorKind::Interrupted {
+                return Err(e);
+            }
         }
-        let n = n as usize;
-        if n < 4 {
-            return Ok(0);
-        }
-        let payload = &framed[4..n];
-        buf[..payload.len()].copy_from_slice(payload);
-        Ok(payload.len())
     }
 
-    /// Write one IPv4 packet, prepending the 4-byte AF_INET header utun expects.
-    pub fn write_packet(fd: i32, packet: &[u8]) -> io::Result<usize> {
-        let mut framed = Vec::with_capacity(packet.len() + 4);
-        framed.extend_from_slice(&(libc::AF_INET as u32).to_be_bytes()); // [T:Apple-XNU] AF in network order
-        framed.extend_from_slice(packet);
-        // SAFETY: write from a valid local buffer with a correct length.
-        let n = unsafe { libc::write(fd, framed.as_ptr() as *const libc::c_void, framed.len()) };
-        if n < 0 {
-            return Err(io::Error::last_os_error());
+    /// Read one IP packet, stripping the 4-byte AF header utun prepends (big-endian).
+    /// Blocking semantics regardless of the fd's O_NONBLOCK flag (poll-and-retry).
+    pub fn read_packet(fd: i32, buf: &mut [u8]) -> io::Result<usize> {
+        let mut framed = [0u8; 2048];
+        loop {
+            // SAFETY: read into a valid local buffer with a correct length.
+            let n = unsafe {
+                libc::read(
+                    fd,
+                    framed.as_mut_ptr() as *mut libc::c_void,
+                    framed.len().min(buf.len() + 4),
+                )
+            };
+            if n >= 0 {
+                let n = n as usize;
+                if n < 4 {
+                    return Ok(0);
+                }
+                let payload = &framed[4..n];
+                buf[..payload.len()].copy_from_slice(payload);
+                return Ok(payload.len());
+            }
+            let e = io::Error::last_os_error();
+            match e.kind() {
+                io::ErrorKind::Interrupted => continue, // EINTR — retry
+                io::ErrorKind::WouldBlock => wait_ready(fd, libc::POLLIN)?, // EAGAIN — wait
+                _ => return Err(e),
+            }
         }
-        Ok(n as usize)
+    }
+
+    /// Write one bare IP packet, prepending the 4-byte AF header utun expects —
+    /// AF_INET or AF_INET6 by the packet's version nibble. Getting this wrong is
+    /// silent: the kernel drops the mis-framed packet, the interface counts no
+    /// input, and the sender sees 100% loss (2026-07-03 incident — the overlay is
+    /// IPv6 ULA, but every inbound packet was framed AF_INET). `[T:Apple-XNU net/if_utun.h]`
+    /// Same poll-and-retry as `read_packet` for a non-blocking fd.
+    pub fn write_packet(fd: i32, packet: &[u8]) -> io::Result<usize> {
+        let af = match packet.first().map(|b| b >> 4) {
+            Some(6) => libc::AF_INET6,
+            _ => libc::AF_INET,
+        };
+        let mut framed = Vec::with_capacity(packet.len() + 4);
+        framed.extend_from_slice(&(af as u32).to_be_bytes()); // [T:Apple-XNU] AF in network order
+        framed.extend_from_slice(packet);
+        loop {
+            // SAFETY: write from a valid local buffer with a correct length.
+            let n =
+                unsafe { libc::write(fd, framed.as_ptr() as *const libc::c_void, framed.len()) };
+            if n >= 0 {
+                return Ok(n as usize);
+            }
+            let e = io::Error::last_os_error();
+            match e.kind() {
+                io::ErrorKind::Interrupted => continue, // EINTR — retry
+                io::ErrorKind::WouldBlock => wait_ready(fd, libc::POLLOUT)?, // EAGAIN — wait
+                _ => return Err(e),
+            }
+        }
     }
 }
 
@@ -88,6 +146,56 @@ mod imp {
             return Err(io::Error::last_os_error());
         }
         Ok(n as usize)
+    }
+}
+
+// The EAGAIN/poll path is exactly what a non-blocking iOS packetFlow fd exercises;
+// pipes give the same read/write + O_NONBLOCK semantics without needing a utun.
+#[cfg(all(test, any(target_os = "macos", target_os = "ios")))]
+mod tests {
+    use super::*;
+
+    /// A non-blocking pipe: read side must NOT kill the reader with WouldBlock —
+    /// `read_packet` waits via poll(2) and returns the packet written later. This
+    /// is the on-device failure of 2026-07-03 (tun-read thread died on the first
+    /// EAGAIN from the packetFlow fd) pinned as a unit test.
+    #[test]
+    fn read_packet_survives_eagain_on_nonblocking_fd() {
+        let mut fds = [0i32; 2];
+        // SAFETY: valid 2-int array for pipe(2).
+        assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
+        let (rfd, wfd) = (fds[0], fds[1]);
+        // SAFETY: valid fd; set O_NONBLOCK like the iOS packetFlow fd.
+        unsafe {
+            let fl = libc::fcntl(rfd, libc::F_GETFL);
+            assert_eq!(libc::fcntl(rfd, libc::F_SETFL, fl | libc::O_NONBLOCK), 0);
+        }
+
+        let reader = std::thread::spawn(move || {
+            let mut buf = [0u8; 128];
+            read_packet(rfd, &mut buf).map(|n| buf[..n].to_vec())
+        });
+        // Give the reader time to hit EAGAIN and park in poll before data arrives.
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        let framed: &[u8] = &[0, 0, 0, 2, 0x45, 0xAA, 0xBB]; // AF_INET + 3 payload bytes
+                                                             // SAFETY: write from a valid local buffer with its real length.
+        let w = unsafe { libc::write(wfd, framed.as_ptr() as *const libc::c_void, framed.len()) };
+        assert_eq!(w, framed.len() as isize);
+
+        let got = reader
+            .join()
+            .unwrap()
+            .expect("read after EAGAIN must succeed");
+        assert_eq!(
+            got,
+            vec![0x45, 0xAA, 0xBB],
+            "AF header stripped, payload intact"
+        );
+        // SAFETY: fds owned by this test.
+        unsafe {
+            libc::close(rfd);
+            libc::close(wfd);
+        }
     }
 }
 

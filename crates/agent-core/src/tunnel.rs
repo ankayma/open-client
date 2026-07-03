@@ -11,9 +11,33 @@ pub use boringtun::x25519::{PublicKey, StaticSecret};
 
 /// Build a boringtun tunnel toward one peer.
 /// `index` must be unique per local tunnel (the WireGuard sender index).
-/// `[T:boringtun@0.7-Tunn::new]`
-pub fn make_tunn(local_private: StaticSecret, peer_public: PublicKey, index: u32) -> Tunn {
-    Tunn::new(local_private, peer_public, None, None, index, None)
+/// `persistent_keepalive` (seconds): pass `Some(25)` ONLY on a node behind NAT —
+/// keeps the NAT mapping alive so inbound survives silence >30-60s; a node with a
+/// public endpoint must pass `None` (no traffic to burn, nothing to keep open).
+/// boringtun only emits keepalives while a session exists, so idle-teardown
+/// (pump.rs) still ends the tunnel — the two compose, not conflict. `[T:A.1.7]`
+/// `[T:boringtun@0.7-Tunn::new]` `[T:wireguard.com/quickstart PersistentKeepalive=25]`
+pub fn make_tunn(
+    local_private: StaticSecret,
+    peer_public: PublicKey,
+    index: u32,
+    persistent_keepalive: Option<u16>,
+) -> Tunn {
+    Tunn::new(
+        local_private,
+        peer_public,
+        None,
+        persistent_keepalive,
+        index,
+        None,
+    )
+}
+
+/// Whether this tunnel has ever completed a WireGuard handshake — i.e. a session
+/// was established. `stats().0` = time since last handshake; `None` means no
+/// handshake yet. `[T:boringtun@0.7-Tunn::stats]`
+pub fn handshake_established(tunn: &Tunn) -> bool {
+    tunn.stats().0.is_some()
 }
 
 #[cfg(test)]
@@ -37,8 +61,8 @@ mod tests {
     fn encrypted_roundtrip_between_two_peers() {
         let (a_priv, a_pub) = keypair();
         let (b_priv, b_pub) = keypair();
-        let mut a = make_tunn(a_priv, b_pub, 1);
-        let mut b = make_tunn(b_priv, a_pub, 2);
+        let mut a = make_tunn(a_priv, b_pub, 1, None);
+        let mut b = make_tunn(b_priv, a_pub, 2, None);
 
         let mut buf = [0u8; 2048];
 
@@ -55,6 +79,10 @@ mod tests {
         };
         // 3. A consumes the response → session established (may emit a keepalive).
         let _ = a.decapsulate(None, &hs_resp, &mut buf);
+        assert!(
+            handshake_established(&a),
+            "stats().0 must be Some once the handshake completed"
+        );
 
         // 4. A encrypts a real IPv4 packet (boringtun only surfaces decrypted
         //    payloads that parse as IP — it reads the version nibble). Minimal
