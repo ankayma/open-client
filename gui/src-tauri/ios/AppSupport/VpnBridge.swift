@@ -5,6 +5,19 @@
 // All real work is in TunnelManager. [T:A.1.9]
 
 import Foundation
+import UIKit
+
+/// This device's name for enrollment (e.g. "iPhone", or the user-assigned name when
+/// the device-name entitlement is granted). Copied into `buf` (max `len` incl NUL).
+/// iOS's `gethostname(2)` returns "localhost" in the sandbox, so the Rust layer fell
+/// back to a hard-coded "ankayma-desktop" on every phone — this gives the real name.
+@_cdecl("ankayma_device_name")
+public func ankayma_device_name(_ buf: UnsafeMutablePointer<CChar>, _ len: Int) {
+    let name = UIDevice.current.name
+    name.withCString { src in
+        _ = strlcpy(buf, src, len)
+    }
+}
 
 /// Start the tunnel with a resolved config JSON (NUL-terminated UTF-8). Returns 0 if
 /// accepted, -1 on a decoding error. The async install/start runs fire-and-forget;

@@ -276,9 +276,29 @@ fn current_connection(state: &AppState) -> ConnectionState {
 /// the SAME node the daemon uses — but only if it still exists server-side, so a
 /// GUI restart/reconnect doesn't enroll a duplicate node. Returns None when there
 /// is no valid file or the stored node was removed (→ caller enrolls fresh).
+/// Where the node identity (agent.json) is persisted. On iOS this MUST be the app
+/// data dir: `$HOME` in the sandbox is not a stable, persistent location, so a
+/// handoff written there is lost between launches — which made every Connect
+/// enroll a BRAND-NEW node with a fresh WireGuard key (roster filled with
+/// duplicate "ankayma-desktop" nodes; peers that already knew the old key dropped
+/// the new handshakes → tunnel stuck at rx 0). On desktop it MUST stay under
+/// `$HOME/.ankayma` because the privileged `agent up` daemon reads it from there.
+/// `[T:A.1.10]`
+fn handoff_state_dir(state: &AppState) -> std::path::PathBuf {
+    #[cfg(target_os = "ios")]
+    {
+        return state.data_dir.join(".ankayma");
+    }
+    #[cfg(not(target_os = "ios"))]
+    {
+        let _ = state;
+        let home = std::env::var("HOME").unwrap_or_default();
+        std::path::PathBuf::from(home).join(".ankayma")
+    }
+}
+
 async fn load_handoff_node(state: &AppState, tok: &str) -> Option<EnrolledNode> {
-    let home = std::env::var("HOME").ok()?;
-    let path = std::path::Path::new(&home).join(".ankayma/agent.json");
+    let path = handoff_state_dir(state).join("agent.json");
     let bytes = std::fs::read(&path).ok()?;
     #[derive(serde::Deserialize)]
     struct Stored {
@@ -333,17 +353,18 @@ async fn connect_inner(state: &AppState) -> Result<(), String> {
         .await
         .map_err(|e| e.to_string())?;
 
-    // Handoff: persist this identity where the privileged daemon (`agent up`)
-    // reads it (~/.ankayma/agent.json), so the data plane reuses THIS node — no
-    // duplicate enrollment. The GUI never opens a utun itself (needs root);
-    // `start_dataplane` hands off to the daemon. [T:A.1.10 / up.rs load_or_enroll]
-    if let Err(e) = write_handoff_state(
+    // Handoff: persist this identity so the NEXT connect reuses THIS node instead
+    // of enrolling a duplicate. Desktop writes ~/.ankayma/agent.json for the
+    // privileged `agent up` daemon to read; iOS writes the app data dir (the PTP
+    // runs in-app, no daemon) — see handoff_state_dir. [T:A.1.10 / up.rs load_or_enroll]
+    if let Err(e) = write_handoff_state_to(
+        &handoff_state_dir(state),
         &kp.private_b64,
         &kp.public_b64,
         &resp.node_id,
         &resp.overlay_ip,
     ) {
-        log::warn!("handoff state not written ({e}); `agent up` would re-enroll");
+        log::warn!("handoff state not written ({e}); a reconnect would re-enroll");
     }
 
     *state.node.lock().expect("node lock poisoned") = Some(EnrolledNode {
@@ -579,7 +600,29 @@ async fn get_quota(state: State<'_, AppState>) -> Result<Quota, String> {
 
 // --- Mesh enrollment (real control-plane half of connect) ---
 
+// iOS: `gethostname(2)` returns "localhost" in the sandbox, so ask UIKit for the
+// real device name (Swift `ankayma_device_name` in VpnBridge.swift).
+#[cfg(target_os = "ios")]
+extern "C" {
+    fn ankayma_device_name(buf: *mut std::os::raw::c_char, len: usize);
+}
+
 fn device_hostname() -> String {
+    // iOS first: UIDevice.current.name via the Swift bridge (the sandbox hostname is
+    // useless), else every phone enrolls as the "ankayma-desktop" fallback below.
+    #[cfg(target_os = "ios")]
+    {
+        let mut buf = [0i8; 256];
+        // SAFETY: valid buffer + length; Swift strlcpy's a NUL-terminated name in.
+        unsafe { ankayma_device_name(buf.as_mut_ptr(), buf.len()) };
+        let name = unsafe { std::ffi::CStr::from_ptr(buf.as_ptr()) }
+            .to_string_lossy()
+            .trim()
+            .to_string();
+        if !name.is_empty() && name != "localhost" {
+            return name;
+        }
+    }
     // $HOSTNAME is set by shells on Linux but NOT by macOS launchd/GUI apps.
     // Fall back to gethostname(2) which works on macOS, Linux, and iOS sandbox.
     if let Ok(h) = std::env::var("HOSTNAME") {
@@ -893,15 +936,16 @@ async fn join_enroll_node(
         .await
         .map_err(|e| e.to_string())?;
 
-    // Handoff: persist this identity where the privileged daemon reads it so the
-    // data plane reuses THIS node — no duplicate enroll. [T:A.1.10 / up.rs]
-    if let Err(e) = write_handoff_state(
+    // Handoff: persist this identity so a reconnect reuses THIS node — no
+    // duplicate enroll. iOS→app data dir, desktop→~/.ankayma. [T:A.1.10 / up.rs]
+    if let Err(e) = write_handoff_state_to(
+        &handoff_state_dir(state.inner()),
         &kp.private_b64,
         &kp.public_b64,
         &resp.node_id,
         &resp.overlay_ip,
     ) {
-        log::warn!("handoff state not written ({e}); `agent up` would re-enroll");
+        log::warn!("handoff state not written ({e}); a reconnect would re-enroll");
     }
 
     *state.node.lock().expect("node lock poisoned") = Some(EnrolledNode {
@@ -922,21 +966,10 @@ async fn join_enroll_node(
 
 const DATAPLANE_LISTEN_PORT: u16 = 51820; // WireGuard default; matches agent-daemon
 
-/// Persist the enrolled identity to `~/.ankayma/agent.json` — the same file the
-/// privileged `agent` daemon reads on `agent up`, so it reuses THIS node instead
-/// of enrolling a second one. Shape mirrors `agent-daemon::up::AgentState`.
-fn write_handoff_state(
-    private_b64: &str,
-    public_b64: &str,
-    node_id: &str,
-    overlay_ip: &str,
-) -> Result<(), String> {
-    let home = std::env::var("HOME").map_err(|_| "HOME not set".to_string())?;
-    let dir = std::path::Path::new(&home).join(".ankayma");
-    write_handoff_state_to(&dir, private_b64, public_b64, node_id, overlay_ip)
-}
-
-/// Dir-parameterized body of `write_handoff_state`, testable without touching
+/// Persist the enrolled identity to `<dir>/agent.json` so a reconnect reuses THIS
+/// node instead of enrolling a second one. `dir` comes from `handoff_state_dir`
+/// (desktop: ~/.ankayma, shared with the `agent up` daemon; iOS: app data dir).
+/// Shape mirrors `agent-daemon::up::AgentState`. Body testable without touching
 /// the process-global HOME.
 fn write_handoff_state_to(
     dir: &std::path::Path,
@@ -1038,13 +1071,44 @@ mod helper_ipc {
     /// (SMJobBless) numeric codes, which don't line up with what the modern
     /// SMAppService API actually returns — checking status first sidesteps the
     /// mismatch entirely instead of depending on it. macOS 13+ only.
+    /// Whether the helper's control socket is actually answering — the ground
+    /// truth that the daemon is loaded AND running, which `status()` alone does
+    /// NOT guarantee (see below).
+    fn socket_live() -> bool {
+        UnixStream::connect(SOCKET_PATH).is_ok()
+    }
+
     pub fn ensure_registered() -> Result<(), String> {
         use smappservice_rs::{AppService, ServiceStatus, ServiceType};
+        // Ground truth first: if the privileged helper is already answering its
+        // socket, it's installed and running — use it, whatever SMAppService's
+        // BTM bookkeeping says. This makes Connect robust to a helper installed
+        // by any means (SMAppService, a manual LaunchDaemon, an MDM push) and
+        // sidesteps smappservice-rs 0.1.3's unreliable status()/register() error
+        // mapping when BTM state is stale after reinstall/re-sign churn.
+        if socket_live() {
+            return Ok(());
+        }
         let svc = AppService::new(ServiceType::Daemon {
             plist_name: HELPER_PLIST_NAME,
         });
         match svc.status() {
-            ServiceStatus::Enabled => Ok(()),
+            // `Enabled` in the Background Task Manager DB does NOT prove launchd
+            // has the CURRENT app generation's job loaded: after a reinstall /
+            // re-sign / reboot, BTM can still read "enabled" (a stale generation)
+            // while no daemon is actually running and the socket is absent
+            // (observed 2026-07-03: app gen 3, helper registration gen 1, socket
+            // missing → "connect helper: No such file or directory"). If the
+            // socket is dead, force a re-register (unregister → register) so
+            // launchd reloads the job for this generation. `[T:A.1.7 dataplane]`
+            ServiceStatus::Enabled => {
+                if socket_live() {
+                    return Ok(());
+                }
+                let _ = svc.unregister(); // best-effort clear of the stale job
+                svc.register()
+                    .map_err(|e| format!("re-register helper daemon (stale registration): {e}"))
+            }
             ServiceStatus::RequiresApproval => {
                 AppService::open_system_settings_login_items();
                 Err(
@@ -1189,6 +1253,66 @@ fn stop_dataplane_inner() -> Result<(), String> {
 #[tauri::command]
 async fn stop_dataplane() -> Result<(), String> {
     stop_dataplane_inner()
+}
+
+/// [F-2] "SSH ↗" — open the system Terminal running `agent ssh <node_id>` so the
+/// receipt + path proof + interactive shell render in a real TTY. Interim C1 UX:
+/// an embedded xterm+PTY terminal is the follow-up. The session token is NOT
+/// inlined in the command line (it would be visible in the Terminal window and
+/// `ps`); the spawned shell reads it from the 0600 session file at run time.
+#[tauri::command]
+async fn open_ssh_terminal(
+    state: State<'_, AppState>,
+    node_id: String,
+    login: Option<String>,
+) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        state.token().ok_or("not signed in")?;
+        // node_id/login are interpolated into a shell line — allowlist, don't escape.
+        let ok = |s: &str| {
+            !s.is_empty()
+                && s.chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'))
+        };
+        if !ok(&node_id) {
+            return Err("invalid node id".into());
+        }
+        if let Some(l) = login.as_deref() {
+            if !ok(l) {
+                return Err("invalid login".into());
+            }
+        }
+        let bin = locate_agent_binary()?;
+        let session = session_file_path(&state.data_dir);
+        let mut cmd = format!(
+            "ANKAYMA_TOKEN=\"$(cat '{}')\" '{}' ssh {node_id} --control-plane {}",
+            session.display(),
+            bin.display(),
+            state.base_url
+        );
+        if let Some(l) = login.as_deref() {
+            cmd.push_str(&format!(" --login {l}"));
+        }
+        // AppleScript string literal: escape backslashes then quotes.
+        let escaped = cmd.replace('\\', "\\\\").replace('"', "\\\"");
+        let script =
+            format!("tell application \"Terminal\"\nactivate\ndo script \"{escaped}\"\nend tell");
+        let status = std::process::Command::new("osascript")
+            .arg("-e")
+            .arg(script)
+            .status()
+            .map_err(|e| format!("launch Terminal: {e}"))?;
+        if !status.success() {
+            return Err("osascript failed to open Terminal".into());
+        }
+        Ok(())
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (node_id, login);
+        Err("SSH terminal launch is macOS-only for now".into())
+    }
 }
 
 #[derive(serde::Serialize)]
@@ -1894,6 +2018,7 @@ pub fn run() {
             join_enroll_node,
             start_dataplane,
             stop_dataplane,
+            open_ssh_terminal,
             get_dataplane_status,
             track_event,
             open_stripe_checkout,

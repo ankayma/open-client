@@ -56,21 +56,108 @@ fn status_string(code: i32) -> &'static str {
 #[derive(Serialize)]
 pub struct VpnStatus {
     pub status: String,
+    /// Peers in the roster handed to the tunnel (0 when disconnected). Real count,
+    /// not the old hard-coded 0 the iOS UI used to show.
+    pub peer_count: usize,
 }
 
-/// Build the resolved tunnel config JSON for the extension from the enrolled node.
-/// Shape matches `agent-ios-ptp`'s `Config` (private key + overlay + peers). [T:A.1.1]
+/// Build the resolved tunnel config JSON for the extension from the enrolled node,
+/// plus (best-effort) the tenant's F-3 resolve table so the extension can answer
+/// private names itself — iOS has no OS-level split-DNS hook, unlike the macOS/
+/// Linux daemon's `/etc/resolver/<zone>`. Shape matches `agent-ios-ptp`'s `Config`
+/// (private key + overlay + peers + zone + resolve). [T:A.1.1, f3-privdomain-ios-plan.md Phase 1]
+///
+/// The resolve table is fetched fresh on every `connect` (not cached) — the
+/// documented model is "reconnect to see new devices/services", matching how a
+/// user must toggle the tunnel to pick up config changes. A fetch failure (e.g.
+/// offline enrollment check) just omits `zone`/`resolve`; it never blocks connect.
 #[cfg(target_os = "ios")]
-fn build_config(state: &AppState) -> Result<String, String> {
-    let guard = state.node.lock().expect("node lock poisoned");
-    let node = guard.as_ref().ok_or("not enrolled yet")?;
+async fn build_config(state: &AppState) -> Result<String, String> {
+    let (private_b64, overlay_ip, enroll_peers) = {
+        let guard = state.node.lock().expect("node lock poisoned");
+        let node = guard.as_ref().ok_or("not enrolled yet")?;
+        (
+            node.private_b64.clone(),
+            node.overlay_ip.clone(),
+            node.peers.clone(),
+        )
+    };
+    // The enroll response's peer list is a point-in-time snapshot and, for a
+    // freshly enrolled node, is often empty — which stranded the iOS tunnel with
+    // "0 peers" and no route to anything (2026-07-03). The desktop daemon avoids
+    // this by re-fetching the full roster on `agent up` + every SSE cycle; the
+    // Packet Tunnel has no such loop, so fetch the current roster HERE and hand
+    // the complete peer set to the extension. Self is dropped (it's the tun
+    // address, not a dialable peer). Falls back to the enroll snapshot on error.
+    let peers: Vec<agent_core::domain::PeerInfo> = match state.token() {
+        Some(tok) => match agent_core::adapters::peers(&state.http, &state.base_url, &tok).await {
+            Ok(list) => list.into_iter().filter(|p| p.overlay_ip != overlay_ip).collect(),
+            Err(_) => enroll_peers,
+        },
+        None => enroll_peers,
+    };
+    // Reflect the ACTUAL roster handed to the tunnel back into app state so the UI
+    // shows the real peer count instead of the empty enroll snapshot (the iOS
+    // status path had no other source and hard-coded "0 peers").
+    if let Some(n) = state.node.lock().expect("node lock poisoned").as_mut() {
+        n.peers = peers.clone();
+    }
+    let (zone, resolve): (Option<String>, Vec<serde_json::Value>) = match state.token() {
+        Some(tok) => {
+            match agent_core::adapters::resolve_subdomains(&state.http, &state.base_url, &tok).await
+            {
+                Ok(t) => {
+                    let names = t
+                        .names
+                        .iter()
+                        .map(|n| serde_json::json!({"fqdn": n.fqdn, "overlay_ip": n.overlay_ip}))
+                        .collect();
+                    (Some(t.zone), names)
+                }
+                Err(_) => (None, Vec::new()), // private-default: no table = no private names
+            }
+        }
+        None => (None, Vec::new()),
+    };
     let cfg = serde_json::json!({
-        "private_key_b64": node.private_b64,
-        "overlay_ip": node.overlay_ip,
+        "private_key_b64": private_b64,
+        "overlay_ip": overlay_ip,
         "listen_port": 51820u16,
-        "peers": node.peers,
+        "peers": peers,
+        "zone": zone,
+        "dns_ip": magic_dns_ip(&overlay_ip),
+        // Upstreams for the pump's forwarding resolver (matchDomains=[""] routes ALL
+        // DNS to us; non-private names must be delegated or every site breaks). The
+        // relay races ALL entries per query, first answer wins — one dead/blocked
+        // public resolver must not take the forward path down (Tailscale races its
+        // upstreams the same way [T:tailscale forwarder.go]). v1 uses public
+        // resolvers for stability; reading the device's OWN resolvers via res_ninit
+        // is the documented refinement (docs/f3-ios-dns-forwarding-resolver.md).
+        // TODO[A]: res_ninit upstream.
+        "upstream_dns": ["1.1.1.1", "8.8.8.8"],
+        "resolve": resolve,
     });
     serde_json::to_string(&cfg).map_err(|e| e.to_string())
+}
+
+/// The tunnel-local DNS server address for iOS. Deliberately **IPv4**: iOS does NOT
+/// reliably route DNS to an IPv6 server inside a Packet Tunnel (Apple-forums "IPv6
+/// DNS Queries Not Resolving"), and matchDomains only works when the server is
+/// reachable — an IPv4 server in the tunnel's IPv4 included routes is the pattern
+/// that actually works. Safari still gets AAAA (the peer's IPv6 overlay) back and
+/// connects over IPv6, so the overlay stays IPv6-only.
+///
+/// `100.100.100.53`, NOT Tailscale's `100.100.100.100`: a phone commonly has 2-3
+/// VPNs installed, and reusing another vendor's magic-DNS address is a needless
+/// collision. Still in `100.64.0.0/10` (RFC 6598 CGNAT — never routed on the public
+/// internet, so it can't shadow a real site), just a distinct host.
+/// `[T:RFC-6598; Apple-forums NEDNSSettings; avoid Tailscale 100.100.100.100]`
+#[cfg(target_os = "ios")]
+const MAGIC_DNS_IP: &str = "100.100.100.53";
+
+#[cfg(target_os = "ios")]
+fn magic_dns_ip(_overlay_ip: &str) -> Option<String> {
+    Some(MAGIC_DNS_IP.to_string())
 }
 
 /// Enroll on the control plane (reusing the shared connect flow), build the resolved
@@ -80,7 +167,7 @@ pub async fn vpn_connect(state: State<'_, AppState>) -> Result<(), String> {
     #[cfg(target_os = "ios")]
     {
         crate::connect_inner(&state).await?;
-        let config = build_config(&state)?;
+        let config = build_config(&state).await?;
         let c = std::ffi::CString::new(config).map_err(|e| e.to_string())?;
         // SAFETY: `c` is a valid NUL-terminated C string, read only for this call.
         let rc = unsafe { ffi::ankayma_vpn_connect(c.as_ptr()) };
@@ -111,21 +198,31 @@ pub fn vpn_disconnect() -> Result<(), String> {
     }
 }
 
-/// Current tunnel status for the UI.
+/// Current tunnel status for the UI, including the real peer count from the
+/// roster last handed to the tunnel (`build_config` writes it into app state).
 #[tauri::command]
-pub fn vpn_status() -> VpnStatus {
+pub fn vpn_status(state: State<'_, AppState>) -> VpnStatus {
+    let peer_count = state
+        .node
+        .lock()
+        .expect("node lock poisoned")
+        .as_ref()
+        .map(|n| n.peers.len())
+        .unwrap_or(0);
     #[cfg(target_os = "ios")]
     {
         // SAFETY: returns a cached integer; no pointers involved.
         let code = unsafe { ffi::ankayma_vpn_status() };
         VpnStatus {
             status: status_string(code).to_string(),
+            peer_count,
         }
     }
     #[cfg(not(target_os = "ios"))]
     {
         VpnStatus {
             status: "unsupported".to_string(),
+            peer_count,
         }
     }
 }

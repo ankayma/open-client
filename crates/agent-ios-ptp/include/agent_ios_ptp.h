@@ -35,11 +35,22 @@ typedef struct PtpHandle PtpHandle;
  * Returns an opaque handle, or NULL on error (details go to the device console).
  * `fd` must stay open for the tunnel's lifetime; `config_json` is a NUL-terminated
  * UTF-8 string read only for the duration of the call.
+ * `bound_if` is the index of the PHYSICAL interface (WiFi/cellular) to pin the pump's
+ * UDP socket to (IP_BOUND_IF), so its packets egress the device instead of being
+ * swallowed by our own tunnel. Pass 0 to skip pinning. Get it in the extension via
+ * if_nametoindex on the primary non-loopback/non-utun interface.
  */
-PtpHandle *ankayma_ptp_start(int32_t fd, const char *config_json);
+PtpHandle *ankayma_ptp_start(int32_t fd, const char *config_json, uint32_t bound_if);
 
 /* Stop the tunnel and free `handle`. NULL is a no-op. */
 void ankayma_ptp_stop(PtpHandle *handle);
+
+/*
+ * F-3 DNS forwarding is done entirely inside Rust (agent-ios-ptp `ios_dns_forward`):
+ * a non-private query is relayed to the device's upstream over a BSD UDP socket pinned
+ * to the physical interface (IP_BOUND_IF), which egresses the real network from the
+ * Packet Tunnel Provider — same as the WG data socket, and how Tailscale does it on
+ * darwin [T:Tailscale net/netns/netns_darwin.go]. No Swift/FFI DNS bridge is needed. */
 
 #ifdef __cplusplus
 } /* extern "C" */
