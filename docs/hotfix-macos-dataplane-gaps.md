@@ -1,3 +1,4 @@
+
 # Hotfix — macOS Dataplane: 3 Gap cần fix
 
 > **Tạo**: 2026-07-01  
@@ -228,4 +229,4 @@ Bundle layout thực tế: helper binary tại `Contents/MacOS/ankayma-helper`, 
 
 Sau khi rebuild binary helper + cài lại `.app`, `sudo launchctl kickstart -k system/com.ankayma.helper` **không** làm daemon đang chạy nạp lại binary mới (pid không đổi trước/sau). Do đó nhánh SIGTERM-verify-SIGKILL-escalation trong `stop_agent()` (main.rs) **chưa được re-verify sống** với daemon build cuối — chỉ mới verify logic + đã confirm daemon cũ (build trước fix) không tự chết với SIGTERM đúng như dự đoán. Việc reload LaunchDaemon tin cậy nhất là reboot/logout (không ép máy làm giữa chừng session này).
 
-**QC checklist khi có dịp reboot**: Connect → Disconnect qua tray → Disconnect qua UI → Quit app (Cmd+Q) — mỗi lần xác nhận `ps aux | grep 'agent up'` không còn process nào sống sót, và `/tmp/ankayma-helper.log` log đúng nhánh (kill thành công hay phải escalate SIGKILL).
+**QC checklist khi có dịp reboot**: Connect → Disconnect qua tray → Disconnect qua UI → Quit app (Cmd+Q) — mỗi lần xác nhận `ps aux | grep 'agent up'` không còn process nào sống sót, và `/var/log/ankayma/helper.log` (trước 2026-07-02: `/tmp/ankayma-helper.log`) log đúng nhánh (kill thành công hay phải escalate SIGKILL).
