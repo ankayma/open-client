@@ -182,7 +182,7 @@
 
 <main>
 	<header>
-		<button class="back-btn" onclick={() => goto('/services')}>
+		<button class="back-btn" onclick={() => goto('/settings/devices')}>
 			<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
 				<path d="M19 12H5M12 5l-7 7 7 7"/>
 			</svg>

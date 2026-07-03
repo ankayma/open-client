@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { myAccess, openSubdomain } from "$lib/tauri";
+  import { myAccess, openSubdomain, getNodeInfo } from "$lib/tauri";
   import type { MyAccess, AccessService } from "$lib/types";
   import { connection } from "$lib/stores";
   import ConnectionCard from "$lib/components/ConnectionCard.svelte";
@@ -8,13 +8,20 @@
 
   // my-access (addendum §D): the services this identity may reach, derived from the
   // active PolicyBlock. Admin sees all (allow-within-owner); members see what policy
-  // grants. The rule_ref shows WHY each is granted.
+  // grants. The rule_ref shows WHY each is granted. Fetched over REST regardless of
+  // tunnel state — the list itself never needs to hide on disconnect (H.2.1); only
+  // tunnel-dependent actions ("Open ↗") get disabled below.
   let data = $state<MyAccess | null>(null);
   let loading = $state(true);
   let error = $state("");
   let pathChainSvc = $state<AccessService | null>(null);
+  let myHostname = $state<string | null>(null);
 
-  onMount(load);
+  onMount(() => {
+    load();
+    getNodeInfo().then((n) => (myHostname = n.hostname)).catch(() => {});
+  });
+
   async function load() {
     loading = true;
     error = "";
@@ -26,6 +33,32 @@
       loading = false;
     }
   }
+
+  // Group services by node — a node with more than one reachable service renders
+  // as one card with a child list, instead of one flat card per service. `owned`
+  // is a device-scoped signal (does this node match *my* current hostname) — the
+  // my-access response has no cross-device ownership field yet, so cards for a
+  // teammate's other devices land in "Team / Shared" even if they're that
+  // teammate's own node. [A] narrower than full ownership; verify once my-access
+  // grows an owner field.
+  interface NodeGroup { node: string; owned: boolean; services: AccessService[] }
+  let groups = $derived.by((): NodeGroup[] => {
+    const byNode = new Map<string, AccessService[]>();
+    for (const svc of data?.services ?? []) {
+      const list = byNode.get(svc.node) ?? [];
+      list.push(svc);
+      byNode.set(svc.node, list);
+    }
+    return [...byNode.entries()].map(([node, services]) => ({
+      node,
+      owned: myHostname !== null && node === myHostname,
+      services
+    }));
+  });
+  let ownedGroups = $derived(groups.filter((g) => g.owned));
+  let teamGroups = $derived(groups.filter((g) => !g.owned));
+  let showSectionHeaders = $derived(ownedGroups.length > 0 && teamGroups.length > 0);
+  let connected = $derived($connection.status === "connected");
 </script>
 
 <main>
@@ -49,17 +82,10 @@
       <p class="desc">
         What you can reach on this mesh, derived from your team's access policy. Each
         service opens privately over the overlay — no public port.
-        {#if data && $connection.status === "connected"}<span class="role-chip">{data.role}</span>{/if}
+        {#if data}<span class="role-chip">{data.role}</span>{/if}
       </p>
 
-      {#if $connection.status !== "connected"}
-        <div class="empty">
-          <p>Not connected.</p>
-          <p class="hint">
-            Connect above to reach the services your team's access policy grants you.
-          </p>
-        </div>
-      {:else if error}
+      {#if error}
         <p class="err">{error}</p>
       {:else if loading}
         <div class="empty">Loading…</div>
@@ -73,34 +99,92 @@
         </div>
       {:else}
         <div class="grid">
-          {#each data.services as svc (svc.fqdn)}
-            <div class="card" class:denied={svc.status === "denied"}>
-              <div class="card-head">
-                <span class="label">{svc.label}</span>
-                {#if svc.status !== "denied"}
-                  <button class="btn-primary" onclick={() => openSubdomain(svc.fqdn)}>Open ↗</button>
-                {/if}
-              </div>
-              <code class="fqdn">{svc.fqdn}</code>
-              <div class="tags">
-                <span class="tag" title="why you can reach this">{svc.rule_ref}</span>
-                {#each svc.tags ?? [] as t}<span class="tag">{t}</span>{/each}
-              </div>
-              <div class="meta">
-                {#if svc.status === "denied"}
-                  <span class="denied-text">access denied (no policy)</span>
-                {:else}
-                  <span>→ {svc.node}</span>
-                  <button class="btn-secondary chain-btn" onclick={() => (pathChainSvc = svc)}>◈ path chain</button>
-                {/if}
-              </div>
-            </div>
-          {/each}
+          {#if ownedGroups.length > 0}
+            {#if showSectionHeaders}<div class="section-divider">── My Nodes</div>{/if}
+            {#each ownedGroups as group (group.node)}
+              {#if group.services.length === 1}
+                {@render serviceCard(group.services[0], true)}
+              {:else}
+                {@render nodeCard(group)}
+              {/if}
+            {/each}
+          {/if}
+
+          {#if teamGroups.length > 0}
+            {#if showSectionHeaders}<div class="section-divider">── Team / Shared</div>{/if}
+            {#each teamGroups as group (group.node)}
+              {#if group.services.length === 1}
+                {@render serviceCard(group.services[0], false)}
+              {:else}
+                {@render nodeCard(group)}
+              {/if}
+            {/each}
+          {/if}
         </div>
       {/if}
     </section>
   </div>
 </main>
+
+{#snippet serviceCard(svc: AccessService, owned: boolean)}
+  <div class="card" class:denied={svc.status === "denied"} class:owned>
+    <div class="card-head">
+      <span class="label">
+        {svc.label}
+        {#if owned}<span class="owned-badge">● owned</span>{/if}
+      </span>
+      {#if svc.status !== "denied"}
+        <button class="btn-primary" disabled={!connected} onclick={() => openSubdomain(svc.fqdn)}>Open ↗</button>
+      {/if}
+    </div>
+    <code class="fqdn">{svc.fqdn}</code>
+    <div class="tags">
+      <span class="tag" title="why you can reach this">{svc.rule_ref}</span>
+      {#each svc.tags ?? [] as t}<span class="tag">{t}</span>{/each}
+    </div>
+    <div class="meta">
+      {#if svc.status === "denied"}
+        <span class="denied-text">access denied (no policy)</span>
+      {:else}
+        <span>→ {svc.node}</span>
+        <button class="btn-secondary chain-btn" onclick={() => (pathChainSvc = svc)}>◈ path chain</button>
+      {/if}
+    </div>
+  </div>
+{/snippet}
+
+{#snippet nodeCard(group: NodeGroup)}
+  <div class="card node-card" class:owned={group.owned}>
+    <div class="card-head">
+      <span class="label">
+        {group.node}
+        {#if group.owned}<span class="owned-badge">● owned</span>{/if}
+      </span>
+    </div>
+    <div class="child-list">
+      {#each group.services as svc (svc.fqdn)}
+        <div class="child-row" class:denied={svc.status === "denied"}>
+          <div class="child-info">
+            <span class="child-label">{svc.label}</span>
+            <code class="fqdn">{svc.fqdn}</code>
+            <div class="tags">
+              <span class="tag" title="why you can reach this">{svc.rule_ref}</span>
+              {#each svc.tags ?? [] as t}<span class="tag">{t}</span>{/each}
+            </div>
+          </div>
+          {#if svc.status === "denied"}
+            <span class="denied-text">access denied</span>
+          {:else}
+            <div class="child-actions">
+              <button class="btn-primary sm" disabled={!connected} onclick={() => openSubdomain(svc.fqdn)}>Open ↗</button>
+              <button class="btn-secondary sm" onclick={() => (pathChainSvc = svc)}>◈</button>
+            </div>
+          {/if}
+        </div>
+      {/each}
+    </div>
+  </div>
+{/snippet}
 
 {#if pathChainSvc}
   <PathChain node={pathChainSvc.node} onclose={() => (pathChainSvc = null)} />
@@ -214,6 +298,15 @@
       grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
     }
   }
+  .section-divider {
+    grid-column: 1 / -1;
+    font-size: 11px;
+    font-weight: 700;
+    color: var(--c-text-dim);
+    text-transform: uppercase;
+    letter-spacing: 0.8px;
+    padding: 4px 0;
+  }
   .card {
     background: var(--c-surface);
     border: 1px solid var(--c-border);
@@ -226,6 +319,11 @@
   .card.denied {
     opacity: 0.55;
   }
+  /* Own node — accent left border (H.2.1.1 ▌ visual marker) */
+  .card.owned {
+    border-left: 3px solid var(--c-accent);
+    padding-left: 14px;
+  }
   .card-head {
     display: flex;
     align-items: center;
@@ -235,6 +333,19 @@
   .label {
     font-weight: 700;
     font-size: 15px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .owned-badge {
+    font-size: 11px;
+    font-weight: 500;
+    color: color-mix(in srgb, var(--c-accent) 80%, var(--c-text-dim));
+    background: color-mix(in srgb, var(--c-accent) 10%, transparent);
+    border: 1px solid color-mix(in srgb, var(--c-accent) 22%, transparent);
+    border-radius: 99px;
+    padding: 1px 7px;
+    white-space: nowrap;
   }
   .fqdn {
     font-family: "SF Mono", "Fira Code", monospace;
@@ -261,5 +372,60 @@
   .chain-btn {
     font-size: 12px;
     padding: 5px 10px;
+  }
+  :global(.btn-primary:disabled) {
+    opacity: 0.4;
+    cursor: not-allowed;
+  }
+
+  /* Node card (H.2.1.2): a node with >1 reachable service renders as one card
+     with a child list instead of one flat card per service. */
+  .node-card {
+    grid-column: span 1;
+  }
+  @media (min-width: 760px) {
+    .grid > .node-card {
+      grid-column: 1 / -1;
+    }
+  }
+  .child-list {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    padding-top: 8px;
+    border-top: 1px solid var(--c-border);
+  }
+  .child-row {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 10px;
+    padding: 8px 10px;
+    background: color-mix(in srgb, var(--c-accent) 4%, var(--c-bg));
+    border: 1px solid var(--c-border);
+    border-radius: 8px;
+  }
+  .child-row.denied {
+    opacity: 0.55;
+  }
+  .child-info {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    min-width: 0;
+  }
+  .child-label {
+    font-size: 13px;
+    font-weight: 600;
+  }
+  .child-actions {
+    display: flex;
+    gap: 4px;
+    flex-shrink: 0;
+  }
+  :global(.btn-primary.sm),
+  :global(.btn-secondary.sm) {
+    padding: 4px 8px;
+    font-size: 12px;
   }
 </style>

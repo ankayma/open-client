@@ -6,8 +6,10 @@ export const STRINGS: Record<Lang, Record<string, string>> = {
     nav_services:  'Dịch vụ',
     nav_admin:     'Quản trị',
     nav_settings:  'Cài đặt',
-    nav_nodes:     'Thiết bị',
     nav_users:     'Người dùng',
+    nav_devices:   'Thiết bị của tôi',
+    nav_account:   'Tài khoản',
+    nav_security:  'Bảo mật',
 
     // common buttons
     btn_edit:       'Sửa',
@@ -36,7 +38,6 @@ export const STRINGS: Record<Lang, Record<string, string>> = {
 
     // page titles
     title_services: 'Dịch vụ',
-    title_nodes:    'Thiết bị',
     title_users:    'Người dùng & Vai trò',
     title_settings: 'Cài đặt',
     title_invite:   'Mời người dùng',
@@ -47,8 +48,10 @@ export const STRINGS: Record<Lang, Record<string, string>> = {
     nav_services:  'Services',
     nav_admin:     'Admin',
     nav_settings:  'Settings',
-    nav_nodes:     'Nodes',
     nav_users:     'Users',
+    nav_devices:   'My Devices',
+    nav_account:   'Account',
+    nav_security:  'Security',
 
     // common buttons
     btn_edit:       'Edit',
@@ -77,7 +80,6 @@ export const STRINGS: Record<Lang, Record<string, string>> = {
 
     // page titles
     title_services: 'Services',
-    title_nodes:    'Nodes',
     title_users:    'Users & Roles',
     title_settings: 'Settings',
     title_invite:   'Invite User',

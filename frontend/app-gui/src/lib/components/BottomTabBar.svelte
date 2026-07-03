@@ -20,12 +20,6 @@
 			icon: 'M3 7h18M3 12h18M3 17h18'
 		},
 		{
-			hrefs: ['/devices'],
-			go: '/devices',
-			label: () => STRINGS[lang].nav_nodes,
-			icon: 'M2 4h20v14H2zM8 21h8M12 18v3'
-		},
-		{
 			hrefs: ['/admin', '/subdomains', '/members', '/access', '/policies'],
 			go: '/admin',
 			label: () => STRINGS[lang].nav_admin,
@@ -33,7 +27,7 @@
 		},
 		{
 			hrefs: ['/settings'],
-			go: '/settings',
+			go: '/settings/devices',
 			label: () => STRINGS[lang].nav_settings,
 			icon: 'M12 9a3 3 0 100 6 3 3 0 000-6z'
 		}

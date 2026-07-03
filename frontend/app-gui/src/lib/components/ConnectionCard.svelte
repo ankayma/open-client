@@ -29,7 +29,20 @@
 			if (isIos) {
 				const s = await vpnStatus();
 				const running = s.status === 'connected' || s.status === 'reasserting';
-				dp = running ? { running: true, pid: null, age_secs: null, peers: [] } : null;
+				// Show the REAL peer count (was hard-coded to 0). `peers` is only used
+				// for its length in the status line, so fill a stub array to match.
+				dp = running
+					? {
+							running: true,
+							pid: null,
+							age_secs: null,
+							peers: Array.from({ length: s.peer_count }, () => ({
+								hostname: '',
+								overlay_ip: '',
+								endpoint: null
+							}))
+						}
+					: null;
 			} else {
 				dp = await getDataplaneStatus();
 			}
@@ -134,6 +147,13 @@
 		<p class="tunnel">
 			🔒 Secure tunnel up · {dp.peers.length} peer{dp.peers.length === 1 ? '' : 's'}
 		</p>
+	{/if}
+
+	{#if isIos && $connection.status === 'connected'}
+		<!-- Honest about the "reconnect to see new devices/services" model (Phase 1,
+		     f3-privdomain-ios-plan.md): the extension only reads peers/resolve once,
+		     at tunnel start — no live refresh while connected. -->
+		<p class="hint">Kết nối lại để thấy thiết bị/dịch vụ mới</p>
 	{/if}
 </section>
 

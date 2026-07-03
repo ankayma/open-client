@@ -1,11 +1,12 @@
 <script lang="ts">
-	// Network devices — the tenant's enrolled nodes (mesh peers). Mirrors the
-	// macOS tray "Network Devices" submenu so the list is visible in the GUI too.
-	// Backed by the existing `list_nodes` command (GET /api/v1/peers).
+	// Settings → My Devices — the tenant's enrolled nodes (mesh peers), plus the
+	// node-count quota (H.2.1.4). Bandwidth is intentionally not shown here —
+	// P2P traffic is off-path by design (A.1.1), so a bandwidth number would be
+	// a claim the client can't actually verify (P.3 honest gap). `[T per A.1.1 + P.3]`
 	import { goto } from '$app/navigation';
 	import { onMount } from 'svelte';
-	import { connection } from '$lib/stores';
-	import { listNodes, getNodeInfo, deleteNode } from '$lib/tauri';
+	import { connection, quota } from '$lib/stores';
+	import { listNodes, getNodeInfo, deleteNode, getQuota, openSshTerminal, getPlatform } from '$lib/tauri';
 	import { runWithStepUp } from '$lib/stepup';
 	import type { PeerBrief } from '$lib/types';
 
@@ -40,7 +41,26 @@
 			loading = false;
 		}
 	}
-	onMount(load);
+	onMount(() => {
+		load();
+		getQuota().then((q) => quota.set(q)).catch(() => {});
+	});
+
+	// [F-2] "SSH ↗" — hand off to the system Terminal running `agent ssh`; the
+	// receipt + path proof + shell live there. Not shown for this device (ssh to
+	// yourself is a confusing no-op at F0). macOS-only: iOS has no Terminal to
+	// hand off to, so the button is hidden there rather than erroring on tap.
+	let sshError = $state('');
+	let isMacos = $state(false);
+	getPlatform().then((p) => (isMacos = p === 'macos')).catch(() => {});
+	async function sshTo(d: PeerBrief) {
+		sshError = '';
+		try {
+			await openSshTerminal(d.node_id);
+		} catch (e) {
+			sshError = String(e);
+		}
+	}
 
 	async function removeDevice(nodeId: string) {
 		removing = true;
@@ -50,6 +70,7 @@
 			await runWithStepUp('revoke_node', (proof) => deleteNode(nodeId, proof));
 			confirmNode = null;
 			await load();
+			getQuota().then((q) => quota.set(q)).catch(() => {});
 		} catch (e) {
 			if (String(e).includes('Step-up cancelled')) return; // user backed out
 			error = String(e);
@@ -66,23 +87,45 @@
 			return a.hostname.localeCompare(b.hostname);
 		})
 	);
+
+	let atLimit = $derived($quota ? $quota.nodes_used >= $quota.nodes_limit : false);
 </script>
 
 <main>
 	<header>
-		<button class="back-btn" onclick={() => goto('/services')} aria-label="Back">
-			<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-				<path d="M19 12H5M12 5l-7 7 7 7"/>
-			</svg>
-		</button>
-		<h2>Network devices</h2>
-		<button class="back-btn" onclick={load} aria-label="Refresh" disabled={loading}>
-			<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-				<path d="M23 4v6h-6M1 20v-6h6"/>
-				<path d="M3.51 9a9 9 0 0114.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0020.49 15"/>
-			</svg>
-		</button>
+		<h2>My Devices</h2>
+		<div class="header-actions">
+			<button class="icon-btn" onclick={load} aria-label="Refresh" disabled={loading}>
+				<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+					<path d="M23 4v6h-6M1 20v-6h6"/>
+					<path d="M3.51 9a9 9 0 0114.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0020.49 15"/>
+				</svg>
+			</button>
+			<button
+				class="add-node-btn"
+				onclick={() => goto('/add-device')}
+				disabled={atLimit}
+				title={atLimit ? 'Limit reached. Remove a node or contact admin.' : ''}
+			>
+				<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 5v14M5 12h14"/></svg>
+				Add Node
+			</button>
+		</div>
 	</header>
+
+	{#if $quota}
+		<div class="quota-bar">
+			<div class="quota-track"><div class="quota-fill" class:full={atLimit} style="width: {Math.min(100, Math.round(($quota.nodes_used / $quota.nodes_limit) * 100))}%"></div></div>
+			<div class="quota-label">
+				<span>{$quota.nodes_used} / {$quota.nodes_limit} nodes</span>
+				{#if atLimit}
+					<span class="quota-warn">Limit reached. Remove a node or contact admin.</span>
+				{:else}
+					<span class="quota-remaining">{$quota.nodes_limit - $quota.nodes_used} remaining</span>
+				{/if}
+			</div>
+		</div>
+	{/if}
 
 	{#if loading}
 		<div class="state"><span class="spinner-lg"></span></div>
@@ -97,6 +140,9 @@
 			<button class="btn" onclick={() => goto('/add-device')}>Add a device</button>
 		</div>
 	{:else}
+		{#if sshError}
+			<p class="ssh-error">{sshError}</p>
+		{/if}
 		<ul class="device-list">
 			{#each sorted as d (d.node_id)}
 				<li class="device">
@@ -107,8 +153,17 @@
 							{#if d.node_id === thisNodeId}<span class="badge">This device</span>{/if}
 						</div>
 						<span class="ip">{d.overlay_ip}</span>
-						{#if d.endpoint}<span class="endpoint">{d.endpoint}</span>{/if}
 					</div>
+					{#if d.node_id !== thisNodeId && isMacos}
+						<button
+							class="ssh-btn"
+							aria-label="SSH into {d.hostname}"
+							title="SSH ↗"
+							onclick={() => sshTo(d)}
+						>
+							<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 17l6-6-6-6M12 19h8"/></svg>
+						</button>
+					{/if}
 					<button
 						class="remove-btn"
 						aria-label="Remove device"
@@ -119,13 +174,6 @@
 				</li>
 			{/each}
 		</ul>
-
-		<button class="btn add" onclick={() => goto('/add-device')}>
-			<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-				<path d="M12 5v14M5 12h14"/>
-			</svg>
-			Add a device
-		</button>
 	{/if}
 </main>
 
@@ -165,7 +213,7 @@
 		flex: 1;
 		display: flex;
 		flex-direction: column;
-		padding: calc(var(--safe-top) + 16px) 16px calc(var(--safe-bottom) + 24px);
+		padding: 16px 16px calc(var(--safe-bottom) + 24px);
 		gap: 16px;
 		max-width: 420px;
 		margin: 0 auto;
@@ -183,11 +231,15 @@
 	h2 {
 		font-size: 20px;
 		font-weight: 700;
-		flex: 1;
-		text-align: center;
 	}
 
-	.back-btn {
+	.header-actions {
+		display: flex;
+		align-items: center;
+		gap: 6px;
+	}
+
+	.icon-btn {
 		width: 36px;
 		height: 36px;
 		display: flex;
@@ -197,8 +249,60 @@
 		color: var(--c-text-dim);
 		flex-shrink: 0;
 	}
-	.back-btn:hover:not(:disabled) { color: var(--c-text); }
-	.back-btn:disabled { opacity: 0.5; }
+	.icon-btn:hover:not(:disabled) { color: var(--c-text); }
+	.icon-btn:disabled { opacity: 0.5; }
+
+	.add-node-btn {
+		display: flex;
+		align-items: center;
+		gap: 5px;
+		padding: 7px 14px;
+		background: var(--c-accent);
+		border-radius: 8px;
+		color: white;
+		font-size: 13px;
+		font-weight: 600;
+		flex-shrink: 0;
+	}
+	.add-node-btn:hover:not(:disabled) { background: var(--c-accent-dim); }
+	.add-node-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+
+	.quota-bar {
+		display: flex;
+		flex-direction: column;
+		gap: 6px;
+	}
+
+	.quota-track {
+		height: 6px;
+		background: var(--c-border);
+		border-radius: 99px;
+		overflow: hidden;
+	}
+
+	.quota-fill {
+		height: 100%;
+		background: var(--c-accent);
+		border-radius: 99px;
+		transition: width 0.2s;
+	}
+
+	.quota-fill.full {
+		background: var(--c-warn);
+	}
+
+	.quota-label {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		font-size: 12px;
+		color: var(--c-text-dim);
+	}
+
+	.quota-warn {
+		color: var(--c-warn);
+		font-weight: 600;
+	}
 
 	.device-list {
 		list-style: none;
@@ -264,7 +368,7 @@
 		flex-shrink: 0;
 	}
 
-	.ip, .endpoint {
+	.ip {
 		font-size: 12px;
 		color: var(--c-text-dim);
 		font-family: 'SF Mono', 'Fira Code', monospace;
@@ -295,7 +399,28 @@
 		font-weight: 600;
 	}
 	.btn:hover { background: var(--c-accent-dim); }
-	.btn.add { width: 100%; }
+
+	.ssh-btn {
+		width: 32px;
+		height: 32px;
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		border-radius: 6px;
+		flex-shrink: 0;
+		color: var(--c-text-dim);
+		background: transparent;
+		transition: background 0.12s, color 0.12s;
+	}
+	.ssh-btn:hover {
+		background: color-mix(in srgb, var(--c-accent) 14%, transparent);
+		color: var(--c-accent);
+	}
+
+	.ssh-error {
+		font-size: 12px;
+		color: var(--c-danger);
+	}
 
 	.remove-btn {
 		margin-left: auto;

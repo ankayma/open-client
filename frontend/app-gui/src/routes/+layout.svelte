@@ -125,6 +125,14 @@
 		return hrefs.some((h) => path === h || path.startsWith(h + '/'));
 	}
 
+	// Settings sub-nav (My Devices / Account / Security) — mirrors the admin
+	// hub pattern; shown inline in the sidebar when a /settings/* route is active.
+	let settingsSubnav = $derived([
+		{ href: '/settings/devices',  label: STRINGS[lang].nav_devices },
+		{ href: '/settings/account',  label: STRINGS[lang].nav_account },
+		{ href: '/settings/security', label: STRINGS[lang].nav_security }
+	]);
+
 	function getInitials(email: string): string {
 		const local = email.split('@')[0];
 		const parts = local.split(/[\s._-]+/).filter(Boolean);
@@ -166,10 +174,6 @@
 					<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M3 7h18M3 12h18M3 17h18"/><circle cx="7" cy="7" r="0.5"/></svg>
 					<span>{STRINGS[lang].nav_services}</span>
 				</button>
-				<button class="nav-item" class:active={active('/devices')} onclick={() => goto('/devices')}>
-					<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="2" y="4" width="20" height="14" rx="2"/><path d="M8 21h8M12 18v3"/></svg>
-					<span>{STRINGS[lang].nav_nodes}</span>
-				</button>
 				<button
 					class="nav-item"
 					class:active={active(['/admin', '/subdomains', '/members', '/access', '/policies'])}
@@ -178,10 +182,19 @@
 					<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0110 0v4"/></svg>
 					<span>{STRINGS[lang].nav_admin}</span>
 				</button>
-				<button class="nav-item nav-settings" class:active={active('/settings')} onclick={() => goto('/settings')}>
+				<button class="nav-item nav-settings" class:active={active('/settings')} onclick={() => goto('/settings/devices')}>
 					<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 11-2.83 2.83l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 11-2.83-2.83l.06-.06A1.65 1.65 0 004.6 15a1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 112.83-2.83l.06.06A1.65 1.65 0 009 4.6a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 112.83 2.83l-.06.06a1.65 1.65 0 00-.33 1.82V12a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z"/></svg>
 					<span>{STRINGS[lang].nav_settings}</span>
 				</button>
+				{#if active('/settings')}
+					<div class="subnav">
+						{#each settingsSubnav as sub}
+							<button class="subnav-item" class:active={active(sub.href)} onclick={() => goto(sub.href)}>
+								{sub.label}
+							</button>
+						{/each}
+					</div>
+				{/if}
 			</nav>
 
 			<div class="user-chip">
@@ -504,6 +517,34 @@
 
 		.nav-settings {
 			margin-top: auto;
+		}
+
+		.subnav {
+			display: flex;
+			flex-direction: column;
+			gap: 1px;
+			padding-left: 30px;
+			margin-bottom: 4px;
+			margin-top: -4px;
+		}
+
+		.subnav-item {
+			padding: 7px 12px;
+			border-radius: 6px;
+			font-size: 13px;
+			color: var(--c-text-dim);
+			text-align: left;
+			transition: background 0.12s, color 0.12s;
+		}
+
+		.subnav-item:hover {
+			background: color-mix(in srgb, var(--c-accent) 6%, transparent);
+			color: var(--c-text);
+		}
+
+		.subnav-item.active {
+			background: color-mix(in srgb, var(--c-accent) 12%, transparent);
+			color: var(--c-accent);
 		}
 
 		/* User chip */

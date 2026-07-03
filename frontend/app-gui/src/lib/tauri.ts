@@ -94,6 +94,8 @@ export async function getDataplaneStatus(): Promise<DataplaneStatus> {
 export interface VpnStatus {
   // "invalid" | "disconnected" | "connecting" | "connected" | "reasserting" | "disconnecting"
   status: string;
+  // Real peer count in the roster handed to the tunnel (0 when disconnected).
+  peer_count: number;
 }
 
 export async function vpnConnect(): Promise<void> {
@@ -150,6 +152,15 @@ export async function deleteCiPolicy(repo: string): Promise<void> {
 
 export async function listNodes(): Promise<PeerBrief[]> {
   return invoke<PeerBrief[]>("list_nodes");
+}
+
+// [F-2] Open the system Terminal running `agent ssh <node_id>` (macOS-only C1
+// interim — an embedded terminal is the follow-up).
+export async function openSshTerminal(
+  nodeId: string,
+  login?: string
+): Promise<void> {
+  return invoke("open_ssh_terminal", { nodeId, login: login ?? null });
 }
 
 // A step-up proof carried on a sensitive action in a multi-user tenant — the
