@@ -11,9 +11,12 @@
 //! bytes to the local service on `127.0.0.1:target_port`. No HTTP parsing — a
 //! raw byte relay after handshake, so no hyper/axum needed.
 
+use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use agent_core::{adapters, reqwest};
 use anyhow::{Context, Result};
@@ -162,12 +165,22 @@ pub fn on_cert_issued(fqdn: &str, cert_pem: &str) {
     }
 }
 
-/// Local TLS-terminating relay listeners this node runs for subdomains it
-/// owns — one per fqdn, spawned once a cert is on disk, left running for the
-/// process lifetime (cert renewal restarts just that one listener).
+/// Local relay listeners this node runs for the subdomains it owns. ONE shared
+/// listener per port — `(overlay_ip, 80)` demuxed by the Host header and
+/// `(overlay_ip, 443)` demuxed by SNI — with every owned fqdn just a row in the
+/// shared route/cert tables. Per-fqdn listeners raced for the same port when a
+/// node owned two subdomains (2026-07-03: the second bind failed and that relay
+/// silently never served); an fqdn is a *name*, not a *port*.
 #[derive(Clone, Default)]
 pub struct Relay {
-    active: Arc<Mutex<std::collections::HashSet<String>>>,
+    /// fqdn → local target port. Read by BOTH shared listeners on every
+    /// connection, so adding a subdomain never needs a new listener.
+    routes: Arc<Mutex<HashMap<String, u16>>>,
+    /// fqdn → certified key, resolved per-connection by SNI.
+    certs: Arc<SniCerts>,
+    /// Whether the shared listener on that port has been spawned (per process).
+    http_listening: Arc<Mutex<bool>>,
+    tls_listening: Arc<Mutex<bool>>,
     /// fqdns for which a CSR-submit-then-poll task has already been spawned
     /// this process run — guards against re-submitting the CSR (which would
     /// restart the control plane's ACME flow from scratch) every time the
@@ -180,27 +193,75 @@ impl Relay {
         Self::default()
     }
 
-    /// Start a listener for `fqdn` on `(overlay_ip, 443)` relaying to
-    /// `127.0.0.1:target_port`, if a cert is on disk and none is running yet.
-    /// No-op otherwise — the CSR/poll loop calls this again once a cert lands.
+    /// Register `fqdn` on the shared TLS listener at `(overlay_ip, 443)` if its
+    /// cert is on disk: (re)load the certified key into the SNI table and make
+    /// sure the listener is up. No-op without a cert — the CSR/poll loop calls
+    /// this again once one lands. Safe to call every resync cycle; a renewal
+    /// (new cert.pem on disk) is picked up by the reload on the next call.
     pub fn ensure_listener(&self, fqdn: &str, overlay_ip: IpAddr, target_port: u16) {
-        let mut active = self.active.lock().expect("relay set lock");
-        if active.contains(fqdn) {
-            return;
-        }
         let Some(cert_pem) = load_cert(fqdn) else {
             return;
         };
         let Ok(key_pem) = std::fs::read_to_string(key_path(fqdn)) else {
             return;
         };
-        active.insert(fqdn.to_string());
-        let fqdn_owned = fqdn.to_string();
+        let ck = match certified_key(&cert_pem, &key_pem) {
+            Ok(ck) => ck,
+            Err(e) => {
+                eprintln!("{fqdn}: cert on disk is unusable: {e}");
+                return;
+            }
+        };
+        let newly_added = self
+            .certs
+            .by_name
+            .lock()
+            .expect("sni table lock")
+            .insert(fqdn.to_string(), ck)
+            .is_none();
+        self.routes
+            .lock()
+            .expect("route table lock")
+            .insert(fqdn.to_string(), target_port);
+        if newly_added {
+            println!("TLS relay serving {fqdn} (SNI) -> 127.0.0.1:{target_port}");
+        }
+
+        let mut listening = self.tls_listening.lock().expect("tls listening lock");
+        if *listening {
+            return;
+        }
+        *listening = true;
+        let certs = self.certs.clone();
+        let routes = self.routes.clone();
         tokio::spawn(async move {
-            if let Err(e) =
-                run_listener(&fqdn_owned, overlay_ip, target_port, &cert_pem, &key_pem).await
-            {
-                eprintln!("TLS relay for {fqdn_owned} exited: {e}");
+            if let Err(e) = run_tls_listener(overlay_ip, certs, routes).await {
+                eprintln!("shared TLS relay listener exited: {e}");
+            }
+        });
+    }
+
+    /// Register `fqdn` on the shared plain-TCP listener at `(overlay_ip, 80)`.
+    /// No cert required — the overlay link is already the private channel
+    /// (vendor off the data path, A.1.1), so a name resolving over HTTP is the
+    /// default; HTTPS via `ensure_listener` above is a nice-to-have (browser
+    /// padlock / a target service that itself requires TLS), not a precondition
+    /// for the name to work at all. `[T: founder decision 2026-07-02]`
+    pub fn ensure_http_listener(&self, fqdn: &str, overlay_ip: IpAddr, target_port: u16) {
+        self.routes
+            .lock()
+            .expect("route table lock")
+            .insert(fqdn.to_string(), target_port);
+
+        let mut listening = self.http_listening.lock().expect("http listening lock");
+        if *listening {
+            return;
+        }
+        *listening = true;
+        let routes = self.routes.clone();
+        tokio::spawn(async move {
+            if let Err(e) = run_http_listener(overlay_ip, routes).await {
+                eprintln!("shared HTTP relay listener exited: {e}");
             }
         });
     }
@@ -249,68 +310,194 @@ impl Relay {
     }
 }
 
-fn tls_server_config(cert_pem: &str, key_pem: &str) -> Result<tokio_rustls::rustls::ServerConfig> {
+/// Per-SNI certificate table for the shared TLS listener: rustls asks
+/// `resolve()` on every ClientHello and we answer with the cert of whichever
+/// owned fqdn the client named. `[T:rustls@0.23 ResolvesServerCert]`
+#[derive(Default)]
+struct SniCerts {
+    by_name: Mutex<HashMap<String, Arc<tokio_rustls::rustls::sign::CertifiedKey>>>,
+}
+
+impl std::fmt::Debug for SniCerts {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let n = self.by_name.lock().map(|m| m.len()).unwrap_or(0);
+        write!(f, "SniCerts({n} names)")
+    }
+}
+
+impl tokio_rustls::rustls::server::ResolvesServerCert for SniCerts {
+    fn resolve(
+        &self,
+        hello: tokio_rustls::rustls::server::ClientHello<'_>,
+    ) -> Option<Arc<tokio_rustls::rustls::sign::CertifiedKey>> {
+        let name = hello.server_name()?;
+        self.by_name.lock().ok()?.get(name).cloned()
+    }
+}
+
+/// Parse one fqdn's PEM cert chain + key into the rustls form the SNI resolver
+/// serves. `ring` provider named explicitly — this process also links
+/// `aws-lc-rs` transitively, and rustls panics on an ambiguous default.
+fn certified_key(
+    cert_pem: &str,
+    key_pem: &str,
+) -> Result<Arc<tokio_rustls::rustls::sign::CertifiedKey>> {
     use tokio_rustls::rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
-    use tokio_rustls::rustls::ServerConfig;
 
     let certs: Vec<CertificateDer<'static>> = split_pem_certs(cert_pem)?
         .into_iter()
         .map(CertificateDer::from)
         .collect();
     let keypair = rcgen::KeyPair::from_pem(key_pem).context("parse relay TLS key")?;
-    let key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(keypair.serialize_der()));
-    // `ServerConfig::builder()` picks a CryptoProvider from whichever rustls
-    // crypto backend feature is compiled in — but this process links both
-    // `ring` (rcgen) and, transitively, `aws-lc-rs` (via other deps' rustls
-    // usage), so the ambiguous default panics. Name the provider explicitly.
-    let provider = std::sync::Arc::new(tokio_rustls::rustls::crypto::ring::default_provider());
-    ServerConfig::builder_with_provider(provider)
-        .with_safe_default_protocol_versions()
-        .context("select TLS protocol versions")?
-        .with_no_client_auth()
-        .with_single_cert(certs, key)
-        .context("build rustls ServerConfig")
+    let key_der = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(keypair.serialize_der()));
+    let signing_key = tokio_rustls::rustls::crypto::ring::sign::any_supported_type(&key_der)
+        .context("wrap TLS key for rustls")?;
+    Ok(Arc::new(tokio_rustls::rustls::sign::CertifiedKey::new(
+        certs,
+        signing_key,
+    )))
 }
 
-async fn run_listener(
-    fqdn: &str,
-    overlay_ip: IpAddr,
-    target_port: u16,
-    cert_pem: &str,
-    key_pem: &str,
-) -> Result<()> {
-    let config = tls_server_config(cert_pem, key_pem)?;
-    let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(config));
+/// Extract the Host header (lowercased, port stripped) from a buffered HTTP
+/// request head. Dependency-free, same posture as `split_pem_certs`. Returns
+/// `None` until the header is present in the buffer.
+fn parse_host(head: &[u8]) -> Option<String> {
+    let text = std::str::from_utf8(head).ok()?;
+    for line in text.split("\r\n").skip(1) {
+        if line.is_empty() {
+            break; // end of headers — no Host found
+        }
+        let (name, value) = line.split_once(':')?;
+        if name.eq_ignore_ascii_case("host") {
+            let host = value.trim();
+            let host = host.rsplit_once(':').map_or(host, |(h, port)| {
+                // Only strip a real port suffix (not an IPv6 literal's colon).
+                if port.chars().all(|c| c.is_ascii_digit()) {
+                    h
+                } else {
+                    host
+                }
+            });
+            return Some(host.to_ascii_lowercase());
+        }
+    }
+    None
+}
 
-    let listener = tokio::net::TcpListener::bind(SocketAddr::new(overlay_ip, 443))
+/// The ONE plain-TCP listener on `(overlay_ip, 80)`: peek the request head for
+/// the Host header, route to that fqdn's local target port, then relay bytes.
+/// `[T: founder decision 2026-07-02]`
+async fn run_http_listener(
+    overlay_ip: IpAddr,
+    routes: Arc<Mutex<HashMap<String, u16>>>,
+) -> Result<()> {
+    let listener = tokio::net::TcpListener::bind(SocketAddr::new(overlay_ip, 80))
         .await
-        .with_context(|| format!("bind ({overlay_ip}, 443) for {fqdn}"))?;
-    println!("TLS relay for {fqdn}: ({overlay_ip}, 443) -> 127.0.0.1:{target_port}");
+        .with_context(|| format!("bind ({overlay_ip}, 80)"))?;
+    println!("HTTP relay listening on ({overlay_ip}, 80) — routed by Host header");
 
     loop {
-        let (stream, peer) = listener.accept().await?;
-        let acceptor = acceptor.clone();
-        let fqdn = fqdn.to_string();
+        let (mut stream, peer) = listener.accept().await?;
+        let routes = routes.clone();
         tokio::spawn(async move {
-            let mut tls_stream = match acceptor.accept(stream).await {
-                Ok(s) => s,
-                Err(e) => {
-                    eprintln!("TLS handshake for {fqdn} from {peer} failed: {e}");
+            // Buffer until the Host header shows up (request heads are small;
+            // 8KB is the conventional server cap for the whole head).
+            let mut head = vec![0u8; 8192];
+            let mut n = 0;
+            let host = loop {
+                match stream.read(&mut head[n..]).await {
+                    Ok(0) | Err(_) => return,
+                    Ok(m) => n += m,
+                }
+                if let Some(h) = parse_host(&head[..n]) {
+                    break h;
+                }
+                let headers_done = head[..n].windows(4).any(|w| w == b"\r\n\r\n");
+                if headers_done || n == head.len() {
+                    eprintln!("http relay: no Host header from {peer} — dropped");
                     return;
                 }
+            };
+            let Some(target_port) = routes.lock().expect("route table lock").get(&host).copied()
+            else {
+                eprintln!("http relay: no route for Host {host} (from {peer}) — dropped");
+                return;
             };
             let mut upstream =
                 match tokio::net::TcpStream::connect(("127.0.0.1", target_port)).await {
                     Ok(s) => s,
                     Err(e) => {
-                        eprintln!("{fqdn}: connect to local service :{target_port} failed: {e}");
+                        eprintln!("{host}: connect to local service :{target_port} failed: {e}");
+                        return;
+                    }
+                };
+            // Replay the bytes we consumed while sniffing, then go transparent.
+            if upstream.write_all(&head[..n]).await.is_err() {
+                return;
+            }
+            if let Err(e) = tokio::io::copy_bidirectional(&mut stream, &mut upstream).await {
+                eprintln!("{host}: http relay from {peer} ended: {e}");
+            }
+        });
+    }
+}
+
+/// The ONE TLS listener on `(overlay_ip, 443)`: rustls picks the cert by SNI,
+/// the accepted connection routes to that same name's local target port, then
+/// it's a raw byte relay — no HTTP parsing after the handshake.
+async fn run_tls_listener(
+    overlay_ip: IpAddr,
+    certs: Arc<SniCerts>,
+    routes: Arc<Mutex<HashMap<String, u16>>>,
+) -> Result<()> {
+    use tokio_rustls::rustls::ServerConfig;
+
+    let provider = std::sync::Arc::new(tokio_rustls::rustls::crypto::ring::default_provider());
+    let config = ServerConfig::builder_with_provider(provider)
+        .with_safe_default_protocol_versions()
+        .context("select TLS protocol versions")?
+        .with_no_client_auth()
+        .with_cert_resolver(certs);
+    let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(config));
+
+    let listener = tokio::net::TcpListener::bind(SocketAddr::new(overlay_ip, 443))
+        .await
+        .with_context(|| format!("bind ({overlay_ip}, 443)"))?;
+    println!("TLS relay listening on ({overlay_ip}, 443) — cert + route by SNI");
+
+    loop {
+        let (stream, peer) = listener.accept().await?;
+        let acceptor = acceptor.clone();
+        let routes = routes.clone();
+        tokio::spawn(async move {
+            let mut tls_stream = match acceptor.accept(stream).await {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("TLS handshake from {peer} failed: {e}");
+                    return;
+                }
+            };
+            let Some(name) = tls_stream.get_ref().1.server_name().map(str::to_owned) else {
+                eprintln!("TLS relay: no SNI from {peer} — dropped");
+                return;
+            };
+            let Some(target_port) = routes.lock().expect("route table lock").get(&name).copied()
+            else {
+                eprintln!("TLS relay: no route for {name} (from {peer}) — dropped");
+                return;
+            };
+            let mut upstream =
+                match tokio::net::TcpStream::connect(("127.0.0.1", target_port)).await {
+                    Ok(s) => s,
+                    Err(e) => {
+                        eprintln!("{name}: connect to local service :{target_port} failed: {e}");
                         return;
                     }
                 };
             // Raw byte relay — no HTTP parsing. The TLS handshake already
             // proved the cert chain to the caller; from here it's just bytes.
             if let Err(e) = tokio::io::copy_bidirectional(&mut tls_stream, &mut upstream).await {
-                eprintln!("{fqdn}: relay from {peer} ended: {e}");
+                eprintln!("{name}: relay from {peer} ended: {e}");
             }
         });
     }

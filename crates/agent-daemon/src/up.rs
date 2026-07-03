@@ -137,6 +137,16 @@ pub(crate) async fn serve_dataplane(
         .map_err(|e| anyhow!("stored private key is invalid: {e:?}"))?;
     let static_private = StaticSecret::from(private_bytes);
 
+    // PersistentKeepalive=25s ONLY when this node sits behind NAT — otherwise the
+    // NAT mapping dies after >30-60s of silence and inbound goes dark until we
+    // next send. A public-endpoint node needs none. Composes with idle-teardown:
+    // boringtun only emits keepalives while a session exists. `[T:A.1.7]`
+    // `[T:wireguard.com/quickstart PersistentKeepalive=25]`
+    let keepalive = self_nat_keepalive();
+    if keepalive.is_some() {
+        println!("behind NAT — PersistentKeepalive=25s on active sessions");
+    }
+
     println!(
         "node {} — overlay {} — listening udp/{}",
         state.node_id, self_overlay, state.listen_port
@@ -166,6 +176,7 @@ pub(crate) async fn serve_dataplane(
         &initial_peers,
         &udp,
         &dev_name,
+        keepalive,
     );
 
     // Hold the device for the process lifetime; the threads use the raw fd.
@@ -175,9 +186,17 @@ pub(crate) async fn serve_dataplane(
     // not just enrolled). Refreshed every roster cycle below = a heartbeat.
     write_status(&state.node_id, &state.overlay_ip, state.listen_port, &peers);
 
-    pump::spawn_tx(fd, udp.clone(), peers.clone());
+    // DNS answers via the loopback resolver below (fed by /etc/resolver/<zone>),
+    // never on the tun fd itself — no DnsResponder needed here (iOS-only, no
+    // split-DNS hook to piggyback on).
+    pump::spawn_tx(fd, udp.clone(), peers.clone(), None);
     pump::spawn_rx(fd, udp.clone(), peers.clone());
-    pump::spawn_timers(udp.clone(), peers.clone());
+    pump::spawn_timers(
+        udp.clone(),
+        peers.clone(),
+        static_private.clone(),
+        index.clone(),
+    );
 
     // [F-3] Private DNS for branded names while the overlay is up: resolve the
     // tenant's `<name> → overlay_ip` table locally so a browser on this enrolled
@@ -226,20 +245,45 @@ pub(crate) async fn serve_dataplane(
         );
         async move {
             let mut backoff_secs: u64 = 1;
+            let mut consecutive_sync_failures: u32 = 0;
             loop {
                 // Full resync before (re)connecting SSE — guarantees no missed events.
-                if let Ok(list) = adapters::peers(&http, &cp, &svc_token).await {
-                    let added = add_new_peers(
-                        &peers,
-                        &index,
-                        &static_private,
-                        self_overlay,
-                        &list,
-                        &udp,
-                        &dev_name,
-                    );
-                    if added > 0 {
-                        println!("discovered {added} peer(s) on sync");
+                // NEVER swallow the error silently: an agent whose token is missing/
+                // expired/revoked polls 401 forever and its roster freezes — new peers
+                // become unreachable with zero symptoms on this side (root cause of the
+                // 2026-07-02 "0 inbound ever" incident; agent ran 11 days on 401s).
+                match adapters::peers(&http, &cp, &svc_token).await {
+                    Ok(list) => {
+                        consecutive_sync_failures = 0;
+                        let added = add_new_peers(
+                            &peers,
+                            &index,
+                            &static_private,
+                            self_overlay,
+                            &list,
+                            &udp,
+                            &dev_name,
+                            keepalive,
+                        );
+                        if added > 0 {
+                            println!("discovered {added} peer(s) on sync");
+                        }
+                    }
+                    Err(e) => {
+                        consecutive_sync_failures += 1;
+                        eprintln!(
+                            "peer sync failed ({consecutive_sync_failures} consecutive): {e}"
+                        );
+                        if consecutive_sync_failures >= 3 {
+                            // TODO[A]: auto re-enroll needs a login credential a headless
+                            // daemon doesn't hold — surface loudly and keep serving the
+                            // last-known roster (verify UX once GUI shows agent health).
+                            eprintln!(
+                                "peer roster is STALE — control-plane rejects our credential. \
+                                 New devices will be unreachable until `agent up` re-enrolls \
+                                 (sign in again on this device)."
+                            );
+                        }
                     }
                 }
                 if let Ok(t) = adapters::resolve_subdomains(&http, &cp, &svc_token).await {
@@ -256,11 +300,18 @@ pub(crate) async fn serve_dataplane(
                 }
                 write_status(&node_id, &overlay_s, port, &peers);
 
-                // Subscribe to SSE.
+                // Subscribe to SSE for INSTANT peer_added, but CAP the session so the
+                // loop re-syncs at least once a minute regardless of SSE liveness. A
+                // half-open TCP stream (network blip, CP restart, NAT idle-drop) never
+                // errors, so consuming it would block here forever and miss every peer
+                // that enrolled afterward — the reason a long-lived server node had to
+                // be manually restarted to see a new device. The periodic resync above
+                // is the safety net; SSE just makes the common case instant. `[T:Part D §D.12]`
+                const SSE_SESSION_CAP: Duration = Duration::from_secs(60);
                 match adapters::subscribe_peer_events(&http, &cp, &svc_token).await {
                     Ok(resp) => {
                         backoff_secs = 1; // reset on successful connect
-                        if let Err(e) = consume_peer_sse(
+                        let sse = consume_peer_sse(
                             resp,
                             &peers,
                             &index,
@@ -271,10 +322,14 @@ pub(crate) async fn serve_dataplane(
                             &node_id,
                             &overlay_s,
                             port,
-                        )
-                        .await
-                        {
-                            eprintln!("SSE stream ended: {e} — reconnecting in {backoff_secs}s");
+                            keepalive,
+                        );
+                        match tokio::time::timeout(SSE_SESSION_CAP, sse).await {
+                            Ok(Ok(())) => {}
+                            Ok(Err(e)) => {
+                                eprintln!("SSE stream ended: {e} — resync + reconnect")
+                            }
+                            Err(_) => {} // 60s cap — fall through to resync (safety net)
                         }
                     }
                     Err(e) => {
@@ -314,6 +369,7 @@ async fn consume_peer_sse(
     node_id: &str,
     overlay_s: &str,
     port: u16,
+    keepalive: Option<u16>,
 ) -> anyhow::Result<()> {
     use futures::StreamExt as _;
     let mut stream = resp.bytes_stream();
@@ -355,6 +411,7 @@ async fn consume_peer_sse(
                             &[peer_info],
                             udp,
                             dev_name,
+                            keepalive,
                         );
                         if added > 0 {
                             println!("SSE: added {added} new peer(s)");
@@ -420,6 +477,10 @@ fn spawn_owned_subdomain_tasks(
         .iter()
         .filter(|n| n.target_node_id == my_node_id)
     {
+        // HTTP first: no cert/CSR dependency, so the name works immediately —
+        // PrivDomain traffic is already private (overlay-only, A.1.1). TLS is
+        // a nice-to-have layered on top once a cert lands. `[T: founder 2026-07-02]`
+        relay.ensure_http_listener(&n.fqdn, overlay_ip, n.target_port);
         relay.spawn_owner_task(
             http.clone(),
             control_plane.to_string(),
@@ -663,6 +724,22 @@ fn detect_lan_ip() -> Result<Ipv4Addr> {
     }
 }
 
+/// `Some(25)` when this node is behind NAT, `None` when its detected address is
+/// globally routable. Behind-NAT = the OS's outbound source address is not a
+/// public IP: RFC1918 private, link-local, or CGNAT `100.64.0.0/10`
+/// `[T:RFC-6598§7]`. 25s is the conventional WireGuard NAT-keepalive interval
+/// `[T:wireguard.com/quickstart PersistentKeepalive=25]`.
+fn self_nat_keepalive() -> Option<u16> {
+    let ip = detect_lan_ip().ok()?;
+    let o = ip.octets();
+    let cgnat = o[0] == 100 && (64..128).contains(&o[1]);
+    if ip.is_private() || ip.is_link_local() || cgnat {
+        Some(25)
+    } else {
+        None
+    }
+}
+
 fn hostname() -> String {
     std::env::var("HOSTNAME")
         .ok()
@@ -696,6 +773,11 @@ fn configure_interface(name: &str, overlay: IpAddr) -> Result<()> {
             run_cmd(Command::new("ifconfig").args([name, "inet6", &ip, "prefixlen", "128", "up"]))?;
         }
     }
+    // Clamp the device MTU to the overlay MTU so the kernel never hands the pump
+    // a packet that can't fit WireGuard's +32B overhead inside one UDP datagram.
+    // utun defaults to 1500; large flows (ssh key-exchange was the reproducer,
+    // 2026-07-03) then overflow the encapsulate buffer. `[T:WireGuard MTU 1420]`
+    run_cmd(Command::new("ifconfig").args([name, "mtu", &agent_core::pump::MTU.to_string()]))?;
     Ok(())
 }
 
@@ -720,6 +802,16 @@ fn configure_interface(name: &str, overlay: IpAddr) -> Result<()> {
         }
     }
     run_cmd(Command::new("ip").args(["link", "set", "dev", name, "up"]))?;
+    // Same MTU clamp as macOS: never read a tun packet bigger than one encrypted
+    // UDP datagram can carry. `[T:WireGuard MTU 1420]`
+    run_cmd(Command::new("ip").args([
+        "link",
+        "set",
+        "dev",
+        name,
+        "mtu",
+        &agent_core::pump::MTU.to_string(),
+    ]))?;
     Ok(())
 }
 
@@ -790,6 +882,7 @@ fn run_cmd(cmd: &mut Command) -> Result<()> {
 /// overlay into the device. Returns how many were added. The Tunn setup + roster
 /// push is the OS-agnostic part (`pump::add_tunn_peers`); this wrapper adds the
 /// host route (macOS/Linux) the pump deliberately leaves to the caller. `[T:A.1.9]`
+#[allow(clippy::too_many_arguments)]
 fn add_new_peers(
     peers: &Peers,
     index: &Arc<Mutex<u32>>,
@@ -798,8 +891,17 @@ fn add_new_peers(
     list: &[agent_core::domain::PeerInfo],
     udp: &Arc<UdpSocket>,
     dev_name: &str,
+    keepalive: Option<u16>,
 ) -> usize {
-    let added = pump::add_tunn_peers(peers, index, static_private, self_overlay, list, udp);
+    let added = pump::add_tunn_peers(
+        peers,
+        index,
+        static_private,
+        self_overlay,
+        list,
+        udp,
+        keepalive,
+    );
     for overlay in &added {
         // Route this peer's overlay /32 into the tunnel (wins over Tailscale's /10).
         add_peer_route(dev_name, *overlay);

@@ -44,12 +44,14 @@ const SOCK_BUF: usize = 64 * 1024;
 /// Poll cadence for the single-threaded smoltcp engine. `[A] verify: deploy
 /// throughput is fine at this tick; lower it if rsync feels slow over the tunnel.`
 const TICK: Duration = Duration::from_millis(3);
-/// Settle window before the deploy command runs. Sized to cover the *target's*
-/// peer-refresh cycle (`agent up` polls every 5s) plus the WireGuard handshake:
-/// the target only builds its responder tunnel after it next sees our ephemeral
-/// node, so we wait one full poll cycle + a handshake RTT. `[A]` verify by E2E; a
-/// handshake-complete poll would let us drop the fixed wait.
-const HANDSHAKE_SETTLE: Duration = Duration::from_secs(8);
+/// Upper bound on waiting for the WireGuard handshake before the deploy command
+/// runs. The engine flags handshake-complete (`Tunn::stats().0` turns `Some`) and
+/// we proceed the moment it does — this cap only bounds the wait when the target
+/// never answers (it still covers the target's peer-refresh: SSE pushes our
+/// ephemeral node to it in well under this). `[A]` verify by E2E timing.
+const HANDSHAKE_SETTLE_MAX: Duration = Duration::from_secs(8);
+/// How often to re-check the handshake flag while waiting.
+const HANDSHAKE_POLL: Duration = Duration::from_millis(100);
 
 /// A SOCKS5-accepted local connection handed to the engine to bridge over the
 /// tunnel: the requested overlay destination + the local client stream.
@@ -92,7 +94,10 @@ pub fn run_deploy(state: &AgentState, target: PeerInfo, exec: Option<Vec<String>
     // boringtun tunnel toward the single target peer (sender index 1).
     let static_private = StaticSecret::from(private_bytes);
     let peer_pub = PublicKey::from(target_pub_bytes);
-    let tunn = make_tunn(static_private, peer_pub, 1);
+    // Keepalive 25s: the CI runner always sits behind the runner's NAT, and a
+    // deploy can go quiet >60s (build steps) before pushing again — keep the
+    // mapping alive for the session's short life. `[T:wireguard.com/quickstart]`
+    let tunn = make_tunn(static_private, peer_pub, 1, Some(25));
 
     // SOCKS5 listener on loopback; the deploy command points at this.
     let socks = TcpListener::bind(("127.0.0.1", 0)).context("bind SOCKS5 listener")?;
@@ -109,9 +114,12 @@ pub fn run_deploy(state: &AgentState, target: PeerInfo, exec: Option<Vec<String>
     };
 
     // Engine thread: owns smoltcp + boringtun + the UDP socket; runs the poll loop.
+    // `handshake_done` is set by the engine when the Noise handshake completes.
+    let handshake_done = Arc::new(AtomicBool::new(false));
     let engine_handle = {
         let udp = udp.clone();
         let running = running.clone();
+        let handshake_done = handshake_done.clone();
         std::thread::spawn(move || {
             engine_loop(
                 udp,
@@ -121,12 +129,29 @@ pub fn run_deploy(state: &AgentState, target: PeerInfo, exec: Option<Vec<String>
                 target_overlay,
                 conn_rx,
                 running,
+                handshake_done,
             )
         })
     };
 
-    // Let the handshake settle, then run the deploy command with the proxy in env.
-    std::thread::sleep(HANDSHAKE_SETTLE);
+    // Proceed as soon as the handshake completes; the fixed cap is only the
+    // no-answer bound (G-6: was an unconditional 8s sleep).
+    let settle_started = std::time::Instant::now();
+    while !handshake_done.load(Ordering::SeqCst) && settle_started.elapsed() < HANDSHAKE_SETTLE_MAX
+    {
+        std::thread::sleep(HANDSHAKE_POLL);
+    }
+    if handshake_done.load(Ordering::SeqCst) {
+        println!(
+            "handshake complete in {:.1}s",
+            settle_started.elapsed().as_secs_f32()
+        );
+    } else {
+        eprintln!(
+            "warning: no handshake after {}s — running deploy anyway (may fail to connect)",
+            HANDSHAKE_SETTLE_MAX.as_secs()
+        );
+    }
 
     let result = match exec {
         Some(parts) if !parts.is_empty() => {
@@ -291,6 +316,7 @@ fn engine_loop(
     target_overlay: IpAddr,
     conn_rx: Receiver<PendingConn>,
     running: Arc<AtomicBool>,
+    handshake_done: Arc<AtomicBool>,
 ) {
     // smoltcp interface (Medium::Ip — no ethernet/link layer over WireGuard).
     let mut device = VirtualDevice::new();
@@ -331,6 +357,12 @@ fn engine_loop(
     let mut decap_out = [0u8; 2048];
 
     while running.load(Ordering::SeqCst) {
+        // Flag handshake completion for run_deploy's settle wait (G-6).
+        if !handshake_done.load(Ordering::SeqCst)
+            && agent_core::tunnel::handshake_established(&tunn)
+        {
+            handshake_done.store(true, Ordering::SeqCst);
+        }
         // 1. Drain inbound UDP → boringtun decapsulate → smoltcp rx queue.
         loop {
             match udp.recv_from(&mut udp_buf) {

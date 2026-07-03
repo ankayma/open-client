@@ -44,8 +44,12 @@ pub async fn run(args: &[String]) -> Result<()> {
     print_receipt(resp.receipt.as_ref(), &cfg.control_plane);
     print_path_proof(&resp.overlay_ip, &cfg.control_plane);
 
-    // The effective login: server-sanitized echo wins; else what we asked for.
-    let login = resp.login.or(cfg.login);
+    // The effective login: server-sanitized echo wins; else what we asked for;
+    // else `root`. F-2 targets are servers ("SSH into prod") — without a default
+    // the system ssh falls back to the LOCAL username (e.g. `quocbao`), which
+    // almost never exists on the box and dead-ends at a password prompt. `root`
+    // is the near-universal server login; override with `--login <user>`.
+    let login = resp.login.or(cfg.login).or_else(|| Some("root".to_string()));
     let dest = match &login {
         Some(u) => format!("{u}@{}", resp.overlay_ip),
         None => resp.overlay_ip.clone(),
@@ -58,9 +62,19 @@ pub async fn run(args: &[String]) -> Result<()> {
 
     // 3. Exec the system ssh straight to the overlay address (interactive TTY).
     // [A.1.1] direct over the mesh — vendor not on this path.
+    // `accept-new`: the overlay address is a fresh, tenant-scoped identity the
+    // user has never seen — a raw `ssh` blocks on the interactive "authenticity
+    // of host … can't be established (yes/no)?" prompt, which reads as a hang in
+    // the GUI-launched Terminal (F-2). accept-new trusts on first use and still
+    // hard-fails on a later key CHANGE (MITM), unlike `no`.
+    // `ServerAliveInterval`: an idle session that got torn down (idle-teardown)
+    // re-handshakes transparently; keepalives keep the client from giving up
+    // during that one-RTT gap. `[T:ssh_config(5)]`
     println!("\n── Connecting ────────────────────────────────────────");
     println!("  ssh {dest}");
     let status = std::process::Command::new("ssh")
+        .args(["-o", "StrictHostKeyChecking=accept-new"])
+        .args(["-o", "ServerAliveInterval=5"])
         .arg(&dest)
         .status()
         .map_err(|e| anyhow!("launch ssh: {e}"))?;
