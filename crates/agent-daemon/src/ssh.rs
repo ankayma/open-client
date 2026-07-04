@@ -46,10 +46,13 @@ pub async fn run(args: &[String]) -> Result<()> {
 
     // The effective login: server-sanitized echo wins; else what we asked for;
     // else `root`. F-2 targets are servers ("SSH into prod") — without a default
-    // the system ssh falls back to the LOCAL username (e.g. `quocbao`), which
+    // the system ssh falls back to the LOCAL username (e.g. `alice`), which
     // almost never exists on the box and dead-ends at a password prompt. `root`
     // is the near-universal server login; override with `--login <user>`.
-    let login = resp.login.or(cfg.login).or_else(|| Some("root".to_string()));
+    let login = resp
+        .login
+        .or(cfg.login)
+        .or_else(|| Some("root".to_string()));
     let dest = match &login {
         Some(u) => format!("{u}@{}", resp.overlay_ip),
         None => resp.overlay_ip.clone(),

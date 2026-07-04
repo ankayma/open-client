@@ -84,6 +84,9 @@
 					await startDataplane();
 				}
 				connection.set(await getConnectionStatus());
+				// Pull the peer count right away — don't leave "Connected" bare
+				// until the next 4s poll tick.
+				await refreshDataplane();
 			}
 		} catch (e) {
 			connection.set({ status: 'disconnected' });
@@ -102,7 +105,10 @@
 			class:connecting={$connection.status === 'connecting'}
 		></span>
 		<span class="status" class:connected={$connection.status === 'connected'}>
-			{#if $connection.status === 'connected'}Connected
+			<!-- Peer count inline with the state (owner feedback 2026-07-04): the
+			     first thing to know after Connect is "am I meshed with anyone?".
+			     Fills in as soon as the daemon status poll reports. -->
+			{#if $connection.status === 'connected'}Connected{#if dp?.running}&nbsp;· {dp.peers.length} peer{dp.peers.length === 1 ? '' : 's'}{/if}
 			{:else if $connection.status === 'connecting'}Connecting…
 			{:else}Disconnected{/if}
 		</span>
@@ -143,11 +149,10 @@
 		<p class="error">{connectError}</p>
 	{/if}
 
-	{#if $connection.status === 'connected' && dp?.running}
-		<p class="tunnel">
-			🔒 Secure tunnel up · {dp.peers.length} peer{dp.peers.length === 1 ? '' : 's'}
-		</p>
-	{/if}
+	<!-- Peer count lives ONLY in the header ("Connected · N peers") — same spot on
+	     iOS and desktop (owner feedback 2026-07-04: the old per-platform line under
+	     the button is gone). Its presence doubles as the "tunnel really up" signal:
+	     it renders only while the data plane reports running. -->
 
 	{#if isIos && $connection.status === 'connected'}
 		<!-- Honest about the "reconnect to see new devices/services" model (Phase 1,
@@ -267,10 +272,5 @@
 		text-align: center;
 		overflow-wrap: anywhere;
 		box-sizing: border-box;
-	}
-	.tunnel {
-		font-size: 13px;
-		color: var(--c-success);
-		text-align: center;
 	}
 </style>

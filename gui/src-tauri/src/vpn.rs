@@ -91,7 +91,10 @@ async fn build_config(state: &AppState) -> Result<String, String> {
     // address, not a dialable peer). Falls back to the enroll snapshot on error.
     let peers: Vec<agent_core::domain::PeerInfo> = match state.token() {
         Some(tok) => match agent_core::adapters::peers(&state.http, &state.base_url, &tok).await {
-            Ok(list) => list.into_iter().filter(|p| p.overlay_ip != overlay_ip).collect(),
+            Ok(list) => list
+                .into_iter()
+                .filter(|p| p.overlay_ip != overlay_ip)
+                .collect(),
             Err(_) => enroll_peers,
         },
         None => enroll_peers,
