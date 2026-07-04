@@ -52,6 +52,25 @@ pub(crate) struct AgentState {
     /// [T:Part B §B.1.4] Canonical workload kind, e.g. "AppServer".
     #[serde(default)]
     pub(crate) workload_kind: Option<String>,
+    /// [T:part-d-layer2-cert-infrastructure.md §H.2] Layer 2 node identity:
+    /// leaf cert signed by the TenantCA. None until the CP ships Layer 2.
+    #[serde(default)]
+    pub(crate) node_cert_pem: Option<String>,
+    /// Provisioning CA chain for broker TLS (TH-A dynamic trust — arrives at
+    /// enrollment, never pinned in the binary). [T:A.1.18]
+    #[serde(default)]
+    pub(crate) provisioning_ca_pem: Option<String>,
+    /// Cached CRL (revocation = CRL broadcast, B.4.2), refreshed every 4h.
+    #[serde(default)]
+    pub(crate) crl_pem: Option<String>,
+    /// Where to refresh the CRL from. [A: persisted in addition to the spec's
+    /// field list — without it a restarted daemon cannot refresh until the next
+    /// re-enroll; recorded as a spec-log addendum]
+    #[serde(default)]
+    pub(crate) crl_url: Option<String>,
+    /// RFC3339 notAfter of node_cert_pem, for the expiry warning + GUI display.
+    #[serde(default)]
+    pub(crate) cert_expires_at: Option<String>,
 }
 
 // `PeerEntry` / `Peers` and the tx/rx/timer pump now live in `agent_core::pump`
@@ -64,10 +83,37 @@ pub(crate) struct AgentState {
 /// `agent.json` carries a scoped node service token and `--token` is optional.
 pub async fn run(args: &[String]) -> Result<()> {
     let cfg = Config::parse(args)?;
-    let http = reqwest::Client::new();
+    // connect_timeout bounds TCP+TLS setup for EVERY call, including the SSE
+    // subscribe (whose response body must stay unbounded). Round-trip bounds on
+    // plain REST live in the adapters (CP_REST_TIMEOUT) — together they keep the
+    // refresh loop from freezing on one dead connection, which wedged a
+    // production node for 21h (2026-07-04: status written once, roster frozen).
+    let http = reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(10))
+        .build()
+        .context("build control-plane HTTP client")?;
 
     // 1. Identity: reuse persisted state, else generate + enroll (needs --token).
     let state = load_or_enroll(&http, &cfg).await?;
+
+    // [Layer 2] Expiry warning — display only; renewal flow ships on the P.8
+    // trigger (1yr Personal TTL ⇒ not a 1.x launch gate).
+    // [T:part-d-layer2-cert-infrastructure.md §H.1]
+    if let Some(cert) = state.node_cert_pem.as_deref() {
+        if let Ok(days) = agent_core::cert::cert_expiry_days(cert) {
+            if days < 30 {
+                eprintln!(
+                    "node cert expires in {days} day(s) — re-enroll this device to renew \
+                     (automatic renewal is not built yet)"
+                );
+            }
+        }
+    }
+    // [Layer 2] CRL cache: fetch now + every 4h so revocations (E-4) reach the
+    // broker handshake within one refresh window. [T:B.4.2 CRL broadcast]
+    if let Some(url) = state.crl_url.clone() {
+        spawn_crl_refresh(http.clone(), url, cfg.state_path.clone());
+    }
 
     // Service token: prefer persisted node service token (scoped, D.11);
     // fall back to --token for nodes enrolled before migration 015.
@@ -308,7 +354,19 @@ pub(crate) async fn serve_dataplane(
                 // be manually restarted to see a new device. The periodic resync above
                 // is the safety net; SSE just makes the common case instant. `[T:Part D §D.12]`
                 const SSE_SESSION_CAP: Duration = Duration::from_secs(60);
-                match adapters::subscribe_peer_events(&http, &cp, &svc_token).await {
+                // Bound the subscribe handshake (connect_timeout covers TCP+TLS;
+                // this covers "accepted but headers never arrive"). The response
+                // BODY stays unbounded on purpose — SSE_SESSION_CAP bounds it.
+                const SSE_CONNECT_CAP: Duration = Duration::from_secs(30);
+                let subscribe = tokio::time::timeout(
+                    SSE_CONNECT_CAP,
+                    adapters::subscribe_peer_events(&http, &cp, &svc_token),
+                );
+                match subscribe.await.unwrap_or_else(|_elapsed| {
+                    Err(agent_core::adapters::ApiError::Transport(format!(
+                        "SSE subscribe timed out after {SSE_CONNECT_CAP:?}"
+                    )))
+                }) {
                     Ok(resp) => {
                         backoff_secs = 1; // reset on successful connect
                         let sse = consume_peer_sse(
@@ -676,6 +734,26 @@ async fn enroll_and_persist(
         );
     }
 
+    // [Layer 2] Post-enroll sanity check: the leaf the CP handed us really is
+    // signed by the CA it handed us — catches CP misconfig at enroll time. A
+    // failure is loud but non-fatal: Layer 1 (bearer token) still works and the
+    // broker isn't dialed until the broker milestone. [A: fail-open here until
+    // an mTLS consumer exists; revisit when broker transport lands]
+    // [T:part-d-layer2-cert-infrastructure.md §H.2 Step 1]
+    if let (Some(leaf), Some(ca)) = (&resp.node_cert_pem, &resp.provisioning_ca_pem) {
+        match agent_core::cert::verify_cert_chain(leaf, ca) {
+            Ok(()) => println!("node cert verified against provisioning CA"),
+            Err(e) => eprintln!(
+                "WARNING: node cert does NOT verify against the provisioning CA ({e}) — \
+                 broker mTLS will fail; report this to your control-plane operator"
+            ),
+        }
+    }
+    let cert_expires_at = resp
+        .node_cert_pem
+        .as_deref()
+        .and_then(|c| agent_core::cert::cert_expiry_rfc3339(c).ok());
+
     let state = AgentState {
         private_b64: kp.private_b64,
         public_b64: kp.public_b64,
@@ -685,11 +763,23 @@ async fn enroll_and_persist(
         service_token: resp.node_service_token,
         token_expires_at: resp.token_expires_at,
         workload_kind: Some("AppServer".to_string()),
+        node_cert_pem: resp.node_cert_pem,
+        provisioning_ca_pem: resp.provisioning_ca_pem,
+        crl_pem: None, // fetched from crl_url right after startup (4h loop)
+        crl_url: resp.crl_url,
+        cert_expires_at,
     };
-    if let Some(dir) = std::path::Path::new(&cfg.state_path).parent() {
+    persist_state(&cfg.state_path, &state)?;
+    Ok(state)
+}
+
+/// Write `agent.json`. mode 0o600: the WireGuard private key must not be
+/// readable by other users on the same host (cert + CA ride along — not secret
+/// per se, defense in depth). [T:A.3.4]
+fn persist_state(state_path: &str, state: &AgentState) -> Result<()> {
+    if let Some(dir) = std::path::Path::new(state_path).parent() {
         let _ = std::fs::create_dir_all(dir);
     }
-    // mode 0o600: private key must not be readable by other users on the same host.
     #[cfg(unix)]
     let mut f = {
         use std::os::unix::fs::OpenOptionsExt;
@@ -698,19 +788,77 @@ async fn enroll_and_persist(
             .create(true)
             .truncate(true)
             .mode(0o600)
-            .open(&cfg.state_path)
-            .with_context(|| format!("create identity file {}", cfg.state_path))?
+            .open(state_path)
+            .with_context(|| format!("create identity file {state_path}"))?
     };
     #[cfg(not(unix))]
     let mut f = OpenOptions::new()
         .write(true)
         .create(true)
         .truncate(true)
-        .open(&cfg.state_path)
-        .with_context(|| format!("create identity file {}", cfg.state_path))?;
-    f.write_all(&serde_json::to_vec_pretty(&state)?)
-        .with_context(|| format!("persist identity to {}", cfg.state_path))?;
-    Ok(state)
+        .open(state_path)
+        .with_context(|| format!("create identity file {state_path}"))?;
+    f.write_all(&serde_json::to_vec_pretty(state)?)
+        .with_context(|| format!("persist identity to {state_path}"))?;
+    Ok(())
+}
+
+/// Fetch the CRL from the CP and cache it into `agent.json` (read-modify-write:
+/// the daemon is the only writer after startup). Revocation = CRL broadcast
+/// (B.4.2); rustls enforces the cached CRL at the next broker handshake.
+async fn refresh_crl_once(http: &reqwest::Client, crl_url: &str, state_path: &str) -> Result<()> {
+    let pem = http
+        .get(crl_url)
+        .timeout(agent_core::adapters::CP_REST_TIMEOUT)
+        .send()
+        .await
+        .context("CRL fetch")?
+        .error_for_status()
+        .context("CRL fetch status")?
+        .text()
+        .await
+        .context("CRL body")?;
+    // [T:RFC-7468§6] PEM label for a CRL is "X509 CRL". Reject anything else
+    // early so a captive portal / error page never lands in agent.json.
+    if !pem.contains("-----BEGIN X509 CRL-----") {
+        return Err(anyhow!(
+            "CRL endpoint returned something that is not a PEM CRL"
+        ));
+    }
+    let bytes = std::fs::read(state_path).context("read agent.json for CRL update")?;
+    let mut state: AgentState = serde_json::from_slice(&bytes).context("parse agent.json")?;
+    state.crl_pem = Some(pem);
+    persist_state(state_path, &state)
+}
+
+/// Refresh the CRL now, then every 4h for the daemon's lifetime.
+/// Fail-open on staleness (keep serving with the cached CRL, warn after ~48h
+/// of consecutive failures); TLS verification itself stays fail-closed.
+/// [A risk-accepted per spec §H.2: staleness window bounded by CRL TTL]
+fn spawn_crl_refresh(http: reqwest::Client, crl_url: String, state_path: String) {
+    tokio::spawn(async move {
+        let mut consecutive_failures: u32 = 0;
+        loop {
+            match refresh_crl_once(&http, &crl_url, &state_path).await {
+                Ok(()) => {
+                    consecutive_failures = 0;
+                    println!("CRL refreshed from {crl_url}");
+                }
+                Err(e) => {
+                    consecutive_failures += 1;
+                    eprintln!("CRL refresh failed: {e} — keeping cached CRL");
+                    // 12 ticks × 4h = 48h without a fresh CRL.
+                    if consecutive_failures >= 12 {
+                        eprintln!(
+                            "WARNING: cached CRL is >48h stale — recently revoked \
+                             nodes may still be accepted until refresh succeeds"
+                        );
+                    }
+                }
+            }
+            tokio::time::sleep(Duration::from_secs(4 * 3600)).await;
+        }
+    });
 }
 
 /// This machine's primary LAN IPv4, found by asking the OS which source address
@@ -907,4 +1055,72 @@ fn add_new_peers(
         add_peer_route(dev_name, *overlay);
     }
     added.len()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// agent.json written by a pre-Layer-2 daemon must keep loading: every
+    /// Layer 2 field is `#[serde(default)]` → None. [T per P.4 compose]
+    #[test]
+    fn agent_state_pre_layer2_json_still_loads() {
+        let old = r#"{
+            "private_b64": "priv",
+            "public_b64": "pub",
+            "node_id": "n1",
+            "overlay_ip": "100.64.0.2",
+            "listen_port": 51820
+        }"#;
+        let st: AgentState = serde_json::from_str(old).unwrap();
+        assert_eq!(st.node_cert_pem, None);
+        assert_eq!(st.provisioning_ca_pem, None);
+        assert_eq!(st.crl_pem, None);
+        assert_eq!(st.crl_url, None);
+        assert_eq!(st.cert_expires_at, None);
+    }
+
+    /// persist_state round-trips the Layer 2 fields and keeps agent.json 0600
+    /// (private key + cert material must not be world-readable). [T:A.3.4]
+    #[test]
+    fn persist_state_roundtrips_cert_fields_mode_0600() {
+        let dir = std::env::temp_dir().join(format!("agent-up-test-{}", std::process::id()));
+        let path = dir.join("agent.json");
+        let path_s = path.to_str().unwrap().to_string();
+        let state = AgentState {
+            private_b64: "priv".into(),
+            public_b64: "pub".into(),
+            node_id: "n1".into(),
+            overlay_ip: "100.64.0.2".into(),
+            listen_port: 51820,
+            service_token: None,
+            token_expires_at: None,
+            workload_kind: None,
+            node_cert_pem: Some("LEAF".into()),
+            provisioning_ca_pem: Some("CA".into()),
+            crl_pem: Some("CRL".into()),
+            crl_url: Some("https://cp.example/pki/crl.pem".into()),
+            cert_expires_at: Some("2027-07-04T00:00:00Z".into()),
+        };
+        persist_state(&path_s, &state).unwrap();
+
+        let loaded: AgentState = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(loaded.node_cert_pem.as_deref(), Some("LEAF"));
+        assert_eq!(
+            loaded.crl_url.as_deref(),
+            Some("https://cp.example/pki/crl.pem")
+        );
+        assert_eq!(
+            loaded.cert_expires_at.as_deref(),
+            Some("2027-07-04T00:00:00Z")
+        );
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600, "agent.json must be owner-only");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

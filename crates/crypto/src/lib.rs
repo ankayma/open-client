@@ -5,6 +5,8 @@
 //! encode the 32-byte keys as standard base64. We match that encoding exactly
 //! so keys are interoperable with stock WireGuard. `[T:WireGuard-whitepaper §2]`
 
+pub mod cert;
+
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use rand_core::OsRng; // [T:rand_core@0.6.4-OsRng] CSPRNG seeded from OS entropy (getrandom)
 use x25519_dalek::{PublicKey, StaticSecret}; // [T:x25519-dalek@2.0.1] X25519 — RFC 7748

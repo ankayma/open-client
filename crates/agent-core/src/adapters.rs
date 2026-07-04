@@ -7,6 +7,21 @@ use crate::domain::{
     SubdomainCert, SubdomainCsrReq, SubdomainReq,
 };
 
+/// Hard upper bound for one REST round-trip to the control plane (headers +
+/// body). This is what keeps a long-running daemon's refresh loop alive: with no
+/// bound, one half-open TCP connection on a plain GET freezes the loop FOREVER —
+/// a production node froze for 21h on exactly this (field incident 2026-07-04:
+/// status file written once at startup, SSE never subscribed, roster never
+/// resynced). Streaming endpoints (SSE) are exempt — see `subscribe_peer_events`.
+///
+/// 300ms under cfg(test) so the timeout path is exercisable in a unit test
+/// without a 30s wait; release builds always get 30s.
+pub const CP_REST_TIMEOUT: std::time::Duration = if cfg!(test) {
+    std::time::Duration::from_millis(300)
+} else {
+    std::time::Duration::from_secs(30)
+};
+
 /// Errors from the control-plane HTTP client.
 #[derive(Debug)]
 pub enum ApiError {
@@ -61,6 +76,7 @@ async fn get_json<T: serde::de::DeserializeOwned>(
     let resp = http
         .get(url(base_url, path))
         .bearer_auth(session_token)
+        .timeout(CP_REST_TIMEOUT)
         .send()
         .await
         .map_err(|e| ApiError::Transport(e.to_string()))?;
@@ -97,6 +113,7 @@ pub async fn fetch_handoff(
     }
     let resp = http
         .get(url(base_url, &format!("/auth/handoff?nonce={nonce}")))
+        .timeout(CP_REST_TIMEOUT)
         .send()
         .await
         .map_err(|e| ApiError::Transport(e.to_string()))?;
@@ -171,6 +188,7 @@ pub async fn enroll(
         .post(url(base_url, "/api/v1/enrollment"))
         .bearer_auth(session_token)
         .json(req)
+        .timeout(CP_REST_TIMEOUT)
         .send()
         .await
         .map_err(|e| ApiError::Transport(e.to_string()))?;
@@ -180,6 +198,47 @@ pub async fn enroll(
     resp.json::<EnrollResponse>()
         .await
         .map_err(|e| ApiError::Decode(e.to_string()))
+}
+
+/// Build an HTTP client that trusts ONLY the Provisioning CA received at
+/// enrollment (TH-A dynamic trust — no CA pinned in the binary, no system
+/// roots). For broker connections (AgentControl, B.5.1); CP REST calls keep
+/// `reqwest::Client::new()` with system roots — cp.ankayma.com serves a
+/// public web-PKI cert. `[T:part-d-layer2-cert-infrastructure.md §H.2 Step 1]`
+///
+/// Excluding system roots is what makes cross-PL isolation fail at the TLS
+/// layer: a broker of another product line presents a chain to a different
+/// Provisioning CA and the handshake fails before any bytes flow.
+/// `[T:B.4.1 + B.5.1]`
+///
+/// `crl_pem`: revocation is CRL broadcast (B.4.2). rustls 0.23 (under reqwest
+/// 0.12 `rustls-tls`) enforces CRLs natively at handshake.
+/// `[T:reqwest@0.12.28-add_crl]`
+pub fn broker_client(
+    provisioning_ca_pem: &str,
+    crl_pem: Option<&str>,
+) -> Result<reqwest::Client, ApiError> {
+    // from_pem_bundle: the CA *chain* (root + intermediates) arrives as one
+    // concatenated PEM string. [T:reqwest@0.12.28-from_pem_bundle]
+    let cas = reqwest::Certificate::from_pem_bundle(provisioning_ca_pem.as_bytes())
+        .map_err(|e| ApiError::Transport(format!("provisioning CA parse: {e}")))?;
+    if cas.is_empty() {
+        return Err(ApiError::Transport(
+            "provisioning CA PEM contains no certificate".into(),
+        ));
+    }
+    let mut builder = reqwest::Client::builder().tls_built_in_root_certs(false);
+    for ca in cas {
+        builder = builder.add_root_certificate(ca);
+    }
+    if let Some(crl) = crl_pem {
+        let crls = reqwest::tls::CertificateRevocationList::from_pem_bundle(crl.as_bytes())
+            .map_err(|e| ApiError::Transport(format!("CRL parse: {e}")))?;
+        builder = builder.add_crls(crls);
+    }
+    builder
+        .build()
+        .map_err(|e| ApiError::Transport(e.to_string()))
 }
 
 /// Wire shape of `POST /api/v1/enrollment/token`: a single-use join link for
@@ -219,6 +278,7 @@ pub async fn issue_join_token(
     let resp = http
         .post(endpoint)
         .bearer_auth(session_token)
+        .timeout(CP_REST_TIMEOUT)
         .send()
         .await
         .map_err(|e| ApiError::Transport(e.to_string()))?;
@@ -255,6 +315,7 @@ pub async fn enroll_via_join_token(
     let resp = http
         .post(url(base_url, "/api/v1/enrollment/join"))
         .json(req)
+        .timeout(CP_REST_TIMEOUT)
         .send()
         .await
         .map_err(|e| ApiError::Transport(e.to_string()))?;
@@ -281,6 +342,7 @@ pub async fn open_ssh_session(
         .post(url(base_url, "/api/v1/ssh/session"))
         .bearer_auth(session_token)
         .json(req)
+        .timeout(CP_REST_TIMEOUT)
         .send()
         .await
         .map_err(|e| ApiError::Transport(e.to_string()))?;
@@ -336,6 +398,7 @@ pub async fn register_subdomain(
         .post(url(base_url, "/api/v1/subdomain"))
         .bearer_auth(session_token)
         .json(req)
+        .timeout(CP_REST_TIMEOUT)
         .send()
         .await
         .map_err(|e| ApiError::Transport(e.to_string()))?;
@@ -365,6 +428,7 @@ pub async fn submit_subdomain_csr(
         .post(url(base_url, &format!("/api/v1/subdomain/{fqdn}/csr")))
         .bearer_auth(service_token)
         .json(&req)
+        .timeout(CP_REST_TIMEOUT)
         .send()
         .await
         .map_err(|e| ApiError::Transport(e.to_string()))?;
@@ -402,6 +466,7 @@ pub async fn delete_subdomain(
     let resp = http
         .delete(url(base_url, &format!("/api/v1/subdomain/{label}")))
         .bearer_auth(session_token)
+        .timeout(CP_REST_TIMEOUT)
         .send()
         .await
         .map_err(|e| ApiError::Transport(e.to_string()))?;
@@ -445,6 +510,7 @@ pub async fn invite_member(
             "ttl_seconds": ttl_seconds,
             "proof_token": proof_token,
         }))
+        .timeout(CP_REST_TIMEOUT)
         .send()
         .await
         .map_err(|e| ApiError::Transport(e.to_string()))?;
@@ -473,6 +539,7 @@ pub async fn join_team_link(
     let resp = http
         .post(url(base_url, "/api/v1/members/join-link"))
         .json(&serde_json::json!({ "token": token }))
+        .timeout(CP_REST_TIMEOUT)
         .send()
         .await
         .map_err(|e| ApiError::Transport(e.to_string()))?;
@@ -496,6 +563,7 @@ pub async fn join_team(
         .post(url(base_url, "/api/v1/members/join"))
         .bearer_auth(session_token)
         .json(&serde_json::json!({ "token": invite }))
+        .timeout(CP_REST_TIMEOUT)
         .send()
         .await
         .map_err(|e| ApiError::Transport(e.to_string()))?;
@@ -522,6 +590,7 @@ pub async fn remove_member(
     let resp = http
         .delete(endpoint)
         .bearer_auth(session_token)
+        .timeout(CP_REST_TIMEOUT)
         .send()
         .await
         .map_err(|e| ApiError::Transport(e.to_string()))?;
@@ -555,6 +624,7 @@ pub async fn submit_policy(
         .bearer_auth(session_token)
         .header("content-type", "application/json")
         .body(body.to_string())
+        .timeout(CP_REST_TIMEOUT)
         .send()
         .await
         .map_err(|e| ApiError::Transport(e.to_string()))?;
@@ -585,6 +655,7 @@ pub async fn ci_deploy(
     let resp = http
         .post(url(base_url, "/api/v1/ci/deploy"))
         .json(req)
+        .timeout(CP_REST_TIMEOUT)
         .send()
         .await
         .map_err(|e| ApiError::Transport(e.to_string()))?;
@@ -608,6 +679,7 @@ pub async fn agent_enroll(
     let resp = http
         .post(url(base_url, "/api/v1/agents/enroll"))
         .json(req)
+        .timeout(CP_REST_TIMEOUT)
         .send()
         .await
         .map_err(|e| ApiError::Transport(e.to_string()))?;
@@ -629,6 +701,11 @@ pub async fn subscribe_peer_events(
     base_url: &str,
     node_service_token: &str,
 ) -> Result<reqwest::Response, ApiError> {
+    // NO .timeout() here — reqwest's per-request timeout spans the WHOLE
+    // response including the streamed body [T:reqwest@0.12-RequestBuilder::timeout],
+    // so it would kill the long-lived SSE stream mid-session. Liveness is bounded
+    // by the caller instead: up.rs wraps this connect in tokio::time::timeout and
+    // caps each SSE session at 60s (SSE_SESSION_CAP) before a full resync.
     let resp = http
         .get(url(base_url, "/api/v1/peers/events"))
         .bearer_auth(node_service_token)
@@ -662,6 +739,7 @@ pub async fn renew_service_token(
             &format!("/api/v1/nodes/{node_id}/service-token"),
         ))
         .bearer_auth(current_service_token)
+        .timeout(CP_REST_TIMEOUT)
         .send()
         .await
         .map_err(|e| ApiError::Transport(e.to_string()))?;
@@ -766,6 +844,7 @@ pub async fn mint_agent_token(
             scope,
             ttl_seconds,
         })
+        .timeout(CP_REST_TIMEOUT)
         .send()
         .await
         .map_err(|e| ApiError::Transport(e.to_string()))?;
@@ -798,6 +877,7 @@ pub async fn register_ci_policy(
         .post(url(base_url, "/api/v1/ci/policy"))
         .bearer_auth(session_token)
         .json(req)
+        .timeout(CP_REST_TIMEOUT)
         .send()
         .await
         .map_err(|e| ApiError::Transport(e.to_string()))?;
@@ -816,6 +896,7 @@ pub async fn delete_ci_policy(
     let resp = http
         .delete(url(base_url, &path))
         .bearer_auth(session_token)
+        .timeout(CP_REST_TIMEOUT)
         .send()
         .await
         .map_err(|e| ApiError::Transport(e.to_string()))?;
@@ -846,6 +927,7 @@ pub async fn delete_node(
     let resp = http
         .delete(endpoint)
         .bearer_auth(session_token)
+        .timeout(CP_REST_TIMEOUT)
         .send()
         .await
         .map_err(|e| ApiError::Transport(e.to_string()))?;
@@ -869,6 +951,7 @@ pub async fn request_step_up(
         .post(url(base_url, "/api/v1/stepup/request"))
         .bearer_auth(session_token)
         .json(&serde_json::json!({ "purpose": purpose }))
+        .timeout(CP_REST_TIMEOUT)
         .send()
         .await
         .map_err(|e| ApiError::Transport(e.to_string()))?;
@@ -940,6 +1023,7 @@ async fn post_stepup_verify(
         .post(url(base_url, "/api/v1/stepup/verify"))
         .bearer_auth(session_token)
         .json(body)
+        .timeout(CP_REST_TIMEOUT)
         .send()
         .await
         .map_err(|e| ApiError::Transport(e.to_string()))?;
@@ -983,6 +1067,7 @@ pub async fn totp_enroll(
     let resp = http
         .post(url(base_url, "/api/v1/stepup/totp/enroll"))
         .bearer_auth(session_token)
+        .timeout(CP_REST_TIMEOUT)
         .send()
         .await
         .map_err(|e| ApiError::Transport(e.to_string()))?;
@@ -1011,6 +1096,7 @@ pub async fn totp_confirm(
         .post(url(base_url, "/api/v1/stepup/totp/confirm"))
         .bearer_auth(session_token)
         .json(&serde_json::json!({ "code": code }))
+        .timeout(CP_REST_TIMEOUT)
         .send()
         .await
         .map_err(|e| ApiError::Transport(e.to_string()))?;
@@ -1062,6 +1148,7 @@ pub async fn webauthn_register_start(
     let resp = http
         .post(url(base_url, "/api/v1/stepup/webauthn/register/start"))
         .bearer_auth(session_token)
+        .timeout(CP_REST_TIMEOUT)
         .send()
         .await
         .map_err(|e| ApiError::Transport(e.to_string()))?;
@@ -1091,6 +1178,7 @@ pub async fn webauthn_register_finish(
             "credential": credential,
             "label": label,
         }))
+        .timeout(CP_REST_TIMEOUT)
         .send()
         .await
         .map_err(|e| ApiError::Transport(e.to_string()))?;
@@ -1107,6 +1195,7 @@ pub async fn webauthn_authenticate_start(
     let resp = http
         .post(url(base_url, "/api/v1/stepup/webauthn/authenticate/start"))
         .bearer_auth(session_token)
+        .timeout(CP_REST_TIMEOUT)
         .send()
         .await
         .map_err(|e| ApiError::Transport(e.to_string()))?;
@@ -1147,6 +1236,58 @@ pub async fn verify_step_up_webauthn(
 mod tests {
     use super::*;
 
+    /// A REST call against a server that accepts and then never responds must
+    /// fail within CP_REST_TIMEOUT (300ms under cfg(test)) instead of hanging
+    /// forever — the 21h production-node wedge regression (2026-07-04). The
+    /// listener deliberately never writes a byte.
+    #[tokio::test]
+    async fn rest_call_times_out_against_hanging_server() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        // Keep accepted sockets open (never respond) until the test ends.
+        let _hold = tokio::spawn(async move {
+            let mut held = Vec::new();
+            loop {
+                if let Ok((sock, _)) = listener.accept().await {
+                    held.push(sock);
+                }
+            }
+        });
+
+        let http = reqwest::Client::new();
+        let started = std::time::Instant::now();
+        let err = peers(&http, &format!("http://{addr}"), "token")
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, ApiError::Transport(_)),
+            "expected timeout as Transport error, got {err:?}"
+        );
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(5),
+            "call must be bounded by CP_REST_TIMEOUT, took {:?}",
+            started.elapsed()
+        );
+    }
+
+    /// broker_client accepts a real CA PEM (rcgen-generated, no network) and
+    /// builds a client — proving PEM parse + rustls root-store wiring compile
+    /// into a working builder. TLS handshake itself = staging E2E (Step 2).
+    #[test]
+    fn broker_client_builds_from_generated_ca() {
+        let key = rcgen::KeyPair::generate().unwrap();
+        let mut params = rcgen::CertificateParams::new(vec![]).unwrap();
+        params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+        let ca_pem = params.self_signed(&key).unwrap().pem();
+        broker_client(&ca_pem, None).expect("client from valid CA PEM");
+    }
+
+    #[test]
+    fn broker_client_rejects_garbage_ca() {
+        let err = broker_client("not a pem", None).unwrap_err();
+        assert!(matches!(err, ApiError::Transport(_)), "got {err:?}");
+    }
+
     // Network tests: hit the live control-plane. Run explicitly on a host that can
     // reach it: `cargo test -p agent-core -- --ignored`. A bogus token must be
     // rejected, proving URL + auth header + error mapping are correct.
@@ -1163,8 +1304,17 @@ mod tests {
         let err = enroll(&http, "https://cp.ankayma.com", "bogus-token", &req)
             .await
             .unwrap_err();
+        // CP returns 401 with a JSON error body → mapped to Server{..}; a bare
+        // Status(401) would mean the body was absent/unreadable. Both = rejected.
         assert!(
-            matches!(err, ApiError::Status(401) | ApiError::Status(400)),
+            matches!(
+                err,
+                ApiError::Status(401 | 400)
+                    | ApiError::Server {
+                        status: 401 | 400,
+                        ..
+                    }
+            ),
             "expected auth rejection, got {err:?}"
         );
     }
@@ -1184,10 +1334,73 @@ mod tests {
         let err = enroll_via_join_token(&http, "https://cp.ankayma.com", &req)
             .await
             .unwrap_err();
+        // Same mapping note as above: 401 + JSON error body → Server{..}.
         assert!(
-            matches!(err, ApiError::Status(401) | ApiError::Status(400)),
+            matches!(
+                err,
+                ApiError::Status(401 | 400)
+                    | ApiError::Server {
+                        status: 401 | 400,
+                        ..
+                    }
+            ),
             "expected token rejection, got {err:?}"
         );
+    }
+
+    /// E-3 live roundtrip: mint a join link (sender half) → redeem it with a
+    /// fresh keypair (recipient half) → same `EnrollResponse` shape as E-2,
+    /// incl. Layer 2 cert fields = None while the CP pre-dates Layer 2 → delete
+    /// the test node again (E-4) so the roster stays clean.
+    /// Run: ANKAYMA_SESSION_TOKEN=<live session> cargo test -p agent-core --lib -- --ignored join_enroll_live
+    #[tokio::test]
+    #[ignore = "network+credential: set ANKAYMA_SESSION_TOKEN to a live session token"]
+    async fn join_enroll_live_roundtrip_creates_and_deletes_node() {
+        let session = std::env::var("ANKAYMA_SESSION_TOKEN")
+            .expect("set ANKAYMA_SESSION_TOKEN to run this test");
+        let http = reqwest::Client::new();
+        let base = "https://cp.ankayma.com";
+
+        let link = issue_join_token(&http, base, &session, None, None)
+            .await
+            .expect("mint join link (E-3 sender half)");
+        // ankayma://join?token=… — keep only the token value.
+        let token = link
+            .split("token=")
+            .nth(1)
+            .expect("join link carries token=")
+            .split('&')
+            .next()
+            .unwrap()
+            .to_string();
+
+        let kp = crypto::WgKeypair::generate();
+        let resp = enroll_via_join_token(
+            &http,
+            base,
+            &JoinEnrollRequest {
+                join_token: token,
+                public_key: kp.public_b64,
+                hostname: "layer2-regression-e3".into(),
+                endpoint: None,
+            },
+        )
+        .await
+        .expect("redeem join link (E-3 recipient half)");
+
+        assert!(!resp.overlay_ip.is_empty());
+        assert!(
+            resp.node_service_token.is_some(),
+            "post-migration-015 CP returns a node service token"
+        );
+        // CP pre-Layer-2: cert fields absent → None (P.4 backward compat).
+        assert_eq!(resp.node_cert_pem, None);
+        assert_eq!(resp.provisioning_ca_pem, None);
+        assert_eq!(resp.crl_url, None);
+
+        delete_node(&http, base, &session, &resp.node_id, None)
+            .await
+            .expect("delete the test node (E-4)");
     }
 
     #[tokio::test]

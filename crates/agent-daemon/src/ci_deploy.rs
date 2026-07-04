@@ -106,6 +106,13 @@ pub async fn run(args: &[String]) -> Result<()> {
         service_token: None,
         token_expires_at: None,
         workload_kind: Some("BatchWorker".to_string()),
+        // Ephemeral CI node — lives minutes, never dials the broker: no Layer 2
+        // cert material. [T:part-d-layer2-cert-infrastructure.md §H.3 F-x rows]
+        node_cert_pem: None,
+        provisioning_ca_pem: None,
+        crl_pem: None,
+        crl_url: None,
+        cert_expires_at: None,
     };
     // The data plane is blocking (smoltcp poll loop + std process spawn); run it off
     // the async runtime so we don't stall the executor.

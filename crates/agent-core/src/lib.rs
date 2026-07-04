@@ -16,6 +16,10 @@ pub mod tunnel; // WireGuard data-plane engine (boringtun)
 // lib, not on `crypto` directly (keeps the A.3.1 hexagonal seam). [T:A.3.1]
 pub use crypto::{key_bytes_from_b64, KeyError, WgKeypair};
 
+// Layer 2 node-cert utilities (expiry warning, post-enroll chain sanity check)
+// — same seam rule as above. [T:part-d-layer2-cert-infrastructure.md §H.2]
+pub use crypto::cert;
+
 // Re-export the HTTP client type so GUI/daemon share one client and never talk
 // to the control plane except through this crate's adapters. [T:A.1.1]
 pub use reqwest;

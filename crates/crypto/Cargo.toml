@@ -11,3 +11,15 @@ rust-version.workspace = true
 x25519-dalek = { version = "2.0.1", features = ["static_secrets"] }
 rand_core    = { version = "0.6.4", features = ["getrandom"] }
 base64       = "0.22.1"
+# [T:A.1.21] Layer 2 node-cert parsing/verify (cert.rs). x509-parser is already
+# in-tree at this exact version via rcgen (agent-daemon tls_relay) — direct use
+# adds zero new supply-chain surface. `verify` feature = ring-backed signature
+# check (ring already in-tree via rcgen/instant-acme path).
+x509-parser  = { version = "0.18.1", features = ["verify"] }
+# RFC3339 formatting of notAfter for agent.json/GUI. Already in-tree via
+# x509-parser/rcgen; "formatting" pulls only itoa (in-tree via serde_json).
+time         = { version = "0.3", features = ["formatting"] }
+
+[dev-dependencies]
+# Test-cert generation only (CA + leaf), same pinned version as agent-daemon.
+rcgen = { version = "0.14", default-features = false, features = ["crypto", "pem", "ring"] }

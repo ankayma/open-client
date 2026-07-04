@@ -29,3 +29,6 @@ libc = "0.2"
 serde_json = "1"
 tokio      = { version = "1", features = ["rt", "macros"] }
 rand_core  = { version = "0.6.4", features = ["getrandom"] }
+# Test-only CA generation for broker_client (Layer 2); same pinned version as
+# agent-daemon tls_relay — no new supply-chain surface. [T:A.1.21]
+rcgen = { version = "0.14", default-features = false, features = ["crypto", "pem", "ring"] }

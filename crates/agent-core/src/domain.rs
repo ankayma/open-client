@@ -33,6 +33,18 @@ pub struct EnrollResponse {
     /// RFC3339 expiry of the service token.
     #[serde(default)]
     pub token_expires_at: Option<String>,
+    /// [T:part-d-layer2-cert-infrastructure.md §H.2] Layer 2 node identity:
+    /// leaf cert signed by the TenantCA, used for mTLS to the broker (B.5.1).
+    /// Absent from CPs that pre-date Layer 2 — `None`, no break (P.4 compose).
+    #[serde(default)]
+    pub node_cert_pem: Option<String>,
+    /// Provisioning CA chain to verify broker TLS (TH-A dynamic trust — the
+    /// binary pins no CA; trust arrives at enrollment). [T:A.1.18 per-PL chain]
+    #[serde(default)]
+    pub provisioning_ca_pem: Option<String>,
+    /// URL to fetch the CRL from the CP (revocation = CRL broadcast, B.4.2).
+    #[serde(default)]
+    pub crl_url: Option<String>,
 }
 
 /// A node entry from the management endpoint `GET /api/v1/nodes`. [T:B.5.2]
@@ -405,6 +417,32 @@ mod tests {
         assert_eq!(resp.peers.len(), 1);
         assert_eq!(resp.peers[0].hostname, "phone");
         assert_eq!(resp.peers[0].endpoint, None);
+        // Pre-Layer-2 CP: cert fields absent → None, no decode break (P.4).
+        assert_eq!(resp.node_cert_pem, None);
+        assert_eq!(resp.provisioning_ca_pem, None);
+        assert_eq!(resp.crl_url, None);
+    }
+
+    #[test]
+    fn enroll_response_parses_layer2_cert_fields() {
+        // Layer 2 CP additionally returns cert material + CRL location.
+        // [T:part-d-layer2-cert-infrastructure.md §H.2 Step 1]
+        let json = r#"{
+            "node_id": "n1",
+            "overlay_ip": "100.64.0.2",
+            "allowed_ips": ["100.64.0.2/32"],
+            "peers": [],
+            "node_cert_pem": "-----BEGIN CERTIFICATE-----\nLEAF\n-----END CERTIFICATE-----\n",
+            "provisioning_ca_pem": "-----BEGIN CERTIFICATE-----\nCA\n-----END CERTIFICATE-----\n",
+            "crl_url": "https://cp.example/pki/crl.pem"
+        }"#;
+        let resp: EnrollResponse = serde_json::from_str(json).unwrap();
+        assert!(resp.node_cert_pem.unwrap().contains("LEAF"));
+        assert!(resp.provisioning_ca_pem.unwrap().contains("CA"));
+        assert_eq!(
+            resp.crl_url.as_deref(),
+            Some("https://cp.example/pki/crl.pem")
+        );
     }
 
     #[test]
