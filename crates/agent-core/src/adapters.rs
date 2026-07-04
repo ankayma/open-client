@@ -354,6 +354,56 @@ pub async fn open_ssh_session(
         .map_err(|e| ApiError::Decode(e.to_string()))
 }
 
+/// Request a root-elevation grant for a node. `POST /api/v1/ssh/elevate`
+/// (session-authed). The CP evaluates authz (owner-implicit at F0, AdminAccessPolicy
+/// at F1+) + AAL step-up, then returns a signed grant the client presents to the
+/// node's embedded server — never a password, never standing sudo. `[T:f2 §H.4]`
+pub async fn elevate_ssh_session(
+    http: &reqwest::Client,
+    base_url: &str,
+    session_token: &str,
+    req: &crate::domain::SshElevateRequest,
+) -> Result<crate::domain::SshElevateResponse, ApiError> {
+    let resp = http
+        .post(url(base_url, "/api/v1/ssh/elevate"))
+        .bearer_auth(session_token)
+        .json(req)
+        .timeout(CP_REST_TIMEOUT)
+        .send()
+        .await
+        .map_err(|e| ApiError::Transport(e.to_string()))?;
+    if !resp.status().is_success() {
+        return Err(status_error(resp).await);
+    }
+    resp.json::<crate::domain::SshElevateResponse>()
+        .await
+        .map_err(|e| ApiError::Decode(e.to_string()))
+}
+
+/// Fetch the control plane's F-2 elevation verify key (base64). A node calls this
+/// at `agent up` so its embedded server can verify root-elevation grants against the
+/// CP key. `GET /api/v1/ssh/elevate/pubkey` (unauthenticated — it's a public key).
+/// `[T:f2 §H.4]`
+pub async fn elevate_pubkey(http: &reqwest::Client, base_url: &str) -> Result<String, ApiError> {
+    let resp = http
+        .get(url(base_url, "/api/v1/ssh/elevate/pubkey"))
+        .timeout(CP_REST_TIMEOUT)
+        .send()
+        .await
+        .map_err(|e| ApiError::Transport(e.to_string()))?;
+    if !resp.status().is_success() {
+        return Err(status_error(resp).await);
+    }
+    let v: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| ApiError::Decode(e.to_string()))?;
+    v.get("pubkey")
+        .and_then(|p| p.as_str())
+        .map(|s| s.to_string())
+        .ok_or_else(|| ApiError::Decode("no pubkey field".to_string()))
+}
+
 /// Fetch the tenant's F-3 mesh-resolve table. `GET /api/v1/mesh/resolve`
 /// (session-authed). A non-enrolled device gets 401 — the names do not exist for
 /// it (private-default); a revoked target node drops its name server-side (instant

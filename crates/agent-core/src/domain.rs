@@ -206,6 +206,37 @@ pub struct SshSessionResponse {
     pub login: Option<String>,
     #[serde(default)]
     pub receipt: Option<SshSessionReceipt>,
+    /// Port of the target's embedded SSH server (F-2 transport v0.5). Absent on an
+    /// older control plane → the caller falls back to the default 22022.
+    #[serde(default)]
+    pub ssh_port: Option<u16>,
+    /// The target's SSH host key (OpenSSH one-line), bound to node identity so the
+    /// client can PIN it — no blind TOFU (A.1.3). Absent on an older CP.
+    #[serde(default)]
+    pub server_host_key: Option<String>,
+}
+
+/// `POST /api/v1/ssh/elevate` request: ask the control plane for a root-elevation
+/// grant on one of the tenant's nodes (§H.4). `[T:f2 §H.4]`
+#[derive(Debug, Clone, Serialize)]
+pub struct SshElevateRequest {
+    pub node_id: String,
+    /// Persona to elevate to — "root" at F0 (owner-implicit).
+    pub persona: String,
+    /// Requested lifetime in seconds; CP caps it at the TTL ceiling (≤900).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub duration_secs: Option<i64>,
+    /// AAL step-up proof for F1+ tiers (E-7). F0 owner needs none.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub proof_token: Option<String>,
+}
+
+/// `POST /api/v1/ssh/elevate` response: the signed grant token the client presents
+/// to the node's embedded server, plus when it expires. `[T:f2 §H.4]`
+#[derive(Debug, Clone, Deserialize)]
+pub struct SshElevateResponse {
+    pub grant: String,
+    pub expires_at: i64,
 }
 
 /// Honest receipt of an opened SSH session (mirrors the control-plane shape, P.3).

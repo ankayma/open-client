@@ -24,6 +24,36 @@ boringtun = "0.7"
 # [T:A.1.21] raw read/write over the tunnel fd (tundev module). No third-party TUN
 # crate — minimal/auditable surface; same version as agent-daemon.
 libc = "0.2"
+# [T:A.1.21] F-2 NoKeySSH transport (Part D f2 §H.1, deviation v0.5): pure-Rust SSH
+# client + server so the SSH stream rides the mesh overlay with NO system `ssh`
+# (iOS/iPad cannot spawn one) and NO node sshd config mutation. Auth = the device's
+# enrolled ed25519 mesh-SSH key; the embedded server binds the overlay only.
+# `[T:russh@0.62]` bundles its key handling under `russh::keys`.
+# Feature-trimmed (A.1.21 minimal surface): `ring` crypto backend (ALREADY in-tree
+# via rcgen/tls_relay — no new backend crate, no aws-lc C-build); NO `rsa` (drops the
+# rsa 0.10-rc crate — we only issue/accept ed25519). `[A? owner-note]` russh 0.62
+# still pulls ssh-key 0.7-rc + curve25519-dalek 5.0-rc transitively (its own pinned
+# crypto for ed25519 key formats) — release-candidate crates on a security path;
+# if owner wants stable-only, downgrade to russh 0.54 (older API, more wiring).
+russh = { version = "0.62", default-features = false, features = ["ring"] }
+# tokio runtime: the SSH engine is async (russh is Tokio-native). rt-multi-thread
+# for the embedded server accept-loop; io-util for the PTY byte plumbing.
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "io-util", "net", "time", "sync"] }
+# [T:A.1.21] CSPRNG for one-time ed25519 mesh-SSH key generation — `rand::rng()` is
+# the exact generator russh uses for keys, so no version-skew on `ssh_key`'s rng
+# bound. Stable crate. Distinct from agent-daemon's rand 0.8 (both may coexist).
+rand = "0.9"
+# [T:A.1.21] F-2 embedded server (Part D f2 §H.1): allocate a real PTY + spawn the
+# shared user's login shell for interactive terminals. Cross-platform (Linux+macOS,
+# reused for Lát 5); wezterm's crate, well-maintained. Owner-approved 2026-07-04.
+portable-pty = "0.9"
+# [T:A.1.21] F-2 elevation grant-ký (Part D f2 §H.4, Lát 3): sign/verify the
+# CP-issued root-elevation grant. STABLE ed25519 (NOT russh's RC crypto) — the
+# grant is an app-level signature, kept on stable primitives. Already in-tree.
+# `[T:ed25519-dalek@2]`
+ed25519-dalek = "2"
+# base64 for the grant token wire form (already in-tree via daemon). `[T:base64@0.22]`
+base64 = "0.22"
 
 [dev-dependencies]
 serde_json = "1"
@@ -32,3 +62,5 @@ rand_core  = { version = "0.6.4", features = ["getrandom"] }
 # Test-only CA generation for broker_client (Layer 2); same pinned version as
 # agent-daemon tls_relay — no new supply-chain surface. [T:A.1.21]
 rcgen = { version = "0.14", default-features = false, features = ["crypto", "pem", "ring"] }
+# Test-only temp dirs for the mesh-SSH key + loopback SSH engine tests.
+tempfile = "3"

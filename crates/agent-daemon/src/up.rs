@@ -275,6 +275,13 @@ pub(crate) async fn serve_dataplane(
             Err(_) => None,
         };
 
+    // [F-2 v0.5] Embedded SSH server: identity-bound NoKeySSH lands the shared
+    // user `ankayma` over the overlay only (never a public port). Runs on the
+    // target node (unix). Clients pin the host key the control plane distributes;
+    // root elevation (§H.4) is enabled if the CP publishes an elevation key.
+    #[cfg(unix)]
+    start_embedded_ssh(self_overlay, &ctx.control_plane, &state.node_id, &ctx.http).await;
+
     // [T:Part D §D.12] SSE event loop: replaces the 5s poll loop.
     // CP pushes peer_added when a CI runner enrolls; we add the peer immediately.
     // On disconnect: exponential backoff + full resync before reconnect.
@@ -595,6 +602,66 @@ impl Config {
 fn default_state_path() -> String {
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
     format!("{home}/.ankayma/agent.json")
+}
+
+/// [F-2 v0.5] Start the embedded SSH server on the overlay. Best-effort: a failure
+/// here (e.g. can't bind, no host key) is logged, never fatal to the data plane.
+/// The host key persists at `~/.ankayma/ssh-host-ed25519`; its public form is what
+/// the control plane distributes for clients to PIN (A.1.3). Port default 22022,
+/// override via `ANKAYMA_SSH_PORT` (shared-host knob, mirrors the relay-port env).
+#[cfg(unix)]
+async fn start_embedded_ssh(
+    self_overlay: std::net::IpAddr,
+    control_plane: &str,
+    node_id: &str,
+    http: &reqwest::Client,
+) {
+    use agent_core::ssh_grant::GrantVerifier;
+    use agent_core::ssh_server::{serve, SshHostKey, SshServerConfig};
+
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
+    let host_key_path = std::path::Path::new(&home)
+        .join(".ankayma")
+        .join("ssh-host-ed25519");
+    let host_key = match SshHostKey::load_or_generate(&host_key_path) {
+        Ok(k) => k,
+        Err(e) => {
+            eprintln!("[F-2] embedded ssh server not started (host key): {e}");
+            return;
+        }
+    };
+    if let Ok(fp) = host_key.public_openssh() {
+        // Print so the host key can be pinned manually until the control plane
+        // returns it in /ssh/session. `[T:A.1.3]`
+        println!("[F-2] ssh host key: {fp}");
+    }
+    let port = std::env::var("ANKAYMA_SSH_PORT")
+        .ok()
+        .and_then(|s| s.parse::<u16>().ok())
+        .unwrap_or(22022);
+    let mut cfg = SshServerConfig::f0(self_overlay.to_string());
+    cfg.port = port;
+
+    // [F-2 §H.4] Enable root elevation if the control plane publishes a verify key.
+    // Best-effort: if the CP has no elevation key (or is unreachable), the node just
+    // won't honor `--root` grants — it never grants root on its own.
+    match adapters::elevate_pubkey(http, control_plane).await {
+        Ok(pubkey) => match GrantVerifier::new(&pubkey, node_id) {
+            Ok(v) => {
+                cfg = cfg.with_elevation(v);
+                println!("[F-2] root elevation enabled (CP grant-verified, §H.4)");
+            }
+            Err(e) => eprintln!("[F-2] elevation disabled (bad CP key): {e}"),
+        },
+        Err(e) => eprintln!("[F-2] elevation disabled (CP key unavailable): {e}"),
+    }
+
+    println!("[F-2] embedded ssh server on {self_overlay}:{port} (user ankayma, identity-bound)");
+    tokio::spawn(async move {
+        if let Err(e) = serve(cfg, host_key).await {
+            eprintln!("[F-2] embedded ssh server stopped: {e}");
+        }
+    });
 }
 
 // [slice 2] Live data-plane status, published for the GUI to read. The GUI runs
