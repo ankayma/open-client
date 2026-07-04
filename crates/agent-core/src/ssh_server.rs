@@ -7,9 +7,9 @@
 //! does NOT use the node's system `sshd`, never writes `authorized_keys`, never
 //! mutates the node's config. A connecting device authenticates with its enrolled
 //! ed25519 mesh-SSH key (A.1.3); it lands a shell as the shared unprivileged POSIX
-//! user `ankayma` (§H.5), which the agent provisions itself (password locked — no
-//! password login exists). Root is a *separate* step (Lát 3 elevation), never the
-//! landing. `[T:russh@0.62]` `[T:portable-pty@0.9]`
+//! user `ankayma` (§H.5), which the agent provisions itself (Linux useradd / macOS
+//! sysadminctl, no password → no password login). Root is a *separate* step (Lát 3
+//! elevation), never the landing. `[T:russh@0.62]` `[T:portable-pty@0.9]`
 //!
 //! Identity gate `[A-c §H.1]`: reaching the overlay port already proves the peer is
 //! enrolled + same-owner (the WireGuard overlay + roster `allow-within-owner` is
@@ -107,8 +107,8 @@ impl Authorizer {
 #[derive(Clone)]
 pub enum ShellSpec {
     /// Land the shared POSIX user's login shell, provisioning the account if it is
-    /// missing (Lát 2, Linux). If the agent is already running AS that user (dev),
-    /// spawns a login shell directly instead of `su`.
+    /// missing (Linux via useradd, macOS via sysadminctl). If the agent is already
+    /// running AS that user (dev), spawns a login shell directly instead of `su`.
     LoginShell(String),
     /// A fixed program (tests / non-interactive). argv[0] is the program.
     Program(Vec<String>),
@@ -573,10 +573,31 @@ fn ensure_user_provisioned(user: &str) -> Result<()> {
     Ok(())
 }
 
-/// macOS user provisioning is deferred to Lát 5 (sysadminctl/dscl). For now the
-/// account must pre-exist; `su` will fail cleanly otherwise.
+/// Ensure the shared POSIX user exists (macOS, Lát 5). Idempotent. `sysadminctl`
+/// auto-assigns a free UID and creates the home dir; we set NO password, so there
+/// is no password login (§H.5) — root `su - <user>` needs none. Must run as root
+/// (the agent already does, for the utun). `[T:sysadminctl(8)]`
 #[cfg(target_os = "macos")]
-fn ensure_user_provisioned(_user: &str) -> Result<()> {
+fn ensure_user_provisioned(user: &str) -> Result<()> {
+    if user_exists(user) {
+        return Ok(());
+    }
+    run_cmd(
+        "sysadminctl",
+        &[
+            "-addUser",
+            user,
+            "-fullName",
+            "Ankayma",
+            "-shell",
+            "/bin/zsh",
+        ],
+    )
+    .with_context(|| format!("provision user {user}"))?;
+    // sysadminctl has historically returned 0 even on some failures — confirm.
+    if !user_exists(user) {
+        return Err(anyhow!("sysadminctl did not create user {user}"));
+    }
     Ok(())
 }
 
@@ -585,7 +606,7 @@ fn ensure_user_provisioned(_user: &str) -> Result<()> {
     Ok(())
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn user_exists(user: &str) -> bool {
     std::process::Command::new("id")
         .arg("-u")
@@ -595,7 +616,7 @@ fn user_exists(user: &str) -> bool {
         .unwrap_or(false)
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn run_cmd(prog: &str, args: &[&str]) -> Result<()> {
     let status = std::process::Command::new(prog)
         .args(args)
