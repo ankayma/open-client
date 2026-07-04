@@ -22,6 +22,27 @@ use agent_core::{adapters, reqwest};
 use anyhow::{Context, Result};
 use base64::Engine;
 
+/// Relay listen ports — 443/80 by default, overridable via
+/// `ANKAYMA_RELAY_HTTPS_PORT` / `ANKAYMA_RELAY_HTTP_PORT` for hosts where a
+/// co-resident web server already holds the wildcard binds (a specific
+/// `(overlay, 443)` bind loses to an existing `0.0.0.0:443`/`[::]:443`
+/// listener). On such hosts the browser URL must carry the port —
+/// `https://name:8443/` — an honest trade for coexisting on a shared box.
+/// `[A: verify per-host — whether wildcard+specific can coexist depends on the
+/// other server's socket options; the bind error in the journal is the signal]`
+fn relay_https_port() -> u16 {
+    std::env::var("ANKAYMA_RELAY_HTTPS_PORT")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(443)
+}
+fn relay_http_port() -> u16 {
+    std::env::var("ANKAYMA_RELAY_HTTP_PORT")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(80)
+}
+
 fn cert_dir(fqdn: &str) -> PathBuf {
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
     PathBuf::from(format!("{home}/.ankayma/certs")).join(fqdn)
@@ -391,10 +412,11 @@ async fn run_http_listener(
     overlay_ip: IpAddr,
     routes: Arc<Mutex<HashMap<String, u16>>>,
 ) -> Result<()> {
-    let listener = tokio::net::TcpListener::bind(SocketAddr::new(overlay_ip, 80))
+    let port = relay_http_port();
+    let listener = tokio::net::TcpListener::bind(SocketAddr::new(overlay_ip, port))
         .await
-        .with_context(|| format!("bind ({overlay_ip}, 80)"))?;
-    println!("HTTP relay listening on ({overlay_ip}, 80) — routed by Host header");
+        .with_context(|| format!("bind ({overlay_ip}, {port})"))?;
+    println!("HTTP relay listening on ({overlay_ip}, {port}) — routed by Host header");
 
     loop {
         let (mut stream, peer) = listener.accept().await?;
@@ -460,10 +482,11 @@ async fn run_tls_listener(
         .with_cert_resolver(certs);
     let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(config));
 
-    let listener = tokio::net::TcpListener::bind(SocketAddr::new(overlay_ip, 443))
+    let port = relay_https_port();
+    let listener = tokio::net::TcpListener::bind(SocketAddr::new(overlay_ip, port))
         .await
-        .with_context(|| format!("bind ({overlay_ip}, 443)"))?;
-    println!("TLS relay listening on ({overlay_ip}, 443) — cert + route by SNI");
+        .with_context(|| format!("bind ({overlay_ip}, {port})"))?;
+    println!("TLS relay listening on ({overlay_ip}, {port}) — cert + route by SNI");
 
     loop {
         let (stream, peer) = listener.accept().await?;
