@@ -6,7 +6,7 @@
 	import { goto } from '$app/navigation';
 	import { onMount } from 'svelte';
 	import { connection, quota } from '$lib/stores';
-	import { listNodes, getNodeInfo, deleteNode, getQuota, openSshTerminal, getPlatform } from '$lib/tauri';
+	import { listNodes, getNodeInfo, deleteNode, getQuota } from '$lib/tauri';
 	import { runWithStepUp } from '$lib/stepup';
 	import type { PeerBrief } from '$lib/types';
 
@@ -46,20 +46,13 @@
 		getQuota().then((q) => quota.set(q)).catch(() => {});
 	});
 
-	// [F-2] "SSH ↗" — hand off to the system Terminal running `agent ssh`; the
-	// receipt + path proof + shell live there. Not shown for this device (ssh to
-	// yourself is a confusing no-op at F0). macOS-only: iOS has no Terminal to
-	// hand off to, so the button is hidden there rather than erroring on tap.
+	// [F-2 §H.2.2] "SSH ↗" — open the in-app terminal (xterm.js over the mesh
+	// russh transport). Works on desktop AND iOS/iPad (no system Terminal needed).
+	// Not shown for this device (ssh to yourself is a confusing no-op at F0).
 	let sshError = $state('');
-	let isMacos = $state(false);
-	getPlatform().then((p) => (isMacos = p === 'macos')).catch(() => {});
-	async function sshTo(d: PeerBrief) {
+	function sshTo(d: PeerBrief) {
 		sshError = '';
-		try {
-			await openSshTerminal(d.node_id);
-		} catch (e) {
-			sshError = String(e);
-		}
+		goto(`/terminal?node=${encodeURIComponent(d.node_id)}&host=${encodeURIComponent(d.hostname)}`);
 	}
 
 	async function removeDevice(nodeId: string) {
@@ -154,7 +147,7 @@
 						</div>
 						<span class="ip">{d.overlay_ip}</span>
 					</div>
-					{#if d.node_id !== thisNodeId && isMacos}
+					{#if d.node_id !== thisNodeId}
 						<button
 							class="ssh-btn"
 							aria-label="SSH into {d.hostname}"

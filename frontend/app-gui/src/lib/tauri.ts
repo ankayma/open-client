@@ -154,13 +154,44 @@ export async function listNodes(): Promise<PeerBrief[]> {
   return invoke<PeerBrief[]>("list_nodes");
 }
 
-// [F-2] Open the system Terminal running `agent ssh <node_id>` (macOS-only C1
-// interim — an embedded terminal is the follow-up).
+// [F-2] Open the system Terminal running `agent ssh <node_id>` (desktop-only
+// "open external" option; the in-app terminal below is the default path).
 export async function openSshTerminal(
   nodeId: string,
   login?: string
 ): Promise<void> {
   return invoke("open_ssh_terminal", { nodeId, login: login ?? null });
+}
+
+// [F-2 §H.2.2] In-app SSH terminal (xterm.js over the mesh russh transport) —
+// desktop AND iOS/iPad. `ssh_open` returns a session id; subscribe to the
+// `ssh_data_<id>` (base64 bytes) and `ssh_end_<id>` events.
+export async function sshOpen(
+  nodeId: string,
+  cols: number,
+  rows: number,
+  opts?: { login?: string; root?: boolean; proof?: string }
+): Promise<string> {
+  return invoke<string>("ssh_open", {
+    nodeId,
+    login: opts?.login ?? null,
+    root: opts?.root ?? false,
+    proof: opts?.proof ?? null,
+    cols,
+    rows,
+  });
+}
+
+export async function sshWrite(id: string, dataB64: string): Promise<void> {
+  return invoke("ssh_write", { id, dataB64 });
+}
+
+export async function sshResize(id: string, cols: number, rows: number): Promise<void> {
+  return invoke("ssh_resize", { id, cols, rows });
+}
+
+export async function sshClose(id: string): Promise<void> {
+  return invoke("ssh_close", { id });
 }
 
 // A step-up proof carried on a sensitive action in a multi-user tenant — the

@@ -74,6 +74,11 @@ struct AppState {
     /// A held `ankayma://join?token=…` node-enrollment invite. Same lifecycle as
     /// `pending_join_team`: drained only once authenticated.
     pending_join_node: Mutex<Option<String>>,
+    /// [F-2 §H.2.2] Live in-app SSH terminals: id → write handle. The read side of
+    /// each session runs in a task that emits `ssh_data_<id>` events to xterm.js.
+    ssh_sessions: Mutex<std::collections::HashMap<String, agent_core::ssh_client::SshInput>>,
+    /// Monotonic id source for terminal sessions.
+    ssh_seq: std::sync::atomic::AtomicU64,
 }
 
 impl AppState {
@@ -91,6 +96,8 @@ impl AppState {
             pending_token: Mutex::new(None),
             pending_join_team: Mutex::new(None),
             pending_join_node: Mutex::new(None),
+            ssh_sessions: Mutex::new(std::collections::HashMap::new()),
+            ssh_seq: std::sync::atomic::AtomicU64::new(0),
         }
     }
 
@@ -1315,6 +1322,171 @@ async fn open_ssh_terminal(
     }
 }
 
+/// [F-2 §H.2.2] Open an in-app SSH terminal to a node using the pure-Rust mesh
+/// transport (russh) — works on desktop AND iOS/iPad (no system Terminal needed).
+/// Returns a session id; the read side streams `ssh_data_<id>` events (base64) to
+/// xterm.js, and `ssh_write`/`ssh_resize`/`ssh_close` drive it. `[T:f2 §H.1]`
+#[tauri::command]
+#[allow(clippy::too_many_arguments)] // a Tauri command's args are its JS call shape
+async fn ssh_open(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    node_id: String,
+    login: Option<String>,
+    root: bool,
+    proof: Option<String>,
+    cols: u32,
+    rows: u32,
+) -> Result<String, String> {
+    use agent_core::ssh_client::{MeshSshKey, SshConnectOptions, SshEvent, SshSession};
+    use base64::Engine as _;
+    use tauri::Emitter;
+
+    let token = state.token().ok_or("not signed in")?;
+
+    // 1. Resolve the target + anchor the session in the ledger (never sees the stream).
+    let resp = agent_core::adapters::open_ssh_session(
+        &state.http,
+        &state.base_url,
+        &token,
+        &domain::SshSessionRequest {
+            node_id: node_id.clone(),
+            login: login.clone(),
+        },
+    )
+    .await
+    .map_err(|e| format!("open ssh session: {e}"))?;
+
+    // 2. Optional root elevation grant (§H.4). F0 owner instant; F1+ carries `proof`.
+    let elevate_grant = if root {
+        let g = agent_core::adapters::elevate_ssh_session(
+            &state.http,
+            &state.base_url,
+            &token,
+            &domain::SshElevateRequest {
+                node_id: node_id.clone(),
+                persona: "root".to_string(),
+                duration_secs: None,
+                proof_token: proof,
+            },
+        )
+        .await
+        .map_err(|e| format!("request elevation: {e}"))?;
+        Some(g.grant)
+    } else {
+        None
+    };
+
+    // 3. Connect with the device's mesh-SSH key (A.1.3 — no password/static key).
+    let key_path = handoff_state_dir(&state).join("mesh-ssh-ed25519");
+    let key = MeshSshKey::load_or_generate(&key_path).map_err(|e| format!("mesh ssh key: {e}"))?;
+    // Client login is always the shared user; root elevation happens server-side via
+    // the grant (§H.4), not by changing the SSH login.
+    let effective_login = resp
+        .login
+        .clone()
+        .or(login)
+        .unwrap_or_else(|| "ankayma".to_string());
+    let mut opts = SshConnectOptions::new(resp.overlay_ip.clone(), effective_login);
+    opts.port = resp.ssh_port.unwrap_or(22022);
+    opts.expected_host_key = resp.server_host_key.clone();
+    // Until the control plane returns a host-key pin, allow TOFU (honest — the
+    // overlay transport already authenticates the peer). `[A]`
+    opts.allow_unpinned = opts.expected_host_key.is_none();
+    opts.elevate_grant = elevate_grant;
+    opts.cols = cols.max(1);
+    opts.rows = rows.max(1);
+
+    let mut session = SshSession::connect(&opts, &key)
+        .await
+        .map_err(|e| format!("mesh ssh: {e}"))?;
+
+    // 4. Register the write handle + pump the read side to xterm.js.
+    let id = format!(
+        "ssh{}",
+        state
+            .ssh_seq
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    );
+    state
+        .ssh_sessions
+        .lock()
+        .expect("ssh_sessions lock")
+        .insert(id.clone(), session.input());
+
+    let ev = format!("ssh_data_{id}");
+    let end_ev = format!("ssh_end_{id}");
+    let app2 = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let b64 = base64::engine::general_purpose::STANDARD;
+        while let Some(event) = session.recv().await {
+            match event {
+                SshEvent::Data(bytes) => {
+                    let _ = app2.emit(&ev, b64.encode(&bytes));
+                }
+                SshEvent::Eof => {}
+                SshEvent::Exit(_) | SshEvent::Disconnected => break,
+            }
+        }
+        let _ = app2.emit(&end_ev, ());
+    });
+
+    Ok(id)
+}
+
+/// Feed keystrokes (base64) to a live terminal. `[T:f2 §H.2.2]`
+#[tauri::command]
+async fn ssh_write(state: State<'_, AppState>, id: String, data_b64: String) -> Result<(), String> {
+    use base64::Engine as _;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(data_b64.as_bytes())
+        .map_err(|_| "bad base64 input")?;
+    let input = state
+        .ssh_sessions
+        .lock()
+        .expect("ssh_sessions lock")
+        .get(&id)
+        .cloned();
+    match input {
+        Some(inp) => inp.write(&bytes).await.map_err(|e| e.to_string()),
+        None => Err("no such session".into()),
+    }
+}
+
+/// Report an xterm.js window resize to the remote PTY.
+#[tauri::command]
+async fn ssh_resize(
+    state: State<'_, AppState>,
+    id: String,
+    cols: u32,
+    rows: u32,
+) -> Result<(), String> {
+    let input = state
+        .ssh_sessions
+        .lock()
+        .expect("ssh_sessions lock")
+        .get(&id)
+        .cloned();
+    match input {
+        Some(inp) => inp.resize(cols, rows).await.map_err(|e| e.to_string()),
+        None => Ok(()),
+    }
+}
+
+/// Close a terminal session and drop its write handle.
+#[tauri::command]
+async fn ssh_close(state: State<'_, AppState>, id: String) -> Result<(), String> {
+    let input = state
+        .ssh_sessions
+        .lock()
+        .expect("ssh_sessions lock")
+        .remove(&id);
+    if let Some(inp) = input {
+        let _ = inp.close().await;
+    }
+    Ok(())
+}
+
 #[derive(serde::Serialize)]
 struct DataplanePeer {
     hostname: String,
@@ -2019,6 +2191,10 @@ pub fn run() {
             start_dataplane,
             stop_dataplane,
             open_ssh_terminal,
+            ssh_open,
+            ssh_write,
+            ssh_resize,
+            ssh_close,
             get_dataplane_status,
             track_event,
             open_stripe_checkout,

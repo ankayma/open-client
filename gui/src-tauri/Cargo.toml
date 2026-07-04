@@ -39,6 +39,9 @@ url = "2"
 # C-ABI in ios/AppSupport/OpenUrlBridge.swift instead (see src/vpn.rs). [T:A.1.21]
 agent-core = { workspace = true }
 open = "5"
+# [T:A.1.21] base64 for streaming SSH terminal bytes to xterm.js as JSON-safe
+# strings (F-2 §H.2.2). Already in-tree via agent-core; declared for direct use.
+base64 = "0.22"
 # gethostname(2) for device_hostname(); already a transitive dep via agent-core
 # but must be declared directly for use in this crate. [T:A.1.21]
 libc = "0.2"
