@@ -453,16 +453,15 @@ pub fn spawn_rx(fd: i32, udp: Arc<UdpSocket>, peers: Peers) {
                     break;
                 }
             };
-            plog(&format!("udp rx {n}B from {src}"));
-            // Pick the owning peer. Fast path: a peer whose learned endpoint matches
-            // the source. Fallback: trial-decapsulate against every peer — needed
-            // when more than one *responder* peer has no endpoint yet (e.g. a NAT'd
-            // CI runner alongside another responder); only the peer whose Tunn holds
-            // the matching key accepts the packet, the rest return `Err`. `[T:WireGuard]`
-            let candidates: Vec<Arc<PeerEntry>> = match peer_by_source(&peers, src) {
-                Some(e) => vec![e],
-                None => peers.lock().expect("peers lock").iter().cloned().collect(),
-            };
+            // (No per-datagram log here: a public node's UDP port sees constant
+            // internet noise — per-packet logging floods the journal. Drops are
+            // surfaced by the rate-limited counter below instead.)
+            //
+            // Pick the owning peer. Fast path FIRST, then every other peer:
+            // trial-decapsulate until one Tunn accepts — only the peer whose Tunn
+            // holds the matching key does; the rest return `Err`. `[T:WireGuard]`
+            let candidates = rx_candidates(&peers, src);
+            let mut handled = false;
             for entry in candidates {
                 let mut tunn = entry.tunn.lock().expect("tunn lock");
                 let mut res = tunn.decapsulate(Some(src.ip()), &datagram[..n], &mut out);
@@ -493,10 +492,63 @@ pub fn spawn_rx(fd: i32, udp: Arc<UdpSocket>, peers: Peers) {
                         TunnResult::Done => break,
                     }
                 }
+                handled = true;
                 break; // handled by this peer
+            }
+            if !handled {
+                log_undecryptable_drop(src);
             }
         }
     });
+}
+
+/// Candidate order for demuxing one inbound datagram: the endpoint-match guess
+/// first, then EVERY other peer. The guess is an ordering optimization, never a
+/// filter — two peers behind one NAT share a public IP (a phone and a laptop on
+/// the same Wi-Fi), so the same-host match can pick the wrong sibling; gating on
+/// it silently blackholes the other peer's handshakes forever. Found by review
+/// after a 2026-07-04 field incident (one same-NAT peer's handshakes went
+/// unanswered while every pump thread was healthy). `[T:WireGuard]`
+/// trial-decapsulation is safe: only the Tunn holding the matching key accepts,
+/// every other Tunn returns `Err`.
+fn rx_candidates(peers: &Peers, src: SocketAddr) -> Vec<Arc<PeerEntry>> {
+    let guess = peer_by_source(peers, src);
+    let g = peers.lock().expect("peers lock");
+    let mut v: Vec<Arc<PeerEntry>> = Vec::with_capacity(g.len());
+    if let Some(hit) = &guess {
+        v.push(hit.clone());
+    }
+    v.extend(
+        g.iter()
+            .filter(|p| guess.as_ref().map_or(true, |hit| !Arc::ptr_eq(p, hit)))
+            .cloned(),
+    );
+    v
+}
+
+/// Rate-limited visibility for datagrams no peer's Tunn accepted (unknown sender,
+/// stale key, or internet noise on a public port). At most one line per minute,
+/// with the cumulative count — enough to diagnose a "peer can't handshake us"
+/// incident from the journal without flooding it. `[A: counter resets on restart;
+/// fine — it exists for live diagnosis, not accounting]`
+fn log_undecryptable_drop(src: SocketAddr) {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static DROPPED: AtomicU64 = AtomicU64::new(0);
+    static WINDOW: Mutex<Option<Instant>> = Mutex::new(None);
+
+    let total = DROPPED.fetch_add(1, Ordering::Relaxed) + 1;
+    let mut last = WINDOW.lock().expect("drop-log lock");
+    let due = match *last {
+        Some(t) => t.elapsed() >= Duration::from_secs(60),
+        None => true,
+    };
+    if due {
+        *last = Some(Instant::now());
+        plog(&format!(
+            "rx: datagram from {src} not decryptable by any peer \
+             ({total} such drops since start) — sender unknown, revoked, or noise"
+        ));
+    }
 }
 
 /// Drive WireGuard timers (rekey, keepalive, handshake retries) and enforce
@@ -622,6 +674,47 @@ mod tests {
             entry("10.0.0.2", None),
         ]));
         assert!(peer_by_source(&peers, "9.9.9.9:1".parse().unwrap()).is_none());
+    }
+
+    /// Two peers behind ONE NAT (same public IP, e.g. a laptop and a phone on
+    /// the same Wi-Fi): the endpoint guess picks the sibling whose endpoint was
+    /// learned first — the OTHER sibling's datagrams must still be trialed, not
+    /// silently dropped. Regression for the 2026-07-04 field-incident class.
+    #[test]
+    fn rx_candidates_puts_guess_first_but_never_excludes_siblings() {
+        let a = entry("10.0.0.1", Some("94.0.0.1:51820")); // learned NAT endpoint
+        let b = entry("10.0.0.2", Some("192.168.1.5:51820")); // LAN-only endpoint
+        let peers: Peers = Arc::new(Mutex::new(vec![a.clone(), b.clone()]));
+
+        // Same public IP, different port (B's packets after NAT) → same-host
+        // guess resolves to A (wrong!). B must still be in the candidate list.
+        let c = rx_candidates(&peers, "94.0.0.1:60000".parse().unwrap());
+        assert_eq!(c.len(), 2, "guess must not exclude the other peer");
+        assert!(Arc::ptr_eq(&c[0], &a), "endpoint guess ordered first");
+        assert!(
+            Arc::ptr_eq(&c[1], &b),
+            "sibling still trialed after the guess"
+        );
+
+        // Exact endpoint match → same ordering guarantee.
+        let c = rx_candidates(&peers, "94.0.0.1:51820".parse().unwrap());
+        assert_eq!(c.len(), 2);
+        assert!(Arc::ptr_eq(&c[0], &a));
+
+        // Unknown source → every peer, no duplicates.
+        let c = rx_candidates(&peers, "9.9.9.9:1".parse().unwrap());
+        assert_eq!(c.len(), 2);
+    }
+
+    /// The guessed peer must appear exactly once (no double trial of the same
+    /// Tunn — decapsulate mutates handshake state).
+    #[test]
+    fn rx_candidates_never_duplicates_the_guess() {
+        let a = entry("10.0.0.1", Some("1.2.3.4:51820"));
+        let peers: Peers = Arc::new(Mutex::new(vec![a.clone()]));
+        let c = rx_candidates(&peers, "1.2.3.4:51820".parse().unwrap());
+        assert_eq!(c.len(), 1);
+        assert!(Arc::ptr_eq(&c[0], &a));
     }
 
     /// Build an entry whose Tunn has a COMPLETED handshake (in-memory Noise
