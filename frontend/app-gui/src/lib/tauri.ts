@@ -154,13 +154,18 @@ export async function listNodes(): Promise<PeerBrief[]> {
   return invoke<PeerBrief[]>("list_nodes");
 }
 
-// [F-2] Open the system Terminal running `agent ssh <node_id>` (desktop-only
-// "open external" option; the in-app terminal below is the default path).
+// [F-2] Open an external terminal (Terminal.app / iTerm2 / any `.command`-capable
+// app) on the same mesh transport — desktop-only "open external" for power users.
 export async function openSshTerminal(
   nodeId: string,
-  login?: string
+  login?: string,
+  terminalApp?: string
 ): Promise<void> {
-  return invoke("open_ssh_terminal", { nodeId, login: login ?? null });
+  return invoke("open_ssh_terminal", {
+    nodeId,
+    login: login ?? null,
+    terminalApp: terminalApp ?? null,
+  });
 }
 
 // [F-2 §H.2.2] In-app SSH terminal (xterm.js over the mesh russh transport) —

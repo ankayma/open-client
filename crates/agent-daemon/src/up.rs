@@ -280,7 +280,14 @@ pub(crate) async fn serve_dataplane(
     // target node (unix). Clients pin the host key the control plane distributes;
     // root elevation (§H.4) is enabled if the CP publishes an elevation key.
     #[cfg(unix)]
-    start_embedded_ssh(self_overlay, &ctx.control_plane, &state.node_id, &ctx.http).await;
+    start_embedded_ssh(
+        self_overlay,
+        &ctx.control_plane,
+        &state.node_id,
+        &dev_name,
+        &ctx.http,
+    )
+    .await;
 
     // [T:Part D §D.12] SSE event loop: replaces the 5s poll loop.
     // CP pushes peer_added when a CI runner enrolls; we add the peer immediately.
@@ -614,6 +621,7 @@ async fn start_embedded_ssh(
     self_overlay: std::net::IpAddr,
     control_plane: &str,
     node_id: &str,
+    overlay_iface: &str,
     http: &reqwest::Client,
 ) {
     use agent_core::ssh_grant::GrantVerifier;
@@ -657,12 +665,77 @@ async fn start_embedded_ssh(
     }
 
     println!("[F-2] embedded ssh server on {self_overlay}:{port} (user ankayma, identity-bound)");
+    // A default-deny firewall (ufw) silently drops the overlay port → clients time
+    // out. Tell the operator (or auto-open with their opt-in). `[T:f2 §H.1]`
+    advise_firewall(port, overlay_iface);
     tokio::spawn(async move {
         if let Err(e) = serve(cfg, host_key).await {
             eprintln!("[F-2] embedded ssh server stopped: {e}");
         }
     });
 }
+
+/// [F-2] Firewall advisory for the embedded-server port. On a Linux node with `ufw`
+/// in default-deny, the overlay port must be explicitly allowed or clients time out
+/// (packets dropped before the listener). We do NOT silently edit the firewall: by
+/// default PRINT the exact command; `ANKAYMA_SSH_OPEN_FIREWALL=1` lets the agent add
+/// the rule itself (root-approved opt-in). `[T:P.2 no silent side-effects]`
+#[cfg(target_os = "linux")]
+fn advise_firewall(port: u16, iface: &str) {
+    let status = std::process::Command::new("ufw")
+        .arg("status")
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
+        .unwrap_or_default();
+    if !status.contains("Status: active") {
+        // No ufw (or inactive). If iptables/nftables default-deny is in use, the
+        // operator must open the port themselves — we can't reliably detect that.
+        return;
+    }
+    // Already allowed? Confirm so the operator can see the port is open, and don't
+    // nag. (Matches a status line like "22022/tcp ... ALLOW".)
+    if status
+        .lines()
+        .any(|l| l.contains(&port.to_string()) && l.contains("ALLOW"))
+    {
+        println!("[F-2] firewall: ufw active, port {port}/tcp already allowed ✓");
+        return;
+    }
+    let manual = format!("ufw allow in on {iface} to any port {port} proto tcp");
+    let opt_in = std::env::var("ANKAYMA_SSH_OPEN_FIREWALL")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+    if opt_in {
+        let ok = std::process::Command::new("ufw")
+            .args([
+                "allow",
+                "in",
+                "on",
+                iface,
+                "to",
+                "any",
+                "port",
+                &port.to_string(),
+                "proto",
+                "tcp",
+            ])
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if ok {
+            println!("[F-2] firewall: opened {port}/tcp on {iface} (ANKAYMA_SSH_OPEN_FIREWALL=1)");
+        } else {
+            eprintln!("[F-2] firewall: could not auto-open {port} — run: {manual}");
+        }
+    } else {
+        eprintln!("[F-2] ⚠ ufw is active — SSH clients will TIME OUT until you allow the port:");
+        eprintln!("[F-2]     {manual}");
+        eprintln!("[F-2]   (or set ANKAYMA_SSH_OPEN_FIREWALL=1 so the agent adds it on start)");
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn advise_firewall(_port: u16, _iface: &str) {}
 
 // [slice 2] Live data-plane status, published for the GUI to read. The GUI runs
 // unprivileged and never opens the tunnel itself, so this file is how it learns

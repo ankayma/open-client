@@ -8,10 +8,27 @@
 	import { FitAddon } from '@xterm/addon-fit';
 	import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 	import '@xterm/xterm/css/xterm.css';
-	import { sshOpen, sshWrite, sshResize, sshClose } from '$lib/tauri';
+	import { sshOpen, sshWrite, sshResize, sshClose, openSshTerminal, getPlatform } from '$lib/tauri';
 
 	const nodeId = $derived($page.url.searchParams.get('node') ?? '');
 	const host = $derived($page.url.searchParams.get('host') ?? nodeId);
+
+	// Desktop-only "open in external terminal" (Terminal.app / iTerm2 / …) for power
+	// users who want their terminal's features. Choice persists in localStorage.
+	// TODO[A]: detect which terminal apps are actually installed (e.g. a Tauri cmd
+	// that checks /Applications + `mdfind`) and only list those, so a not-installed
+	// pick (e.g. Ghostty) can't be chosen. For now an uninstalled app errors softly.
+	let isDesktop = $state(false);
+	getPlatform()
+		.then((p) => (isDesktop = p !== 'ios' && p !== 'android'))
+		.catch(() => {});
+	let termApp = $state(
+		(typeof localStorage !== 'undefined' && localStorage.getItem('ssh_terminal_app')) || 'Terminal'
+	);
+	function openExternal() {
+		if (typeof localStorage !== 'undefined') localStorage.setItem('ssh_terminal_app', termApp);
+		openSshTerminal(nodeId, undefined, termApp).catch((e) => (notice = 'Mở terminal ngoài lỗi: ' + String(e)));
+	}
 
 	let termEl: HTMLDivElement;
 	let term: Terminal | null = null;
@@ -21,6 +38,7 @@
 	let unlistenEnd: UnlistenFn | null = null;
 	let status = $state<'connecting' | 'connected' | 'ended' | 'error'>('connecting');
 	let errorMsg = $state('');
+	let notice = $state(''); // non-fatal notice (e.g. elevate needs step-up) — keeps the shell
 	let elevated = $state(false);
 
 	// base64 <-> bytes (browser-safe, no Buffer).
@@ -37,6 +55,24 @@
 		return btoa(bin);
 	}
 
+	// Wire a session's output/end events to the terminal.
+	async function attachListeners(id: string) {
+		unlistenData = await listen<string>(`ssh_data_${id}`, (e) => {
+			term?.write(b64ToBytes(e.payload));
+		});
+		unlistenEnd = await listen(`ssh_end_${id}`, () => {
+			status = 'ended';
+			term?.write('\r\n\x1b[2m— session ended —\x1b[0m\r\n');
+		});
+	}
+
+	function detachListeners() {
+		if (unlistenData) unlistenData();
+		if (unlistenEnd) unlistenEnd();
+		unlistenData = null;
+		unlistenEnd = null;
+	}
+
 	async function start(root: boolean) {
 		status = 'connecting';
 		errorMsg = '';
@@ -44,13 +80,7 @@
 			const { cols, rows } = fit!.proposeDimensions() ?? { cols: 80, rows: 24 };
 			sessionId = await sshOpen(nodeId, cols, rows, { root });
 			elevated = root;
-			unlistenData = await listen<string>(`ssh_data_${sessionId}`, (e) => {
-				term?.write(b64ToBytes(e.payload));
-			});
-			unlistenEnd = await listen(`ssh_end_${sessionId}`, () => {
-				status = 'ended';
-				term?.write('\r\n\x1b[2m— session ended —\x1b[0m\r\n');
-			});
+			await attachListeners(sessionId);
 			status = 'connected';
 		} catch (e) {
 			status = 'error';
@@ -59,10 +89,7 @@
 	}
 
 	async function teardown() {
-		if (unlistenData) unlistenData();
-		if (unlistenEnd) unlistenEnd();
-		unlistenData = null;
-		unlistenEnd = null;
+		detachListeners();
 		if (sessionId) {
 			try {
 				await sshClose(sessionId);
@@ -73,12 +100,30 @@
 		}
 	}
 
-	// [Elevate ↑] — reconnect as root (§H.4). F1+ needs a step-up proof; if the CP
-	// demands one, the error surfaces (step-up UI is the follow-up).
+	// [Elevate ↑] — open a NEW root session; swap to it only on success so a failure
+	// (e.g. F1 needs a step-up proof) never kills the working shell. `[T:f2 §H.4]`
 	async function elevate() {
-		await teardown();
-		term?.clear();
-		await start(true);
+		if (!term) return;
+		notice = '';
+		try {
+			const { cols, rows } = fit!.proposeDimensions() ?? { cols: 80, rows: 24 };
+			const newId = await sshOpen(nodeId, cols, rows, { root: true });
+			// Success → detach + close the old session, swap in the root one.
+			detachListeners();
+			const oldId = sessionId;
+			sessionId = newId;
+			elevated = true;
+			await attachListeners(newId);
+			term.clear();
+			if (oldId) sshClose(oldId).catch(() => {});
+		} catch (e) {
+			// Keep the current shell; surface a friendly, non-fatal notice.
+			const msg = String(e);
+			notice = msg.includes('STEP_UP_REQUIRED')
+				? 'Lên root cần xác thực 2 lớp (tier F1). Terminal chưa nhập TOTP — dùng CLI `agent ssh <node> --root --proof <mã>`.'
+				: 'Elevate lỗi: ' + msg;
+			term.focus();
+		}
 	}
 
 	function sendBytes(bytes: number[]) {
@@ -136,6 +181,18 @@
 			<span class="dot {status}"></span>
 			<span class="state">{status}{elevated ? ' · root' : ''}</span>
 		</div>
+		{#if isDesktop}
+			<div class="ext" title="Mở phiên này trong terminal ngoài (nhiều tính năng hơn)">
+				<select bind:value={termApp} aria-label="Terminal app">
+					<option value="Terminal">Terminal</option>
+					<option value="iTerm">iTerm2</option>
+					<option value="Ghostty">Ghostty</option>
+					<option value="WezTerm">WezTerm</option>
+					<option value="Alacritty">Alacritty</option>
+				</select>
+				<button class="extbtn" onclick={openExternal}>Mở ngoài ↗</button>
+			</div>
+		{/if}
 		{#if status === 'connected' && !elevated}
 			<button class="elevate" onclick={elevate}>Elevate ↑</button>
 		{:else}
@@ -143,23 +200,31 @@
 		{/if}
 	</header>
 
-	{#if status === 'error'}
-		<div class="err">SSH error: {errorMsg}</div>
-	{/if}
-
-	<div class="term" bind:this={termEl}></div>
-
-	<!-- Mobile key-bar: keys a virtual keyboard lacks. Hidden on desktop. -->
+	<!-- Key-bar at the TOP so the on-screen keyboard (which covers the bottom)
+	     never hides it. Only the keys a virtual keyboard lacks. Touch/mobile only. -->
 	<div class="keybar">
-		<button onclick={() => sendBytes([0x1b])}>Esc</button>
 		<button onclick={() => sendBytes([0x09])}>Tab</button>
 		<button onclick={() => sendBytes([0x03])}>Ctrl-C</button>
-		<button onclick={() => sendBytes([0x04])}>Ctrl-D</button>
 		<button onclick={() => sendBytes([0x1b, 0x5b, 0x41])}>↑</button>
 		<button onclick={() => sendBytes([0x1b, 0x5b, 0x42])}>↓</button>
 		<button onclick={() => sendBytes([0x1b, 0x5b, 0x44])}>←</button>
 		<button onclick={() => sendBytes([0x1b, 0x5b, 0x43])}>→</button>
 	</div>
+
+	{#if status === 'error'}
+		<div class="err">SSH error: {errorMsg}</div>
+	{/if}
+	{#if status === 'connecting'}
+		<div class="connecting">Đang kết nối tới {host}…</div>
+	{/if}
+	{#if notice}
+		<div class="notice">
+			<span>{notice}</span>
+			<button onclick={() => (notice = '')} aria-label="Dismiss">✕</button>
+		</div>
+	{/if}
+
+	<div class="term" bind:this={termEl}></div>
 </div>
 
 <style>
@@ -175,7 +240,9 @@
 		display: flex;
 		align-items: center;
 		gap: 0.5rem;
-		padding: 0.5rem 0.75rem;
+		/* Respect the notch / status bar so the title isn't under the clock. */
+		padding: calc(0.5rem + env(safe-area-inset-top)) calc(0.75rem + env(safe-area-inset-right))
+			0.5rem calc(0.75rem + env(safe-area-inset-left));
 		background: #11151f;
 		border-bottom: 1px solid #1f2633;
 		color: #c9d1d9;
@@ -224,6 +291,29 @@
 		font-size: 0.8rem;
 		cursor: pointer;
 	}
+	.ext {
+		display: flex;
+		align-items: center;
+		gap: 0.3rem;
+	}
+	.ext select {
+		background: #21262d;
+		color: #c9d1d9;
+		border: 1px solid #30363d;
+		border-radius: 6px;
+		padding: 0.25rem 0.4rem;
+		font-size: 0.78rem;
+	}
+	.extbtn {
+		background: #21262d;
+		color: #c9d1d9;
+		border: 1px solid #30363d;
+		border-radius: 6px;
+		padding: 0.3rem 0.55rem;
+		font-size: 0.78rem;
+		cursor: pointer;
+		white-space: nowrap;
+	}
 	.spacer {
 		width: 1px;
 	}
@@ -241,10 +331,38 @@
 	.keybar {
 		display: none;
 		gap: 0.4rem;
-		padding: 0.4rem;
+		/* Sits under the header (top of screen) so the keyboard can't cover it. */
+		padding: 0.4rem calc(0.4rem + env(safe-area-inset-right)) 0.4rem
+			calc(0.4rem + env(safe-area-inset-left));
 		background: #11151f;
-		border-top: 1px solid #1f2633;
+		border-bottom: 1px solid #1f2633;
 		overflow-x: auto;
+		flex: 0 0 auto;
+	}
+	.connecting {
+		color: #8b949e;
+		background: #161b22;
+		padding: 0.4rem 0.75rem;
+		font-size: 0.85rem;
+	}
+	.notice {
+		display: flex;
+		align-items: center;
+		gap: 0.5rem;
+		color: #e3b341;
+		background: #2d2611;
+		padding: 0.5rem 0.75rem;
+		font-size: 0.85rem;
+	}
+	.notice span {
+		flex: 1;
+	}
+	.notice button {
+		background: none;
+		border: none;
+		color: #e3b341;
+		cursor: pointer;
+		font-size: 0.9rem;
 	}
 	.keybar button {
 		flex: 0 0 auto;

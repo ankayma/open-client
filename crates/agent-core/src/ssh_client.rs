@@ -115,6 +115,9 @@ pub struct SshConnectOptions {
     /// sends it as an SSH env var before requesting the shell, so the server lands
     /// a root PTY instead of the unprivileged shared user. `None` → normal login.
     pub elevate_grant: Option<String>,
+    /// How long to wait for the TCP connect before giving up (fail-fast instead of
+    /// the ~75s OS default when the mesh path is down).
+    pub connect_timeout: Duration,
 }
 
 impl SshConnectOptions {
@@ -131,6 +134,7 @@ impl SshConnectOptions {
             cols: 80,
             rows: 24,
             elevate_grant: None,
+            connect_timeout: Duration::from_secs(12),
         }
     }
 }
@@ -200,9 +204,19 @@ impl SshSession {
             allow_unpinned: opts.allow_unpinned,
         };
 
-        let mut handle = client::connect(config, (opts.host.as_str(), opts.port), handler)
-            .await
-            .map_err(|e| anyhow!("connect {}:{}: {e}", opts.host, opts.port))?;
+        // Bound the TCP connect so an unreachable target fails fast instead of
+        // hanging on the OS default (~75s) — the mesh path may simply be down. The
+        // GUI/iOS terminal surfaces this as a clear error rather than a freeze.
+        let connect = client::connect(config, (opts.host.as_str(), opts.port), handler);
+        let mut handle = match tokio::time::timeout(opts.connect_timeout, connect).await {
+            Ok(r) => r.map_err(|e| anyhow!("connect {}:{}: {e}", opts.host, opts.port))?,
+            Err(_) => bail!(
+                "connect {}:{} timed out after {}s — target unreachable (mesh path down?)",
+                opts.host,
+                opts.port,
+                opts.connect_timeout.as_secs()
+            ),
+        };
 
         // ed25519 needs no RSA hash negotiation → hash alg None. `[T:russh@0.62]`
         let auth = handle

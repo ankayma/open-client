@@ -1262,16 +1262,18 @@ async fn stop_dataplane() -> Result<(), String> {
     stop_dataplane_inner()
 }
 
-/// [F-2] "SSH ↗" — open the system Terminal running `agent ssh <node_id>` so the
-/// receipt + path proof + interactive shell render in a real TTY. Interim C1 UX:
-/// an embedded xterm+PTY terminal is the follow-up. The session token is NOT
-/// inlined in the command line (it would be visible in the Terminal window and
-/// `ps`); the spawned shell reads it from the 0600 session file at run time.
+/// [F-2] "Open in Terminal" — launch a full external terminal (Terminal.app,
+/// iTerm2, or any app that runs `.command` files) on the SAME mesh transport as the
+/// in-app terminal (`agent ssh --mesh`, identity-bound — no key, no password). For
+/// power users who want their terminal's features. Desktop only (iOS has none).
+/// The session token is NEVER inlined — the launcher reads it from the 0600 file at
+/// run time. `[T:f2 §H.2.2]`
 #[tauri::command]
 async fn open_ssh_terminal(
     state: State<'_, AppState>,
     node_id: String,
     login: Option<String>,
+    terminal_app: Option<String>,
 ) -> Result<(), String> {
     #[cfg(target_os = "macos")]
     {
@@ -1290,35 +1292,52 @@ async fn open_ssh_terminal(
                 return Err("invalid login".into());
             }
         }
+        // The terminal app name (e.g. "Terminal", "iTerm", "iTerm2", "Ghostty").
+        let app = terminal_app.unwrap_or_else(|| "Terminal".to_string());
+        if app.is_empty()
+            || !app
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, ' ' | '_' | '-' | '.'))
+        {
+            return Err("invalid terminal app".into());
+        }
         let bin = locate_agent_binary()?;
         let session = session_file_path(&state.data_dir);
-        let mut cmd = format!(
-            "ANKAYMA_TOKEN=\"$(cat '{}')\" '{}' ssh {node_id} --control-plane {}",
+        // Identity-bound mesh transport (same as the in-app terminal): no static key,
+        // no password. Token read from the 0600 file at run time.
+        let mut inner = format!(
+            "ANKAYMA_TOKEN=\"$(cat '{}')\" '{}' ssh {node_id} --mesh --allow-unpinned --control-plane {}",
             session.display(),
             bin.display(),
             state.base_url
         );
         if let Some(l) = login.as_deref() {
-            cmd.push_str(&format!(" --login {l}"));
+            inner.push_str(&format!(" --login {l}"));
         }
-        // AppleScript string literal: escape backslashes then quotes.
-        let escaped = cmd.replace('\\', "\\\\").replace('"', "\\\"");
-        let script =
-            format!("tell application \"Terminal\"\nactivate\ndo script \"{escaped}\"\nend tell");
-        let status = std::process::Command::new("osascript")
-            .arg("-e")
-            .arg(script)
+        // A `.command` launcher runs in Terminal.app, iTerm2, Ghostty, … so any
+        // terminal works via `open -a <App>` (vs. Terminal-only AppleScript).
+        let script = format!("#!/bin/sh\nclear\n{inner}\n");
+        let path = std::env::temp_dir().join(format!("ankayma-ssh-{node_id}.command"));
+        std::fs::write(&path, script).map_err(|e| format!("write launcher: {e}"))?;
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700));
+        }
+        let status = std::process::Command::new("open")
+            .arg("-a")
+            .arg(&app)
+            .arg(&path)
             .status()
-            .map_err(|e| format!("launch Terminal: {e}"))?;
+            .map_err(|e| format!("launch {app}: {e}"))?;
         if !status.success() {
-            return Err("osascript failed to open Terminal".into());
+            return Err(format!("could not open \"{app}\" — is it installed?"));
         }
         Ok(())
     }
     #[cfg(not(target_os = "macos"))]
     {
-        let _ = (node_id, login);
-        Err("SSH terminal launch is macOS-only for now".into())
+        let _ = (node_id, login, terminal_app);
+        Err("external terminal is macOS-only".into())
     }
 }
 
