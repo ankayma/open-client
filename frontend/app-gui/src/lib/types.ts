@@ -121,6 +121,20 @@ export interface MembersView {
   your_role: string;
 }
 
+// [F-1 viewer] One CI deploy run from GET /api/v1/ci/history — read-only
+// projection of a CiDeployAccess ledger event (connection-level facts only).
+export interface CiRun {
+  run_id?: string;
+  repo?: string;
+  ref?: string;
+  issuer?: string;
+  environment?: string;
+  outcome?: string;
+  target_host?: string;
+  block_hash?: string;
+  at?: string;
+}
+
 // PolicyBlock authz (Slice B) + my-access catalog (Slice D).
 export interface PolicyView {
   version: number;

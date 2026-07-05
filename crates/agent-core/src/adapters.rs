@@ -2,7 +2,7 @@
 
 use crate::domain::{
     AgentEnrollRequest, AgentEnrollResponse, CiDeployRequest, CiDeployResponse, CiPolicy,
-    CiPolicyReq, EnrollRequest, EnrollResponse, MembersView, MyAccess, NodeBrief, PeerInfo,
+    CiPolicyReq, CiRun, EnrollRequest, EnrollResponse, MembersView, MyAccess, NodeBrief, PeerInfo,
     PolicyView, Quota, ResolveTable, SessionInfo, SshSessionRequest, SshSessionResponse, Subdomain,
     SubdomainCert, SubdomainCsrReq, SubdomainReq,
 };
@@ -913,6 +913,28 @@ pub async fn list_ci_policies(
     }
     let resp: Resp = get_json(http, base_url, "/api/v1/ci/policy", session_token).await?;
     Ok(resp.policies)
+}
+
+/// CI deploy history — recent `CiDeployAccess` ledger events for this tenant,
+/// optionally narrowed to one node hostname. `GET /api/v1/ci/history`. `[T:A.1.8]`
+/// [A] `node` goes into the query string un-encoded: hostnames here are DNS
+/// labels (alnum/dot/dash), which are query-safe; revisit if labels widen.
+pub async fn ci_history(
+    http: &reqwest::Client,
+    base_url: &str,
+    session_token: &str,
+    node: Option<&str>,
+) -> Result<Vec<CiRun>, ApiError> {
+    #[derive(serde::Deserialize)]
+    struct Resp {
+        runs: Vec<CiRun>,
+    }
+    let path = match node {
+        Some(n) => format!("/api/v1/ci/history?node={n}"),
+        None => "/api/v1/ci/history".to_string(),
+    };
+    let resp: Resp = get_json(http, base_url, &path, session_token).await?;
+    Ok(resp.runs)
 }
 
 /// Create or update a CI/CD deploy policy (server upserts by `repo`).

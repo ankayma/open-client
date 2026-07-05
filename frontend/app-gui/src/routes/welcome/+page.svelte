@@ -3,7 +3,7 @@
 	import { onMount, onDestroy } from 'svelte';
 	import { get } from 'svelte/store';
 	import { auth, pendingInvite } from '$lib/stores';
-	import { signInGithub, pollLogin, submitSessionToken, joinTeamLink, takePendingJoinTeam } from '$lib/tauri';
+	import { signInGithub, pollLogin, submitSessionToken, joinTeamLink, takePendingJoinTeam, joinEnrollNode } from '$lib/tauri';
 	import { listen } from '@tauri-apps/api/event';
 
 	// idle   → initial screen with GitHub button
@@ -11,7 +11,11 @@
 	//           auto-signs-in when GitHub finishes. Paste box also shown as fallback.
 	// paste  → manual fallback (no browser / headless)
 	// joining → redeeming a magic-link team invite (no GitHub, no OTP) — Part D §A
-	let step = $state<'idle' | 'waiting' | 'paste' | 'joining'>('idle');
+	// join-node → node-invite entry (QR): OS-camera scan opens the ankayma:// link by
+	//             itself; this panel is the paste fallback + the future in-app scanner.
+	//             TODO[A]: in-app camera decode needs an owner-gated dep (A.1.21 —
+	//             jsQR / tauri-plugin-barcode-scanner); until then paste-only.
+	let step = $state<'idle' | 'waiting' | 'paste' | 'joining' | 'join-node'>('idle');
 	let busy = $state(false);
 	let token = $state('');
 	let error = $state<string | null>(null);
@@ -98,6 +102,27 @@
 		step = 'idle';
 		error = null;
 		token = '';
+		joinInput = '';
+	}
+
+	// Node-invite paste path (mirrors add-device Cases C/D: scan = enrolled, the
+	// join token IS the authorization — no session needed).
+	let joinInput = $state('');
+	let joinBusy = $state(false);
+	async function handleJoinNode() {
+		const raw = joinInput.trim();
+		if (!raw) return;
+		joinBusy = true;
+		error = null;
+		try {
+			const m = raw.match(/token=([^&\s]+)/);
+			await joinEnrollNode(m ? m[1] : raw, ''); // unnamed — rename later in Devices
+			goto('/services');
+		} catch (e) {
+			error = e instanceof Error ? e.message : 'Could not join — the invite may have expired';
+		} finally {
+			joinBusy = false;
+		}
 	}
 
 	let cleanups: (() => void)[] = [];
@@ -140,28 +165,38 @@
 		<p class="tagline">The sovereign zero-trust mesh —<br/>identity-bound access, your keys, your proof.</p>
 	</div>
 
+	<!-- [T per wow-5p plan §3a] 3 wow actions + the proof that closes each one —
+	     sovereignty evidence, not connectivity (connectivity is commodity). -->
 	<div class="features">
 		<div class="feature">
-			<span class="icon">🔒</span>
+			<span class="icon">🧾</span>
 			<div>
-				<strong>End-to-end encrypted</strong>
-				<span>WireGuard mesh, customer-controlled keys</span>
+				<strong>No-secret CI/CD</strong>
+				<span>Deploy from CI with no static secret — every run ends in a signed receipt</span>
 			</div>
 		</div>
 		<div class="feature">
-			<span class="icon">⚡</span>
+			<span class="icon">🔑</span>
 			<div>
-				<strong>Under 5 minutes to first tunnel</strong>
-				<span>Connect any device, any network</span>
+				<strong>No-key SSH</strong>
+				<span>SSH to prod: no bastion, no static key — every session lands in your ledger</span>
 			</div>
 		</div>
 		<div class="feature">
-			<span class="icon">🔍</span>
+			<span class="icon">🌐</span>
 			<div>
-				<strong>Open-source agent</strong>
-				<span>Audit what runs on your nodes</span>
+				<strong>Private domain</strong>
+				<span>Your services on your own domain — only your mesh can see them</span>
 			</div>
 		</div>
+		<div class="feature">
+			<span class="icon">◈</span>
+			<div>
+				<strong>Prove it</strong>
+				<span>One click shows the real path: peer-to-peer, vendor never in the middle</span>
+			</div>
+		</div>
+		<p class="coexist">Adds on without touching what's already running.</p>
 	</div>
 
 	<div class="actions">
@@ -176,9 +211,39 @@
 					Continue with GitHub
 				{/if}
 			</button>
-			<button class="btn-link" onclick={() => { step = 'paste'; error = null; }}>
-				Enter a token instead
+			<div class="link-row">
+				<button class="btn-link" onclick={() => { step = 'paste'; error = null; }}>
+					Enter a token instead
+				</button>
+				<span class="link-sep">·</span>
+				<button class="btn-link" onclick={() => { step = 'join-node'; error = null; }}>
+					⌁ Scan QR to join a mesh
+				</button>
+			</div>
+
+		{:else if step === 'join-node'}
+			<div class="waiting-card">
+				<p class="waiting-text">Join this device to a mesh</p>
+				<p class="waiting-sub">
+					Point your <strong>phone camera</strong> (or any OS scanner) at the invite QR —
+					the <code>ankayma://join</code> link opens this app and enrolls automatically.
+					On this device, paste the invite link below instead.
+				</p>
+			</div>
+			{#if error}<p class="error">{error}</p>{/if}
+			<input
+				class="token-input"
+				type="text"
+				placeholder="ankayma://join?token=…  (or the raw token)"
+				bind:value={joinInput}
+				autocomplete="off"
+				spellcheck="false"
+				onkeydown={(e) => e.key === 'Enter' && handleJoinNode()}
+			/>
+			<button class="btn-primary" onclick={handleJoinNode} disabled={joinBusy || !joinInput.trim()}>
+				{#if joinBusy}<span class="spinner"></span> Joining…{:else}Join mesh{/if}
 			</button>
+			<button class="btn-link" onclick={reset}>← Back</button>
 
 		{:else if step === 'waiting'}
 			<div class="waiting-card">
@@ -227,7 +292,7 @@
 		{/if}
 
 		<p class="terms">
-			Free tier · No credit card required ·
+			Free tier · No credit card required · Open-source agent ·
 			<a href="https://ankayma.com/terms.html" target="_blank" rel="noopener">Terms</a>
 		</p>
 	</div>
@@ -243,6 +308,16 @@
 		max-width: 420px;
 		margin: 0 auto;
 		width: 100%;
+	}
+
+	/* Desktop: widen and lay the 4 wow cards out 2×2 so the GitHub CTA sits
+	   above the fold — no scroll to reach sign-in. */
+	@media (min-width: 700px) {
+		main {
+			max-width: 800px;
+			gap: 24px;
+			padding-top: calc(var(--safe-top) + 32px);
+		}
 	}
 
 	.hero {
@@ -266,10 +341,21 @@
 	}
 
 	.features {
-		display: flex;
-		flex-direction: column;
+		display: grid;
+		grid-template-columns: 1fr;
 		gap: 16px;
 		width: 100%;
+	}
+
+	@media (min-width: 700px) {
+		.features {
+			grid-template-columns: 1fr 1fr;
+			gap: 12px;
+		}
+
+		.coexist {
+			grid-column: 1 / -1;
+		}
 	}
 
 	.feature {
@@ -300,8 +386,16 @@
 		color: var(--c-text-dim);
 	}
 
+	.coexist {
+		font-size: 12px;
+		color: var(--c-text-dim);
+		text-align: center;
+		font-style: italic;
+	}
+
 	.actions {
 		width: 100%;
+		max-width: 420px;
 		display: flex;
 		flex-direction: column;
 		align-items: center;
@@ -419,5 +513,16 @@
 
 	.btn-link:hover:not(:disabled) {
 		color: var(--c-text);
+	}
+
+	.link-row {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+	}
+
+	.link-sep {
+		color: var(--c-text-dim);
+		font-size: 13px;
 	}
 </style>

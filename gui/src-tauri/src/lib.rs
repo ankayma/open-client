@@ -1614,6 +1614,20 @@ async fn list_ci_policies(state: State<'_, AppState>) -> Result<Vec<domain::CiPo
         .map_err(|e| e.to_string())
 }
 
+// [F-1 viewer] CI deploy history for the Services page — recent CiDeployAccess
+// ledger events, optionally for one node. Read-only (A.1.8). Owner/admin default;
+// TODO[A]: per-member view grant khi F1 multi-user roles land.
+#[tauri::command]
+async fn ci_history(
+    node: Option<String>,
+    state: State<'_, AppState>,
+) -> Result<Vec<domain::CiRun>, String> {
+    let tok = state.token().ok_or("not signed in")?;
+    adapters::ci_history(&state.http, &state.base_url, &tok, node.as_deref())
+        .await
+        .map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 async fn add_ci_policy(req: CiPolicyDraft, state: State<'_, AppState>) -> Result<(), String> {
     let tok = state.token().ok_or("not signed in")?;
@@ -2189,6 +2203,7 @@ pub fn run() {
             get_node_info,
             get_path_proof,
             list_ci_policies,
+            ci_history,
             add_ci_policy,
             delete_ci_policy,
             list_nodes,

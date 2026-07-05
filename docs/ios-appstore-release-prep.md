@@ -282,6 +282,53 @@ Vào **TestFlight** trước (build tự xuất hiện sau vài phút xử lý) 
 
 ---
 
+## 8. SUBMIT-DAY RUNBOOK (2026-07-05) — làm theo thứ tự
+
+> **Verdict readiness**: **Server-side + demo READY 100%** (demo-tenant riêng live, node + service demo Open/SSH được, isolation verify sạch — chi tiết + credentials ở workspace private `part-d-infrastructure.md §7.4b`). **Chặn còn lại = build nào submit + metadata ASC (owner-side).**
+
+### 8.0 QUYẾT ĐỊNH build — chọn 1 (đọc trước)
+
+Build `Ankayma 0.1.0` đã upload 2026-06-30 **CŨ HƠN** F-2 SSH / F-3 / toàn bộ UI 2026-07-05 (những cái vừa test trên iPhone). Các thay đổi 2026-07-05 **chưa commit, chưa build vào iOS**.
+
+- **Phương án NHANH (submit hôm nay, build cũ)**: dùng luôn build 0.1.0 đã upload. VPN connect + token-signin + isolation demo hoạt động (đủ qua review 5.4). **Nhược**: reviewer thấy app thiếu SSH/Open/UI mới; app lên store là bản cũ, phải update sau. Reviewer note phải mô tả welcome **bản cũ** ("Paste session token").
+- **Phương án ĐÚNG (khớp cái vừa validate, +1–2h Xcode)**: commit client 2026-07-05 → rebuild iOS → archive → validate → upload build mới → submit. Reviewer test đúng trải nghiệm demo (Open trang mock + SSH). **Khuyến nghị nếu kịp giờ.**
+
+Nếu chọn ĐÚNG: trước khi build, commit các thay đổi client (Claude làm khi owner OK): services layout+SSH+filter+CI chip, PathChain ledger+mask IP, welcome 4-card+QR+2cột, devices SSH style, window min-width, tabbar reserve.
+
+### 8.1 REVIEWER INFO (điền vào App Store Connect → App Review Information → Sign-In)
+
+> **User name + Password (token) = lấy từ workspace PRIVATE** `part-d-infrastructure.md §7.4b` (token demo-tenant, KHÔNG commit vào repo public này). Dùng **token demo-tenant**, KHÔNG dùng token tenant-chính (lộ node riêng).
+
+- **Sign-in required**: ✅ bật.
+- **User name / Password**: → dán từ `part-d-infrastructure.md §7.4b` (private).
+- **Notes** (khớp UI **build mới** — nếu submit build cũ, sửa "Enter a token instead" → "Paste session token"):
+  ```
+  This app does not use a traditional username/password login. On the Welcome
+  screen, tap "Enter a token instead" (text link below "Continue with GitHub"),
+  paste the value from the Password field above, then tap "Sign in".
+
+  After sign-in, tap the large Connect button to bring up the VPN tunnel. You can
+  then tap "Open" on the "api" service to load a page reached privately over the
+  mesh, or "SSH" to open an in-app terminal to the demo server.
+  ```
+
+### 8.2 Checklist submit (đánh dấu khi xong)
+
+1. [ ] (nếu phương án ĐÚNG) Commit client 2026-07-05 + `cargo tauri ios build --export-method app-store-connect` (§7.5) → Validate (§7.5) → Upload (§7.6) → chờ ASC xử lý (vài phút).
+2. [ ] App record + metadata §7.2: description (draft §7.2, owner sửa giọng), keywords, Support URL `https://ankayma.com`, **screenshots ≥3** (6.9" iPhone + iPad — chụp Simulator: Welcome, Connected, Services/Devices), Age Rating (→4+).
+3. [ ] Export compliance §7.3: Encryption = Yes, qualifies exemption (standard/mass-market).
+4. [ ] EU DSA Trader §7.4: khai pháp nhân (hoặc giới hạn phân phối ngoài EU).
+5. [ ] **App Review Information** §8.1: dán reviewer user/password/notes ở trên.
+6. [ ] Chọn build (0.1.0 cũ hoặc build mới vừa upload) cho version.
+7. [ ] TestFlight self-test: tự paste token demo → connect → Open/SSH OK trên device.
+8. [ ] **Submit for Review**.
+
+### 8.3 SAU KHI REVIEW XONG — teardown demo (đừng quên)
+
+Xoá demo-tenant + node demo để không rác — lệnh teardown đầy đủ ở workspace private `part-d-infrastructure.md §7.4b`.
+
+---
+
 ### Log
 - 2026-06-25 — Tạo prep checklist. Target = iOS App Store (owner chốt). Build chưa chạy
   (membership expired). Flag rào Network Extension (boringtun → Packet Tunnel Provider).

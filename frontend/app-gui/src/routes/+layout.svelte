@@ -418,9 +418,11 @@
 	}
 
 	/* Room for the fixed BottomTabBar (mobile-only — the bar itself hides
-	   at >=760px, so this padding only matters below that breakpoint). */
+	   at >=760px, so this padding only matters below that breakpoint).
+	   Must include the bar's own safe-area padding so content clears the
+	   full bar height on home-indicator devices. */
 	.view.with-tabbar {
-		padding-bottom: 56px;
+		padding-bottom: calc(52px + var(--safe-bottom));
 	}
 
 	/* Desktop chrome: left nav rail + scrollable content area. */

@@ -10,6 +10,7 @@ import type {
   PathProof,
   CiPolicy,
   CiPolicyDraft,
+  CiRun,
   PeerBrief,
   Subdomain,
   SubdomainCert,
@@ -144,6 +145,12 @@ export async function listCiPolicies(): Promise<CiPolicy[]> {
 
 export async function addCiPolicy(req: CiPolicyDraft): Promise<void> {
   return invoke("add_ci_policy", { req });
+}
+
+// [F-1 viewer] Recent CI deploy runs from the tenant's audit ledger, optionally
+// narrowed to one node hostname. Read-only (A.1.8); admin/owner default.
+export async function ciHistory(node?: string): Promise<CiRun[]> {
+  return invoke<CiRun[]>("ci_history", { node: node ?? null });
 }
 
 export async function deleteCiPolicy(repo: string): Promise<void> {

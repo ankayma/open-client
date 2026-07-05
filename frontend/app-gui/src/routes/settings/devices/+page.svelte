@@ -151,10 +151,11 @@
 						<button
 							class="ssh-btn"
 							aria-label="SSH into {d.hostname}"
-							title="SSH ↗"
+							title="SSH into {d.hostname}"
 							onclick={() => sshTo(d)}
 						>
-							<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 17l6-6-6-6M12 19h8"/></svg>
+							<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 17l6-6-6-6M12 19h8"/></svg>
+							SSH
 						</button>
 					{/if}
 					<button
@@ -393,21 +394,25 @@
 	}
 	.btn:hover { background: var(--c-accent-dim); }
 
+	/* Mesh-terminal button — same accent-tinted chip as the SSH button on
+	   Services (keep the two in sync: one affordance, one look — geometry
+	   mirrors the global .btn-primary/.btn-secondary: 7px 14px, 13px). */
 	.ssh-btn {
-		width: 32px;
-		height: 32px;
-		display: flex;
+		display: inline-flex;
 		align-items: center;
-		justify-content: center;
-		border-radius: 6px;
+		gap: 6px;
+		font-size: 13px;
+		font-weight: 500;
+		padding: 7px 14px;
+		border-radius: var(--radius);
 		flex-shrink: 0;
-		color: var(--c-text-dim);
-		background: transparent;
+		color: var(--c-accent);
+		background: var(--btn-secondary-bg);
+		border: 1px solid color-mix(in srgb, var(--c-accent) 35%, var(--c-border));
 		transition: background 0.12s, color 0.12s;
 	}
 	.ssh-btn:hover {
-		background: color-mix(in srgb, var(--c-accent) 14%, transparent);
-		color: var(--c-accent);
+		background: color-mix(in srgb, var(--c-accent) 12%, transparent);
 	}
 
 	.ssh-error {

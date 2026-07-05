@@ -380,6 +380,25 @@ pub struct MyAccess {
     pub services: Vec<AccessService>,
 }
 
+/// One CI deploy run as returned by `GET /api/v1/ci/history` — a read-only
+/// projection of a `CiDeployAccess` ledger event. Connection-level facts only,
+/// never command content (A.1.1); `run_id` re-verifies independently at
+/// `GET /api/v1/ci/receipt/{run_id}`. All fields optional: the ledger payload
+/// evolved across versions, honesty over fabrication. `[T:A.1.8]`
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CiRun {
+    pub run_id: Option<String>,
+    pub repo: Option<String>,
+    #[serde(rename = "ref")]
+    pub git_ref: Option<String>,
+    pub issuer: Option<String>,
+    pub environment: Option<String>,
+    pub outcome: Option<String>,
+    pub target_host: Option<String>,
+    pub block_hash: Option<String>,
+    pub at: Option<String>,
+}
+
 /// A CI/CD deploy policy rule as returned by `GET /api/v1/ci/policy`. Tenant-scoped.
 /// `[T:Part C §H.3.3 / B.5.2]` `ref` and `environment` are the safe-by-default scope:
 /// exactly one is set (server enforces; client mirrors in UX). `target_hostname` is

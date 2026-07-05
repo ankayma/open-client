@@ -13,9 +13,9 @@
     "windows": [
       {
         "title": "Ankayma",
-        "width": 920,
+        "width": 1040,
         "height": 760,
-        "minWidth": 760,
+        "minWidth": 860,
         "minHeight": 680,
         "center": true,
         "resizable": true,
