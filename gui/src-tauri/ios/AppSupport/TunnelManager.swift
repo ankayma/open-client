@@ -84,10 +84,19 @@ import NetworkExtension
 
             manager.saveToPreferences { error in
                 if let error = error { completion(.failure(error)); return }
-                // Reload so the saved reference is fresh before we start it.
-                manager.loadFromPreferences { error in
+                // FRESH reload after save. On the FIRST install, loadFromPreferences
+                // on the SAME manager object can hand back a connection that
+                // startVPNTunnel() rejects (config not yet active system-side) — the
+                // root of the "connect, then disconnect+connect again" dance. A full
+                // loadAllFromPreferences returns the system-committed manager.
+                // [known wireguard-apple first-install race]
+                NETunnelProviderManager.loadAllFromPreferences { managers, error in
                     if let error = error { completion(.failure(error)); return }
-                    completion(.success(manager))
+                    let fresh = managers?.first(where: {
+                        ($0.protocolConfiguration as? NETunnelProviderProtocol)?
+                            .providerBundleIdentifier == self.tunnelBundleId
+                    }) ?? managers?.first ?? manager
+                    completion(.success(fresh))
                 }
             }
         }
@@ -109,12 +118,51 @@ import NetworkExtension
                 completion(error)
             case .success(let manager):
                 self.beginMonitoring(manager)
-                do {
-                    try manager.connection.startVPNTunnel()
-                    completion(nil)
-                } catch {
-                    completion(error)
+                self.startTunnel(manager, retriesLeft: 1, completion: completion)
+            }
+        }
+    }
+
+    /// Start the tunnel, self-healing the first-install case. On a brand-new VPN
+    /// install `startVPNTunnel()` can throw, or succeed but immediately fall back to
+    /// .disconnected, because the freshly-saved config isn't active yet — that's why
+    /// the very first connect needed a manual disconnect→connect. We retry once:
+    ///  - if start THROWS → wait, reload, retry;
+    ///  - if start succeeds but the status is still .disconnected/.invalid after a
+    ///    short settle → reload a fresh manager + retry.
+    private func startTunnel(
+        _ manager: NETunnelProviderManager,
+        retriesLeft: Int,
+        completion: @escaping (Error?) -> Void
+    ) {
+        func retryFresh() {
+            NETunnelProviderManager.loadAllFromPreferences { managers, _ in
+                let m = managers?.first(where: {
+                    ($0.protocolConfiguration as? NETunnelProviderProtocol)?
+                        .providerBundleIdentifier == self.tunnelBundleId
+                }) ?? manager
+                self.beginMonitoring(m)
+                self.startTunnel(m, retriesLeft: retriesLeft - 1, completion: { _ in })
+            }
+        }
+        do {
+            try manager.connection.startVPNTunnel()
+            // Report success to the UI now; the settle-check below silently fixes a
+            // stuck first start without bothering the caller.
+            completion(nil)
+            if retriesLeft > 0 {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+                    let s = manager.connection.status
+                    if s == .disconnected || s == .invalid { retryFresh() }
                 }
+            }
+        } catch {
+            if retriesLeft > 0 {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.7) {
+                    self.startTunnel(manager, retriesLeft: retriesLeft - 1, completion: completion)
+                }
+            } else {
+                completion(error)
             }
         }
     }

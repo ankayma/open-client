@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { onMount, onDestroy } from 'svelte';
 	import { connection } from '$lib/stores';
+	import type { ConnectionState } from '$lib/types';
 	import {
 		connect,
 		disconnect,
@@ -62,6 +63,31 @@
 	});
 	onDestroy(() => clearInterval(dpTimer));
 
+	const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+	// After the tunnel interface is up, poll until the data path is genuinely
+	// usable before we report "Connected": the interface comes up instantly but
+	// WireGuard peer handshakes take a few seconds (longer on a high-latency
+	// link), and an SSH/Open tapped in that gap fails. "Usable" = ≥1 peer meshed.
+	// A solo device with no peers never meshes anyone, so we cap the wait at a
+	// short settle window and then report whatever the real status is — it's still
+	// legitimately connected, just with nothing to reach. [owner feedback 2026-07-05]
+	async function waitForEstablished(): Promise<ConnectionState> {
+		const SETTLE_TICKS = 8; // ~6.4s cap (8 × 800ms) — solo / slow-to-mesh
+		let last: ConnectionState = { status: 'connecting' };
+		for (let i = 0; i < SETTLE_TICKS; i++) {
+			last = await getConnectionStatus();
+			if (last.status === 'connected') {
+				await refreshDataplane();
+				if (dp?.running && dp.peers.length > 0) return last; // meshed → ready
+			}
+			await sleep(800);
+		}
+		// Window elapsed: solo device, or peers still settling. Report the real
+		// status; SSH/Open will retry on their own once a peer finishes handshaking.
+		return last.status === 'connected' ? last : await getConnectionStatus();
+	}
+
 	async function toggleConnection() {
 		toggling = true;
 		connectError = null;
@@ -83,10 +109,13 @@
 					await connect();
 					await startDataplane();
 				}
-				connection.set(await getConnectionStatus());
-				// Pull the peer count right away — don't leave "Connected" bare
-				// until the next 4s poll tick.
-				await refreshDataplane();
+				// Stay "Connecting…" until the data path is actually usable — the
+				// tunnel interface comes up instantly but peer handshakes take a few
+				// seconds (more on a high-latency link), and SSH/Open tapped in that
+				// gap fails. Flip to "Connected" only once ≥1 peer is meshed, or after
+				// a short settle window (a solo device with no peers is still connected).
+				// [owner feedback 2026-07-05]
+				connection.set(await waitForEstablished());
 			}
 		} catch (e) {
 			connection.set({ status: 'disconnected' });

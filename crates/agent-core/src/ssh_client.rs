@@ -19,7 +19,7 @@
 
 use std::path::Path;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, bail, Context, Result};
 use russh::client::{self, Config, Handler};
@@ -115,9 +115,15 @@ pub struct SshConnectOptions {
     /// sends it as an SSH env var before requesting the shell, so the server lands
     /// a root PTY instead of the unprivileged shared user. `None` → normal login.
     pub elevate_grant: Option<String>,
-    /// How long to wait for the TCP connect before giving up (fail-fast instead of
-    /// the ~75s OS default when the mesh path is down).
+    /// How long to wait for the TCP connect before giving up on a SINGLE attempt
+    /// (fail-fast instead of the ~75s OS default when the mesh path is down).
     pub connect_timeout: Duration,
+    /// Total budget across retry attempts. A freshly-established overlay drops the
+    /// first packets while the WireGuard handshake settles, so the first connect
+    /// can time out even though the path is about to come up; we retry within this
+    /// budget so a first connect succeeds instead of failing the user.
+    /// [owner feedback 2026-07-05]
+    pub connect_deadline: Duration,
 }
 
 impl SshConnectOptions {
@@ -135,6 +141,7 @@ impl SshConnectOptions {
             rows: 24,
             elevate_grant: None,
             connect_timeout: Duration::from_secs(12),
+            connect_deadline: Duration::from_secs(30),
         }
     }
 }
@@ -174,7 +181,82 @@ pub struct SshSession {
     pump: Option<tokio::task::JoinHandle<()>>,
 }
 
+/// Outcome of a single connect+auth attempt, so the retry loop knows whether to
+/// try again. `Transient` = worth retrying (path still settling); `Fatal` = fail
+/// closed now (auth rejected).
+enum AttemptError {
+    Transient(anyhow::Error),
+    Fatal(anyhow::Error),
+}
+
 impl SshSession {
+    /// One connect+authenticate attempt: TCP connect (bounded by `attempt_timeout`),
+    /// host-key check via the handler, then publickey auth. Returns the authenticated
+    /// handle, or an [`AttemptError`] classifying whether a retry could help. A
+    /// host-key mismatch surfaces as a transient connect error and is retried within
+    /// the caller's budget — it still fails closed (never authenticates).
+    async fn connect_and_auth(
+        opts: &SshConnectOptions,
+        key: &MeshSshKey,
+        expected: Option<PublicKey>,
+        attempt_timeout: Duration,
+    ) -> std::result::Result<client::Handle<ClientHandler>, AttemptError> {
+        let config = Arc::new(Config {
+            // A torn-down idle overlay re-handshakes transparently; don't give up
+            // during that gap. Mirrors the old system-ssh ServerAliveInterval.
+            inactivity_timeout: Some(Duration::from_secs(3600)),
+            keepalive_interval: Some(Duration::from_secs(5)),
+            ..Default::default()
+        });
+        let handler = ClientHandler {
+            expected_host_key: expected,
+            allow_unpinned: opts.allow_unpinned,
+        };
+
+        // Bound the TCP connect so an unreachable target fails fast instead of
+        // hanging on the OS default (~75s) — the mesh path may simply be settling.
+        let connect = client::connect(config, (opts.host.as_str(), opts.port), handler);
+        let mut handle = match tokio::time::timeout(attempt_timeout, connect).await {
+            Ok(Ok(h)) => h,
+            Ok(Err(e)) => {
+                return Err(AttemptError::Transient(anyhow!(
+                    "connect {}:{}: {e}",
+                    opts.host,
+                    opts.port
+                )))
+            }
+            Err(_) => {
+                return Err(AttemptError::Transient(anyhow!(
+                    "connect {}:{} timed out after {}s — target unreachable (mesh path settling?)",
+                    opts.host,
+                    opts.port,
+                    attempt_timeout.as_secs()
+                )))
+            }
+        };
+
+        // ed25519 needs no RSA hash negotiation → hash alg None. `[T:russh@0.62]`
+        let auth = match handle
+            .authenticate_publickey(
+                opts.username.clone(),
+                PrivateKeyWithHashAlg::new(Arc::new(key.private().clone()), None),
+            )
+            .await
+        {
+            Ok(a) => a,
+            // The channel can drop mid-auth while the path is still settling — retry.
+            Err(e) => return Err(AttemptError::Transient(anyhow!("authenticate: {e}"))),
+        };
+        if !auth.success() {
+            // The node actively rejected this identity — retrying cannot help.
+            return Err(AttemptError::Fatal(anyhow!(
+                "identity-bound auth rejected as {} — device not authorized on this node",
+                opts.username
+            )));
+        }
+        Ok(handle)
+    }
+
     /// Connect, authenticate with the device's mesh-SSH key, open a shell PTY, and
     /// start pumping. Fails closed on a host-key mismatch or auth rejection.
     pub async fn connect(opts: &SshConnectOptions, key: &MeshSshKey) -> Result<Self> {
@@ -192,46 +274,40 @@ impl SshSession {
             );
         }
 
-        let config = Arc::new(Config {
-            // A torn-down idle overlay re-handshakes transparently; don't give up
-            // during that gap. Mirrors the old system-ssh ServerAliveInterval.
-            inactivity_timeout: Some(Duration::from_secs(3600)),
-            keepalive_interval: Some(Duration::from_secs(5)),
-            ..Default::default()
-        });
-        let handler = ClientHandler {
-            expected_host_key: expected,
-            allow_unpinned: opts.allow_unpinned,
+        // A freshly-established overlay drops the first packets while the WireGuard
+        // handshake settles, so the first TCP/SSH connect can time out even though
+        // the path is about to work. Retry the connect+auth within a bounded budget
+        // so a first connect succeeds instead of surfacing "target unreachable".
+        // Auth rejection is fatal (fail closed) and never retried. [owner 2026-07-05]
+        let start = Instant::now();
+        let backoff = Duration::from_millis(1500);
+        let mut attempt = 0u32;
+        let handle = loop {
+            attempt += 1;
+            // Cap this attempt by whatever budget remains (min 1s so the last try is
+            // not zero-length), never exceeding the per-attempt fail-fast timeout.
+            let remaining = opts.connect_deadline.saturating_sub(start.elapsed());
+            let attempt_timeout = opts
+                .connect_timeout
+                .min(remaining.max(Duration::from_secs(1)));
+            match Self::connect_and_auth(opts, key, expected.clone(), attempt_timeout).await {
+                Ok(h) => break h,
+                Err(AttemptError::Fatal(e)) => return Err(e),
+                Err(AttemptError::Transient(e)) => {
+                    // Out of budget (no room for another attempt after backoff) → give up.
+                    if start.elapsed() + backoff >= opts.connect_deadline {
+                        return Err(e.context(format!(
+                            "SSH connect to {}:{} failed after {} attempt(s) in {}s",
+                            opts.host,
+                            opts.port,
+                            attempt,
+                            opts.connect_deadline.as_secs()
+                        )));
+                    }
+                    tokio::time::sleep(backoff).await;
+                }
+            }
         };
-
-        // Bound the TCP connect so an unreachable target fails fast instead of
-        // hanging on the OS default (~75s) — the mesh path may simply be down. The
-        // GUI/iOS terminal surfaces this as a clear error rather than a freeze.
-        let connect = client::connect(config, (opts.host.as_str(), opts.port), handler);
-        let mut handle = match tokio::time::timeout(opts.connect_timeout, connect).await {
-            Ok(r) => r.map_err(|e| anyhow!("connect {}:{}: {e}", opts.host, opts.port))?,
-            Err(_) => bail!(
-                "connect {}:{} timed out after {}s — target unreachable (mesh path down?)",
-                opts.host,
-                opts.port,
-                opts.connect_timeout.as_secs()
-            ),
-        };
-
-        // ed25519 needs no RSA hash negotiation → hash alg None. `[T:russh@0.62]`
-        let auth = handle
-            .authenticate_publickey(
-                opts.username.clone(),
-                PrivateKeyWithHashAlg::new(Arc::new(key.private().clone()), None),
-            )
-            .await
-            .map_err(|e| anyhow!("authenticate: {e}"))?;
-        if !auth.success() {
-            bail!(
-                "identity-bound auth rejected as {} — device not authorized on this node",
-                opts.username
-            );
-        }
 
         let channel = handle
             .channel_open_session()

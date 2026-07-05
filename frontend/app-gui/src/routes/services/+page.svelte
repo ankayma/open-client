@@ -374,7 +374,11 @@
     flex: 1;
     display: flex;
     flex-direction: column;
-    padding: calc(var(--safe-top) + 16px) 16px calc(var(--safe-bottom) + 32px);
+    /* Bottom padding is JUST breathing room — the tab-bar + home-indicator
+       clearance is already reserved once by `.view.with-tabbar`
+       (calc(52px + safe-bottom)). Re-adding safe-bottom here double-counted it
+       and left a ~100px dead band under the last card. [T:layout #5 fix] */
+    padding: calc(var(--safe-top) + 16px) 16px 24px;
     width: 100%;
   }
   .layout {

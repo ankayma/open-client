@@ -49,6 +49,15 @@ else
   echo "✓ project.yml patched (extension target + app embed + entitlements)"
 fi
 
-# 3. Regenerate the .xcodeproj from the patched project.yml.
+# 3. Camera usage string for the in-app QR scanner (barcode-scanner plugin).
+#    App Store rejects a camera-using app without NSCameraUsageDescription; the
+#    generated Info.plist doesn't include it, so add it here (idempotent). [T:A.1.21]
+APP_PLIST="$GEN/ankayma-gui_iOS/Info.plist"
+if [ -f "$APP_PLIST" ] && ! /usr/libexec/PlistBuddy -c "Print :NSCameraUsageDescription" "$APP_PLIST" >/dev/null 2>&1; then
+  /usr/libexec/PlistBuddy -c "Add :NSCameraUsageDescription string 'Ankayma uses the camera to scan a mesh invite QR code so this device can join your mesh.'" "$APP_PLIST"
+  echo "✓ NSCameraUsageDescription added to app Info.plist"
+fi
+
+# 4. Regenerate the .xcodeproj from the patched project.yml.
 (cd "$GEN" && xcodegen generate)
 echo "✓ xcodegen done — gen/apple/ankayma-gui.xcodeproj (app + PacketTunnel targets)"

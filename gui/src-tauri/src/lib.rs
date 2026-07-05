@@ -587,6 +587,13 @@ async fn sign_out(app: AppHandle, state: State<'_, AppState>) -> Result<(), Stri
     state.set_token(None);
     state.set_email(None);
     disconnect_inner(&state);
+    // Forget the enrolled mesh identity too. Otherwise, signing in to a DIFFERENT
+    // tenant (or as a different user) on the same device would carry the previous
+    // tenant's node handoff — the next Connect could reuse it and land in the wrong
+    // mesh (services mismatch / peer unreachable). Signing out = forget this device.
+    *state.node.lock().expect("node lock poisoned") = None;
+    let handoff = handoff_state_dir(&state).join("agent.json");
+    let _ = std::fs::remove_file(&handoff);
     apply_connection_change(&app);
     Ok(())
 }
@@ -2094,6 +2101,14 @@ pub fn run() {
             .plugin(tauri_plugin_updater::Builder::new().build());
     }
 
+    // [scan-qr] In-app QR scan for the node-invite flow (welcome). Mobile-only:
+    // the plugin drives the native camera scanner (iOS AVFoundation / Android
+    // MLKit). Not registered on desktop (no camera scanner there → paste flow).
+    #[cfg(mobile)]
+    {
+        builder = builder.plugin(tauri_plugin_barcode_scanner::init());
+    }
+
     builder
         .plugin(tauri_plugin_deep_link::init())
         .setup(|app| {
@@ -2111,6 +2126,34 @@ pub fn run() {
             // real state on launch. [T:A.1.9]
             #[cfg(target_os = "ios")]
             vpn::prime();
+
+            // iOS: WKWebView's scroll view defaults to
+            // contentInsetAdjustmentBehavior = .automatic, which reserves the
+            // home-indicator safe area NATIVELY — on top of our CSS
+            // env(safe-area-inset-*) (app.html sets viewport-fit=cover). The two
+            // stack, so the fixed bottom tab bar gets pushed up off the screen edge
+            // with a dead strip beneath it. Set .never so CSS env() is the single
+            // source of truth for insets and the bar sits flush at the bottom.
+            // [T:WKWebView UIScrollView.contentInsetAdjustmentBehavior]
+            // Ref: WebKit inset behavior + viewport-fit=cover.
+            #[cfg(target_os = "ios")]
+            {
+                use objc2::msg_send;
+                use objc2::runtime::AnyObject;
+                if let Some(win) = app.webview_windows().values().next().cloned() {
+                    let _ = win.with_webview(|webview| unsafe {
+                        let wk = webview.inner() as *mut AnyObject;
+                        if wk.is_null() {
+                            return;
+                        }
+                        let scroll: *mut AnyObject = msg_send![wk, scrollView];
+                        if !scroll.is_null() {
+                            // UIScrollViewContentInsetAdjustmentNever = 2
+                            let _: () = msg_send![scroll, setContentInsetAdjustmentBehavior: 2_isize];
+                        }
+                    });
+                }
+            }
 
             // Route `ankayma://auth?token=…` straight into sign-in (no copy/paste).
             {

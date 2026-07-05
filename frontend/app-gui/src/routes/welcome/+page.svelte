@@ -3,7 +3,7 @@
 	import { onMount, onDestroy } from 'svelte';
 	import { get } from 'svelte/store';
 	import { auth, pendingInvite } from '$lib/stores';
-	import { signInGithub, pollLogin, submitSessionToken, joinTeamLink, takePendingJoinTeam, joinEnrollNode } from '$lib/tauri';
+	import { signInGithub, pollLogin, submitSessionToken, joinTeamLink, takePendingJoinTeam, getPlatform } from '$lib/tauri';
 	import { listen } from '@tauri-apps/api/event';
 
 	// idle   → initial screen with GitHub button
@@ -109,20 +109,96 @@
 	// join token IS the authorization — no session needed).
 	let joinInput = $state('');
 	let joinBusy = $state(false);
-	async function handleJoinNode() {
-		const raw = joinInput.trim();
-		if (!raw) return;
+	let scanning = $state(false);
+
+	// [scan-qr] Open the in-app native camera scanner (tauri-plugin-barcode-scanner,
+	// mobile-only). On success the decoded `ankayma://join?token=…` is redeemed
+	// directly. On desktop (no camera scanner) or on cancel/error, fall back to the
+	// paste step so the flow always has a path.
+	async function startScan() {
+		error = null;
+		let platform = 'unknown';
+		try { platform = await getPlatform(); } catch { /* browser dev */ }
+		if (platform !== 'ios' && platform !== 'android') {
+			step = 'join-node'; // desktop → paste fallback
+			return;
+		}
+		try {
+			const { scan, checkPermissions, requestPermissions, Format } =
+				await import('@tauri-apps/plugin-barcode-scanner');
+			let perm = await checkPermissions();
+			if (perm !== 'granted') perm = await requestPermissions();
+			if (perm !== 'granted') {
+				error = 'Camera permission is needed to scan the invite QR.';
+				step = 'join-node';
+				return;
+			}
+			// The native scanner makes the webview transparent (camera behind); our
+			// overlay (frame + Cancel) is drawn on top — toggle the transparent mode.
+			scanning = true;
+			document.documentElement.classList.add('scanning');
+			const res = await scan({ windowed: true, formats: [Format.QRCode] });
+			document.documentElement.classList.remove('scanning');
+			scanning = false;
+			if (res?.content) {
+				// Show what was scanned + let any redeem error surface on the paste step.
+				joinInput = res.content;
+				step = 'join-node';
+				await redeemScanned(res.content); // success → /services; fail → error shown
+			}
+		} catch (e) {
+			// user cancelled the scanner, or the plugin is unavailable → paste path.
+			const msg = e instanceof Error ? e.message : String(e);
+			if (!/cancel/i.test(msg)) { error = msg; step = 'join-node'; }
+		} finally {
+			document.documentElement.classList.remove('scanning');
+			scanning = false;
+		}
+	}
+
+	// Cancel an in-progress scan (Cancel button on the scan overlay).
+	async function cancelScan() {
+		try {
+			const { cancel } = await import('@tauri-apps/plugin-barcode-scanner');
+			await cancel();
+		} catch { /* nothing to cancel */ }
+		document.documentElement.classList.remove('scanning');
+		scanning = false;
+	}
+
+	// Redeem a scanned/typed invite (shared by camera result + paste). A TEAM
+	// invite makes you a member and returns a session → straight into the app. A
+	// node/device invite only enrols a device and carries NO session, so the GUI
+	// (which needs a session to show services) can't sign you in from it — guide
+	// the user instead of dumping them on an empty, footer-less page.
+	async function redeemScanned(raw: string) {
+		const v = raw.trim();
+		if (!v) return;
 		joinBusy = true;
 		error = null;
 		try {
-			const m = raw.match(/token=([^&\s]+)/);
-			await joinEnrollNode(m ? m[1] : raw, ''); // unnamed — rename later in Devices
-			goto('/services');
+			const m = v.match(/token=([^&\s]+)/);
+			const tok = m ? m[1] : v;
+			if (/join-team/.test(v)) {
+				const state = await joinTeamLink(tok);
+				auth.set(state);
+				goto('/services');
+			} else if (/\bjoin\b/.test(v)) {
+				error = 'This is a device invite. Sign in first, then add this device from Settings → My Devices.';
+			} else {
+				// Bare token — try it as a team invite (the only kind that signs you in).
+				const state = await joinTeamLink(tok);
+				auth.set(state);
+				goto('/services');
+			}
 		} catch (e) {
-			error = e instanceof Error ? e.message : 'Could not join — the invite may have expired';
+			error = e instanceof Error ? e.message : 'Could not join — the invite may have expired.';
 		} finally {
 			joinBusy = false;
 		}
+	}
+	function handleJoinNode() {
+		redeemScanned(joinInput);
 	}
 
 	let cleanups: (() => void)[] = [];
@@ -201,33 +277,35 @@
 
 	<div class="actions">
 		{#if step === 'idle'}
-			<button class="btn-primary" onclick={handleSignIn} disabled={busy}>
-				{#if busy}
-					<span class="spinner"></span> Opening browser…
-				{:else}
-					<svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor">
-						<path d="M12 2C6.477 2 2 6.477 2 12c0 4.418 2.865 8.166 6.839 9.489.5.092.682-.217.682-.482 0-.237-.009-.868-.013-1.703-2.782.604-3.369-1.342-3.369-1.342-.454-1.155-1.11-1.463-1.11-1.463-.908-.62.069-.608.069-.608 1.003.07 1.531 1.03 1.531 1.03.892 1.529 2.341 1.087 2.91.832.092-.647.35-1.088.636-1.338-2.22-.253-4.555-1.11-4.555-4.943 0-1.091.39-1.984 1.03-2.682-.103-.253-.447-1.27.098-2.646 0 0 .84-.269 2.75 1.025A9.578 9.578 0 0112 6.836a9.59 9.59 0 012.504.337c1.909-1.294 2.747-1.025 2.747-1.025.547 1.376.203 2.394.1 2.646.64.698 1.026 1.591 1.026 2.682 0 3.841-2.337 4.687-4.565 4.935.359.309.678.919.678 1.852 0 1.336-.012 2.415-.012 2.741 0 .267.18.578.688.48C19.138 20.163 22 16.418 22 12c0-5.523-4.477-10-10-10z"/>
-					</svg>
-					Continue with GitHub
-				{/if}
-			</button>
-			<div class="link-row">
-				<button class="btn-link" onclick={() => { step = 'paste'; error = null; }}>
-					Enter a token instead
+			<div class="signin-row">
+				<button class="btn-primary" onclick={handleSignIn} disabled={busy}>
+					{#if busy}
+						<span class="spinner"></span> Opening…
+					{:else}
+						<svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor">
+							<path d="M12 2C6.477 2 2 6.477 2 12c0 4.418 2.865 8.166 6.839 9.489.5.092.682-.217.682-.482 0-.237-.009-.868-.013-1.703-2.782.604-3.369-1.342-3.369-1.342-.454-1.155-1.11-1.463-1.11-1.463-.908-.62.069-.608.069-.608 1.003.07 1.531 1.03 1.531 1.03.892 1.529 2.341 1.087 2.91.832.092-.647.35-1.088.636-1.338-2.22-.253-4.555-1.11-4.555-4.943 0-1.091.39-1.984 1.03-2.682-.103-.253-.447-1.27.098-2.646 0 0 .84-.269 2.75 1.025A9.578 9.578 0 0112 6.836a9.59 9.59 0 012.504.337c1.909-1.294 2.747-1.025 2.747-1.025.547 1.376.203 2.394.1 2.646.64.698 1.026 1.591 1.026 2.682 0 3.841-2.337 4.687-4.565 4.935.359.309.678.919.678 1.852 0 1.336-.012 2.415-.012 2.741 0 .267.18.578.688.48C19.138 20.163 22 16.418 22 12c0-5.523-4.477-10-10-10z"/>
+						</svg>
+						GitHub
+					{/if}
 				</button>
-				<span class="link-sep">·</span>
-				<button class="btn-link" onclick={() => { step = 'join-node'; error = null; }}>
-					⌁ Scan QR to join a mesh
+				<button class="btn-scan" onclick={startScan} disabled={scanning} title="Scan QR to join a mesh">
+					<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+						<path d="M3 7V5a2 2 0 012-2h2M17 3h2a2 2 0 012 2v2M21 17v2a2 2 0 01-2 2h-2M7 21H5a2 2 0 01-2-2v-2"/>
+						<path d="M7 12h10" stroke-width="2.2"/>
+					</svg>
+					Scan QR
 				</button>
 			</div>
+			<button class="btn-link" onclick={() => { step = 'paste'; error = null; }}>
+				Enter a token instead
+			</button>
 
 		{:else if step === 'join-node'}
 			<div class="waiting-card">
 				<p class="waiting-text">Join this device to a mesh</p>
 				<p class="waiting-sub">
-					Point your <strong>phone camera</strong> (or any OS scanner) at the invite QR —
-					the <code>ankayma://join</code> link opens this app and enrolls automatically.
-					On this device, paste the invite link below instead.
+					Paste the invite link below, or go back and tap <strong>Scan QR</strong> to use
+					the camera. The <code>ankayma://join</code> token is the credential — no sign-in needed.
 				</p>
 			</div>
 			{#if error}<p class="error">{error}</p>{/if}
@@ -297,6 +375,16 @@
 		</p>
 	</div>
 </main>
+
+<!-- [scan-qr] Camera overlay: the native scanner shows the camera behind a
+     transparent webview; this draws the viewfinder + a Cancel button on top. -->
+{#if scanning}
+	<div class="scan-overlay">
+		<div class="scan-frame"></div>
+		<p class="scan-hint">Point the camera at the invite QR code</p>
+		<button class="scan-cancel" onclick={cancelScan} aria-label="Cancel scan">✕ Cancel</button>
+	</div>
+{/if}
 
 <style>
 	main {
@@ -515,14 +603,87 @@
 		color: var(--c-text);
 	}
 
-	.link-row {
+	.signin-row {
+		width: 100%;
+		display: flex;
+		gap: 10px;
+	}
+	.signin-row .btn-primary {
+		flex: 2;
+		width: auto;
+	}
+	.btn-scan {
+		flex: 1;
 		display: flex;
 		align-items: center;
-		gap: 8px;
+		justify-content: center;
+		gap: 7px;
+		padding: 14px 12px;
+		background: var(--btn-secondary-bg, transparent);
+		color: var(--c-text);
+		border: 1px solid color-mix(in srgb, var(--c-accent) 40%, var(--c-border));
+		border-radius: var(--radius);
+		font-size: 14px;
+		font-weight: 600;
+		white-space: nowrap;
+		transition: background 0.15s, border-color 0.15s;
 	}
 
-	.link-sep {
-		color: var(--c-text-dim);
-		font-size: 13px;
+	.btn-scan:hover:not(:disabled) {
+		background: color-mix(in srgb, var(--c-accent) 10%, transparent);
+		border-color: var(--c-accent);
+	}
+
+	.btn-scan:disabled {
+		opacity: 0.6;
+		cursor: not-allowed;
+	}
+
+	/* During a scan the WKWebView is made transparent so the native camera shows
+	   through — hide the welcome content and clear every ancestor background. */
+	:global(html.scanning),
+	:global(html.scanning body),
+	:global(html.scanning .app),
+	:global(html.scanning .view) {
+		background: transparent !important;
+	}
+	:global(html.scanning main) {
+		visibility: hidden;
+	}
+
+	.scan-overlay {
+		position: fixed;
+		inset: 0;
+		z-index: 500;
+		display: flex;
+		flex-direction: column;
+		align-items: center;
+		justify-content: center;
+		gap: 20px;
+		padding: 40px 24px calc(var(--safe-bottom) + 40px);
+		background: transparent;
+	}
+	.scan-frame {
+		width: 240px;
+		height: 240px;
+		border: 3px solid #fff;
+		border-radius: 20px;
+		box-shadow: 0 0 0 100vmax rgba(0, 0, 0, 0.35);
+	}
+	.scan-hint {
+		color: #fff;
+		font-size: 15px;
+		font-weight: 600;
+		text-shadow: 0 1px 3px rgba(0, 0, 0, 0.6);
+	}
+	.scan-cancel {
+		margin-top: auto;
+		padding: 14px 28px;
+		background: rgba(20, 20, 24, 0.9);
+		color: #fff;
+		border: 1px solid rgba(255, 255, 255, 0.3);
+		border-radius: 99px;
+		font-size: 16px;
+		font-weight: 600;
 	}
 </style>
