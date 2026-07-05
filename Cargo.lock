@@ -57,7 +57,7 @@ dependencies = [
 
 [[package]]
 name = "agent-core"
-version = "0.1.0"
+version = "1.1.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -82,7 +82,7 @@ dependencies = [
 
 [[package]]
 name = "agent-daemon"
-version = "0.1.0"
+version = "1.1.0"
 dependencies = [
  "agent-core",
  "anyhow",
@@ -102,7 +102,7 @@ dependencies = [
 
 [[package]]
 name = "agent-ios-ptp"
-version = "0.1.0"
+version = "1.1.0"
 dependencies = [
  "agent-core",
  "libc",
@@ -173,7 +173,7 @@ dependencies = [
 
 [[package]]
 name = "ankayma-gui"
-version = "0.1.0"
+version = "1.1.0"
 dependencies = [
  "agent-core",
  "base64 0.22.1",
@@ -1011,7 +1011,7 @@ dependencies = [
 
 [[package]]
 name = "cli"
-version = "0.1.0"
+version = "1.1.0"
 dependencies = [
  "agent-core",
 ]
@@ -1198,7 +1198,7 @@ checksum = "460fbee9c2c2f33933d720630a6a0bac33ba7053db5344fac858d4b8952d77d5"
 
 [[package]]
 name = "crypto"
-version = "0.1.0"
+version = "1.1.0"
 dependencies = [
  "base64 0.22.1",
  "rand_core 0.6.4",
@@ -1653,7 +1653,7 @@ dependencies = [
 
 [[package]]
 name = "domain-core"
-version = "0.1.0"
+version = "1.1.0"
 
 [[package]]
 name = "downcast-rs"
@@ -3184,7 +3184,7 @@ checksum = "09edd9e8b54e49e587e4f6295a7d29c3ea94d469cb40ab8ca70b288248a81db2"
 
 [[package]]
 name = "ledger-client"
-version = "0.1.0"
+version = "1.1.0"
 
 [[package]]
 name = "libappindicator"
@@ -4457,7 +4457,7 @@ dependencies = [
 
 [[package]]
 name = "proto"
-version = "0.1.0"
+version = "1.1.0"
 
 [[package]]
 name = "ptr_meta"
