@@ -1,18 +1,27 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
 	import { goto } from '$app/navigation';
+	import { getVersion } from '@tauri-apps/api/app';
 	import { auth } from '$lib/stores';
 	import { signOut, getNodeInfo } from '$lib/tauri';
 	import type { NodeInfo } from '$lib/types';
 
 	let signing_out = $state(false);
 	let nodeInfo = $state<NodeInfo | null>(null);
+	// Read the real bundle version at runtime so it can never drift from the
+	// shipped build (was hard-coded to 0.1.0 and went stale). [T:tauri-api-app@2]
+	let appVersion = $state('');
 
 	onMount(async () => {
 		try {
 			nodeInfo = await getNodeInfo();
 		} catch {
 			// daemon not connected or not enrolled
+		}
+		try {
+			appVersion = await getVersion();
+		} catch {
+			// non-Tauri (browser dev) — leave blank
 		}
 	});
 
@@ -78,7 +87,7 @@
 	<section class="card">
 		<div class="row">
 			<span class="label">Version</span>
-			<span class="value mono">0.1.0</span>
+			<span class="value mono">{appVersion || '—'}</span>
 		</div>
 		<div class="row">
 			<span class="label">Agent</span>
