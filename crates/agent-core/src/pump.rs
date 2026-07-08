@@ -145,6 +145,23 @@ pub(crate) fn peer_by_source(peers: &Peers, src: SocketAddr) -> Option<Arc<PeerE
 
 /// tun → encapsulate → UDP. Reads bare IP packets, routes by destination.
 pub fn spawn_tx(fd: i32, udp: Arc<UdpSocket>, peers: Peers) {
+    spawn_tx_with_dns(fd, udp, peers, None);
+}
+
+/// DNS interceptor config for the Android VPN (F-3 private domain). When Some,
+/// `spawn_tx` intercepts UDP/53 packets going to `magic_ip` in the TUN read loop,
+/// answers *.int.ankayma.com from the table (AAAA), returns SERVFAIL for others
+/// so Android falls back to its secondary DNS server (e.g. 8.8.8.8). [T:F-3]
+pub struct DnsInterceptor {
+    pub magic_ip: std::net::Ipv6Addr,
+    pub table: std::collections::HashMap<String, IpAddr>,
+}
+
+/// tun → DNS intercept → encapsulate → UDP. Like `spawn_tx` but with an optional
+/// DNS responder for Android VPN: intercepts port-53 queries to `magic_ip` before
+/// they reach WireGuard, answers from the private-domain table, writes responses
+/// back to the same TUN fd. [T:Part C §H.3.6.1, F-3]
+pub fn spawn_tx_with_dns(fd: i32, udp: Arc<UdpSocket>, peers: Peers, dns: Option<DnsInterceptor>) {
     std::thread::spawn(move || {
         let mut pkt = [0u8; MTU + 80];
         let mut enc = [0u8; MTU + 80];
@@ -157,6 +174,15 @@ pub fn spawn_tx(fd: i32, udp: Arc<UdpSocket>, peers: Peers) {
                     break;
                 }
             };
+
+            // Android F-3: intercept DNS queries to magic IP before WireGuard routing.
+            if let Some(ref d) = dns {
+                if let Some(resp) = crate::dns::try_intercept(d.magic_ip, &d.table, &pkt[..n]) {
+                    let _ = crate::tundev::write_packet(fd, &resp);
+                    continue;
+                }
+            }
+
             let Some(dst) = dataplane::packet_dst(&pkt[..n]) else {
                 continue; // not a routable IPv4/IPv6 packet (truncated / unknown version)
             };

@@ -91,9 +91,51 @@ pub async fn vpn_connect(state: State<'_, AppState>) -> Result<(), String> {
     }
     #[cfg(target_os = "android")]
     {
+        use agent_core::adapters;
         crate::connect_inner(&state).await?;
-        let config = build_config(&state)?;
-        crate::vpn_android::start_service(&config)?;
+
+        // F-3: fetch my_access to build fqdn→overlay_ip DNS records for the interceptor.
+        let tok = state.token().ok_or("not signed in")?;
+        let access = adapters::my_access(&state.http, &state.base_url, &tok)
+            .await
+            .unwrap_or_else(|_| agent_core::domain::MyAccess {
+                principal: String::new(),
+                role: String::new(),
+                services: vec![],
+            });
+
+        let config_str = {
+            let guard = state.node.lock().expect("node lock poisoned");
+            let node = guard.as_ref().ok_or("not enrolled")?;
+
+            // peer hostname → overlay_ip string (for DNS mapping)
+            let peer_map: std::collections::HashMap<&str, &str> = node
+                .peers
+                .iter()
+                .map(|p| (p.hostname.as_str(), p.overlay_ip.as_str()))
+                .collect();
+
+            let dns_records: Vec<serde_json::Value> = access
+                .services
+                .iter()
+                .filter_map(|svc| {
+                    peer_map.get(svc.node.as_str()).map(|ip| {
+                        serde_json::json!({"fqdn": svc.fqdn, "overlay_ip": ip})
+                    })
+                })
+                .collect();
+
+            let cfg = serde_json::json!({
+                "private_key_b64": node.private_b64,
+                "overlay_ip": node.overlay_ip,
+                "listen_port": 51820u16,
+                "peers": node.peers,
+                "dns_records": dns_records,
+            });
+            serde_json::to_string(&cfg).map_err(|e| e.to_string())?
+        };
+
+        crate::vpn_android::start_service(&config_str)?;
         Ok(())
     }
     #[cfg(not(any(target_os = "ios", target_os = "android")))]

@@ -9,6 +9,7 @@ import android.os.Build
 import android.os.ParcelFileDescriptor
 import androidx.core.app.NotificationCompat
 import org.json.JSONObject
+import java.net.InetAddress
 
 class AnkaymaVpnService : VpnService() {
 
@@ -31,15 +32,46 @@ class AnkaymaVpnService : VpnService() {
         startForeground(NOTIFICATION_ID, buildNotification())
 
         try {
-            val overlayIp = JSONObject(configJson).getString("overlay_ip")
+            val obj = JSONObject(configJson)
+            val overlayIp = obj.getString("overlay_ip")
+            val isV6 = overlayIp.contains(":")
 
-            val pfd = Builder()
+            // Magic DNS IP: fd00:a11a::53 — reserved Ankayma ULA address for the
+            // in-process DNS interceptor (F-3 private domain). Routes through TUN so
+            // DNS queries to this IP are caught by spawn_tx_with_dns in the pump.
+            val magicDnsIp = "fd00:a11a::53"
+
+            val builder = Builder()
                 .setSession("Ankayma")
-                .addAddress(overlayIp, 32)
-                .addRoute("10.0.0.0", 8)   // route all overlay-space traffic
                 .setMtu(1420)
                 .setBlocking(false)
-                .establish() ?: run {
+
+            if (isV6) {
+                // IPv6 overlay: /128 host address for this device.
+                builder.addAddress(overlayIp, 128)
+                // Add /128 routes for each peer's overlay IP so their traffic goes
+                // through the TUN to the WireGuard pump. [T:A.1.9]
+                val peers = obj.optJSONArray("peers")
+                if (peers != null) {
+                    for (i in 0 until peers.length()) {
+                        val peerIp = peers.getJSONObject(i).optString("overlay_ip", "")
+                        if (peerIp.isNotEmpty()) builder.addRoute(peerIp, 128)
+                    }
+                }
+                // Route the magic DNS IP so DNS queries to it enter the TUN.
+                builder.addRoute(magicDnsIp, 128)
+            } else {
+                // IPv4 overlay (legacy; current control plane issues IPv6).
+                builder.addAddress(overlayIp, 32)
+                builder.addRoute("10.0.0.0", 8)
+            }
+
+            // F-3 DNS: primary = in-process interceptor (answers *.int.ankayma.com),
+            // secondary = 8.8.8.8 (fallback for non-Ankayma domains via SERVFAIL).
+            builder.addDnsServer(InetAddress.getByName(magicDnsIp))
+            builder.addDnsServer(InetAddress.getByName("8.8.8.8"))
+
+            val pfd = builder.establish() ?: run {
                     // VPN permission not yet granted — establish() returns null.
                     stopSelf()
                     return START_NOT_STICKY

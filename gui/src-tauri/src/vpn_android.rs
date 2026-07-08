@@ -31,6 +31,12 @@ struct VpnHandle {
     _peers: pump::Peers,
 }
 
+#[derive(serde::Deserialize, Default)]
+struct DnsRecord {
+    fqdn: String,
+    overlay_ip: String,
+}
+
 #[derive(serde::Deserialize)]
 struct Config {
     private_key_b64: String,
@@ -39,6 +45,9 @@ struct Config {
     listen_port: u16,
     #[serde(default)]
     peers: Vec<PeerInfo>,
+    /// F-3 DNS records: fqdn → overlay IP. Populated by vpn_connect from my_access.
+    #[serde(default)]
+    dns_records: Vec<DnsRecord>,
 }
 
 fn default_port() -> u16 {
@@ -77,7 +86,30 @@ fn start_tunnel(
 
     pump::add_tunn_peers(&peers, &index, &static_private, self_overlay, &cfg.peers, &udp);
 
-    pump::spawn_tx(tun_fd, udp.clone(), peers.clone());
+    // F-3: build DNS intercept table from config's dns_records (fqdn → overlay IpAddr).
+    // Magic DNS IP is fd00:a11a::53 — a reserved Ankayma ULA address the VPN builder
+    // routes through the TUN so DNS queries hit this in-process interceptor.
+    let dns_interceptor = {
+        use std::collections::HashMap;
+        use std::net::IpAddr;
+        let table: HashMap<String, IpAddr> = cfg
+            .dns_records
+            .iter()
+            .filter_map(|r| {
+                let ip: IpAddr = r.overlay_ip.parse().ok()?;
+                Some((r.fqdn.to_ascii_lowercase(), ip))
+            })
+            .collect();
+        if table.is_empty() {
+            None
+        } else {
+            let magic: std::net::Ipv6Addr = "fd00:a11a::53".parse().unwrap();
+            log::info!("DNS intercept: {} private records, magic IP {magic}", table.len());
+            Some(pump::DnsInterceptor { magic_ip: magic, table })
+        }
+    };
+
+    pump::spawn_tx_with_dns(tun_fd, udp.clone(), peers.clone(), dns_interceptor);
     pump::spawn_rx(tun_fd, udp.clone(), peers.clone());
     pump::spawn_timers(udp.clone(), peers.clone());
 
