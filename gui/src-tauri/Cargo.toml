@@ -59,3 +59,8 @@ smappservice-rs = "0.1.3"
 
 [target.'cfg(target_os = "android")'.dependencies]
 jni = { version = "0.21", default-features = false }
+
+# In-app SSH terminal: PTY support for macOS/Linux/Windows (no mobile).
+# portable-pty wraps ConPTY (Windows) and POSIX openpty (macOS/Linux).
+[target.'cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))'.dependencies]
+portable-pty = "0.8"

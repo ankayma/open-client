@@ -1,5 +1,6 @@
 <script lang="ts">
-  import { myAccess, openSubdomain, openSsh } from "$lib/tauri";
+  import { myAccess, openSubdomain } from "$lib/tauri";
+  import { goto } from "$app/navigation";
   import type { MyAccess, AccessService } from "$lib/types";
   import { connection, auth } from "$lib/stores";
   import ConnectionCard from "$lib/components/ConnectionCard.svelte";
@@ -90,7 +91,10 @@
                 <span class="label">{svc.label}</span>
                 {#if svc.status !== "denied"}
                   <div class="card-actions">
-                    <button class="btn-secondary ssh-btn" onclick={() => openSsh(svc.node_id, svc.node)} title="SSH into this node">SSH</button>
+                    <button class="btn-secondary ssh-btn" onclick={() => {
+                      const params = new URLSearchParams({ nodeId: svc.node_id, nodeHostname: svc.node });
+                      goto(`/terminal?${params}`);
+                    }} title="SSH into this node">SSH</button>
                     <button class="btn-primary" onclick={() => openSubdomain(svc.fqdn)}>Open ↗</button>
                   </div>
                 {/if}

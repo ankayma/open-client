@@ -199,6 +199,28 @@ export async function openSsh(nodeId: string, nodeHostname?: string, login?: str
   return invoke("open_ssh", { nodeId, nodeHostname, login });
 }
 
+// In-app SSH terminal (xterm.js + Tauri PTY). Use sshTerminalStart to open a
+// session, then sshTerminalInput/Resize to interact, sshTerminalClose to end.
+// Listen for "ssh-data" (string payload) and "ssh-exit" (void) Tauri events.
+export async function sshTerminalStart(
+  nodeId: string,
+  nodeHostname: string | undefined,
+  login: string | undefined,
+  rows: number,
+  cols: number,
+): Promise<void> {
+  return invoke("ssh_terminal_start", { nodeId, nodeHostname, login, rows, cols });
+}
+export async function sshTerminalInput(data: string): Promise<void> {
+  return invoke("ssh_terminal_input", { data });
+}
+export async function sshTerminalResize(rows: number, cols: number): Promise<void> {
+  return invoke("ssh_terminal_resize", { rows, cols });
+}
+export async function sshTerminalClose(): Promise<void> {
+  return invoke("ssh_terminal_close");
+}
+
 // Auto-TLS (Slice 3) issuance-state poll — fallback to the cert_issued SSE push.
 export async function getSubdomainCert(fqdn: string): Promise<SubdomainCert> {
   return invoke<SubdomainCert>("get_subdomain_cert", { fqdn });

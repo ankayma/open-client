@@ -13,12 +13,25 @@
 // from the same AppState the window uses. All tray code is #[cfg(desktop)] so
 // mobile (iOS/Android) is unaffected. [T:A.3.1]
 
+use std::io::Read;
 use std::sync::Mutex;
 
 use agent_core::domain::EnrollRequest;
 use agent_core::{adapters, domain, reqwest, WgKeypair};
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager, State};
+
+/// In-app SSH terminal session (desktop only). Holds the PTY writer so
+/// `ssh_terminal_input` can write keystrokes, and the PTY master so
+/// `ssh_terminal_resize` can resize the virtual terminal. [T:portable-pty]
+#[cfg(desktop)]
+struct SshTermSession {
+    writer: Mutex<Box<dyn std::io::Write + Send>>,
+    master: Mutex<Box<dyn portable_pty::MasterPty + Send>>,
+}
+// SAFETY: portable-pty's master types are Send; Mutex provides the Sync.
+#[cfg(desktop)]
+unsafe impl Sync for SshTermSession {}
 
 // VPN bridge for iOS and Android. iOS uses Swift C ABI; Android uses JNI. [T:A.1.9]
 mod vpn;
@@ -75,6 +88,10 @@ struct AppState {
     /// A held `ankayma://join?token=…` node-enrollment invite. Same lifecycle as
     /// `pending_join_team`: drained only once authenticated.
     pending_join_node: Mutex<Option<String>>,
+    /// Active in-app SSH terminal session (desktop only). Replaced on each new
+    /// SSH connection; previous session's reader thread exits when the child exits.
+    #[cfg(desktop)]
+    ssh_session: Mutex<Option<SshTermSession>>,
 }
 
 impl AppState {
@@ -92,6 +109,8 @@ impl AppState {
             pending_token: Mutex::new(None),
             pending_join_team: Mutex::new(None),
             pending_join_node: Mutex::new(None),
+            #[cfg(desktop)]
+            ssh_session: Mutex::new(None),
         }
     }
 
@@ -1455,6 +1474,156 @@ async fn open_ssh(
     Ok(())
 }
 
+// ── In-app SSH terminal ────────────────────────────────────────────────────────
+//
+// Start an SSH session inside the Tauri webview: spawn `ssh login@overlay_ip`
+// in a local PTY (portable-pty / ConPTY on Windows, openpty on Unix), emit PTY
+// output as `ssh-data` events to the xterm.js frontend, and accept keystrokes
+// back via `ssh_terminal_input`. [T:portable-pty; T:Part C §H.3.6.1 F-2]
+
+/// Start an SSH session into a mesh node. Resolves the overlay IP via the
+/// control-plane SSH session endpoint (same as `open_ssh`), then opens a PTY
+/// and spawns `ssh` inside it. PTY output is streamed to the frontend via
+/// Tauri events named `ssh-data`; process exit is signalled via `ssh-exit`.
+/// Calling this a second time replaces the previous session.
+/// On non-desktop platforms (iOS/Android) returns an error — no PTY available.
+#[tauri::command]
+#[allow(unused_variables)]
+async fn ssh_terminal_start(
+    state: State<'_, AppState>,
+    app: AppHandle,
+    node_id: String,
+    node_hostname: Option<String>,
+    login: Option<String>,
+    rows: u16,
+    cols: u16,
+) -> Result<(), String> {
+    #[cfg(desktop)]
+    {
+        let tok = state.token().ok_or("not signed in")?;
+        let resolved_id = if !node_id.is_empty() {
+            node_id
+        } else if let Some(ref hostname) = node_hostname {
+            let nodes = adapters::list_nodes(&state.http, &state.base_url, &tok)
+                .await
+                .map_err(|e| e.to_string())?;
+            nodes
+                .into_iter()
+                .find(|n| &n.hostname == hostname)
+                .ok_or_else(|| format!("node not found: {hostname}"))?
+                .node_id
+        } else {
+            return Err("node_id missing".into());
+        };
+        let req = domain::SshSessionRequest { node_id: resolved_id, login };
+        let resp = adapters::open_ssh_session(&state.http, &state.base_url, &tok, &req)
+            .await
+            .map_err(|e| e.to_string())?;
+        let login_part = resp.login.as_deref().unwrap_or("root");
+        // IPv6 addresses must be wrapped in brackets for the ssh host argument.
+        let host_arg = if resp.overlay_ip.contains(':') {
+            format!("[{}]", resp.overlay_ip)
+        } else {
+            resp.overlay_ip.clone()
+        };
+        let target = format!("{login_part}@{host_arg}");
+
+        use portable_pty::{native_pty_system, CommandBuilder, PtySize};
+        let pty_sys = native_pty_system();
+        let pair = pty_sys
+            .openpty(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 })
+            .map_err(|e| format!("openpty: {e}"))?;
+
+        let mut cmd = CommandBuilder::new("ssh");
+        cmd.args(["-o", "StrictHostKeyChecking=no", "-o", "BatchMode=no", &target]);
+        pair.slave
+            .spawn_command(cmd)
+            .map_err(|e| format!("spawn ssh: {e}"))?;
+
+        let mut reader = pair
+            .master
+            .try_clone_reader()
+            .map_err(|e| format!("pty reader: {e}"))?;
+        let writer = pair.master.take_writer().map_err(|e| format!("pty writer: {e}"))?;
+
+        // Reader thread: forward PTY output as Tauri events to xterm.js.
+        let app2 = app.clone();
+        std::thread::spawn(move || {
+            let mut buf = [0u8; 4096];
+            loop {
+                match reader.read(&mut buf) {
+                    Ok(0) | Err(_) => {
+                        let _ = app2.emit("ssh-exit", ());
+                        break;
+                    }
+                    Ok(n) => {
+                        let s = String::from_utf8_lossy(&buf[..n]).into_owned();
+                        let _ = app2.emit("ssh-data", s);
+                    }
+                }
+            }
+        });
+
+        *state.ssh_session.lock().expect("ssh_session lock") = Some(SshTermSession {
+            writer: Mutex::new(writer),
+            master: Mutex::new(pair.master),
+        });
+        return Ok(());
+    }
+    #[cfg(not(desktop))]
+    Err("SSH terminal not available on this platform".into())
+}
+
+/// Write keystrokes from xterm.js to the active SSH PTY.
+#[tauri::command]
+#[allow(unused_variables)]
+fn ssh_terminal_input(state: State<'_, AppState>, data: String) -> Result<(), String> {
+    #[cfg(desktop)]
+    {
+        use std::io::Write;
+        let guard = state.ssh_session.lock().expect("ssh_session lock");
+        let sess = guard.as_ref().ok_or("no active SSH session")?;
+        return sess
+            .writer
+            .lock()
+            .expect("writer lock")
+            .write_all(data.as_bytes())
+            .map_err(|e| e.to_string());
+    }
+    #[cfg(not(desktop))]
+    Err("no active SSH session".into())
+}
+
+/// Resize the active SSH PTY (called when the xterm.js container resizes).
+#[tauri::command]
+#[allow(unused_variables)]
+fn ssh_terminal_resize(state: State<'_, AppState>, rows: u16, cols: u16) -> Result<(), String> {
+    #[cfg(desktop)]
+    {
+        use portable_pty::PtySize;
+        let guard = state.ssh_session.lock().expect("ssh_session lock");
+        let sess = guard.as_ref().ok_or("no active SSH session")?;
+        return sess
+            .master
+            .lock()
+            .expect("master lock")
+            .resize(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 })
+            .map_err(|e| e.to_string());
+    }
+    #[cfg(not(desktop))]
+    Err("no active SSH session".into())
+}
+
+/// Close the active SSH session (drop the PTY — the reader thread exits naturally).
+#[tauri::command]
+#[allow(unused_variables)]
+fn ssh_terminal_close(state: State<'_, AppState>) {
+    #[cfg(desktop)]
+    {
+        *state.ssh_session.lock().expect("ssh_session lock") = None;
+    }
+}
+
 // ── F1 team membership ────────────────────────────────────────────────────────
 
 #[tauri::command]
@@ -1959,6 +2128,10 @@ pub fn run() {
             delete_subdomain,
             open_subdomain,
             open_ssh,
+            ssh_terminal_start,
+            ssh_terminal_input,
+            ssh_terminal_resize,
+            ssh_terminal_close,
             get_subdomain_cert,
             list_members,
             invite_member,

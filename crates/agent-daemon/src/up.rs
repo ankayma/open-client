@@ -862,16 +862,16 @@ fn add_peer_route(name: &str, overlay: IpAddr) {
 }
 
 /// Windows: add a host route for each peer's overlay address into the Wintun
-/// adapter using `netsh`. A /32 (v4) or /128 (v6) beats any overlapping pool
-/// route another overlay (e.g. Tailscale's 100.64.0.0/10) might hold. `[A]`
+/// adapter using `netsh`. IPv4 uses `interface ip`, IPv6 uses `interface ipv6`
+/// (using `ip` for IPv6 addresses silently fails on Windows). `[T:netsh docs]`
 #[cfg(target_os = "windows")]
 fn add_peer_route(name: &str, overlay: IpAddr) {
-    let dst = match overlay {
-        IpAddr::V4(a) => format!("{a}/32"),
-        IpAddr::V6(a) => format!("{a}/128"),
+    let (sub, dst) = match overlay {
+        IpAddr::V4(a) => ("ip", format!("{a}/32")),
+        IpAddr::V6(a) => ("ipv6", format!("{a}/128")),
     };
     let result = Command::new("netsh")
-        .args(["interface", "ip", "add", "route", &dst, name])
+        .args(["interface", sub, "add", "route", &dst, name])
         .output()
         .and_then(|o| {
             if o.status.success() {
