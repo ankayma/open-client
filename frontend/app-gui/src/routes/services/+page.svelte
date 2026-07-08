@@ -90,7 +90,7 @@
                 <span class="label">{svc.label}</span>
                 {#if svc.status !== "denied"}
                   <div class="card-actions">
-                    <button class="btn-secondary ssh-btn" onclick={() => openSsh(svc.node_id)} title="SSH into this node">SSH</button>
+                    <button class="btn-secondary ssh-btn" onclick={() => openSsh(svc.node_id, svc.node)} title="SSH into this node">SSH</button>
                     <button class="btn-primary" onclick={() => openSubdomain(svc.fqdn)}>Open ↗</button>
                   </div>
                 {/if}

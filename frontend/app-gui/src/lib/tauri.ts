@@ -195,8 +195,8 @@ export async function openSubdomain(fqdn: string): Promise<void> {
   return invoke("open_subdomain", { fqdn });
 }
 
-export async function openSsh(nodeId: string, login?: string): Promise<void> {
-  return invoke("open_ssh", { nodeId, login });
+export async function openSsh(nodeId: string, nodeHostname?: string, login?: string): Promise<void> {
+  return invoke("open_ssh", { nodeId, nodeHostname, login });
 }
 
 // Auto-TLS (Slice 3) issuance-state poll — fallback to the cert_issued SSE push.

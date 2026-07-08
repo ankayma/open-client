@@ -1402,10 +1402,27 @@ async fn open_subdomain(fqdn: String) -> Result<(), String> {
 async fn open_ssh(
     state: State<'_, AppState>,
     node_id: String,
+    node_hostname: Option<String>,
     login: Option<String>,
 ) -> Result<(), String> {
     let tok = state.token().ok_or("not signed in")?;
-    let req = domain::SshSessionRequest { node_id, login };
+    // If node_id is empty (control-plane predates the node_id field in my-access),
+    // fall back to resolving it by hostname via the nodes endpoint.
+    let resolved_id = if !node_id.is_empty() {
+        node_id
+    } else if let Some(ref hostname) = node_hostname {
+        let nodes = adapters::list_nodes(&state.http, &state.base_url, &tok)
+            .await
+            .map_err(|e| e.to_string())?;
+        nodes
+            .into_iter()
+            .find(|n| &n.hostname == hostname)
+            .ok_or_else(|| format!("node not found: {hostname}"))?
+            .node_id
+    } else {
+        return Err("node_id missing — reconnect to refresh the service list".into());
+    };
+    let req = domain::SshSessionRequest { node_id: resolved_id, login };
     let resp = adapters::open_ssh_session(&state.http, &state.base_url, &tok, &req)
         .await
         .map_err(|e| e.to_string())?;
