@@ -584,6 +584,16 @@ async fn get_quota(state: State<'_, AppState>) -> Result<Quota, String> {
 // --- Mesh enrollment (real control-plane half of connect) ---
 
 fn device_hostname() -> String {
+    // Android: use Build.MODEL via JNI for a user-friendly name (e.g. "moto g14").
+    // gethostname() on Android typically returns "localhost", and $HOSTNAME is unset.
+    #[cfg(target_os = "android")]
+    if let Some(name) = vpn_android::android_device_name() {
+        let name = name.trim().to_string();
+        if !name.is_empty() {
+            return name;
+        }
+    }
+
     // $HOSTNAME is set by shells on Linux but NOT by macOS launchd/GUI apps.
     // COMPUTERNAME is the reliable env var on Windows (set by the OS, not the shell).
     #[cfg(windows)]

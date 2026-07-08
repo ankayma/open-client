@@ -209,6 +209,24 @@ pub fn start_service(config_json: &str) -> Result<(), String> {
     })
 }
 
+/// Get the Android device model name (e.g. "moto g14") via Build.MODEL.
+/// Returns None if JVM not yet initialized or JNI fails.
+pub fn android_device_name() -> Option<String> {
+    with_jni(|env, _ctx| {
+        let model_obj = env
+            .get_static_field("android/os/Build", "MODEL", "Ljava/lang/String;")
+            .map_err(|e| e.to_string())?
+            .l()
+            .map_err(|e| e.to_string())?;
+        let model: String = env
+            .get_string(&JString::from(model_obj))
+            .map_err(|e| e.to_string())?
+            .into();
+        Ok(model)
+    })
+    .ok()
+}
+
 /// Open a URL in the system browser via Android's ACTION_VIEW intent.
 pub fn open_url(url: &str) -> Result<(), String> {
     let url_owned = url.to_string();

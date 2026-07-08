@@ -326,8 +326,16 @@ pub struct AccessService {
     pub fqdn: String,
     pub label: String,
     pub node: String,
+    /// Node database ID — used for SSH. Default empty if API predates this field.
+    #[serde(default)]
     pub node_id: String,
     pub rule_ref: String,
+    /// Access policy tags — optional, not all API versions return them.
+    #[serde(default)]
+    pub tags: Vec<String>,
+    /// "denied" if policy blocks this service.
+    #[serde(default)]
+    pub status: String,
 }
 
 /// `GET /api/v1/my-access` envelope — what the caller may reach (addendum §D).

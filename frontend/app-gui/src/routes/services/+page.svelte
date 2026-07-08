@@ -1,8 +1,7 @@
 <script lang="ts">
-  import { onMount } from "svelte";
   import { myAccess, openSubdomain, openSsh } from "$lib/tauri";
   import type { MyAccess, AccessService } from "$lib/types";
-  import { connection } from "$lib/stores";
+  import { connection, auth } from "$lib/stores";
   import ConnectionCard from "$lib/components/ConnectionCard.svelte";
   import PathChain from "$lib/components/PathChain.svelte";
 
@@ -10,22 +9,34 @@
   // active PolicyBlock. Admin sees all (allow-within-owner); members see what policy
   // grants. The rule_ref shows WHY each is granted.
   let data = $state<MyAccess | null>(null);
-  let loading = $state(true);
+  let loading = $state(false);
   let error = $state("");
   let pathChainSvc = $state<AccessService | null>(null);
 
-  onMount(load);
   async function load() {
     loading = true;
     error = "";
     try {
       data = await myAccess();
     } catch (e: unknown) {
-      error = e instanceof Error ? e.message : "Failed to load services";
+      // Show real error string (Tauri returns string, not Error object on mobile)
+      error = e instanceof Error ? e.message : String(e);
     } finally {
       loading = false;
     }
   }
+
+  // Don't use onMount — it fires before the layout's check_auth_state adopts the
+  // deep-link token (Svelte mounts children before parents). Load once auth is
+  // confirmed; also reload if the user re-authenticates.
+  let lastAuthStatus = $state("");
+  $effect(() => {
+    const status = $auth.status;
+    if (status === "authenticated" && status !== lastAuthStatus) {
+      lastAuthStatus = status;
+      load();
+    }
+  });
 </script>
 
 <main>
