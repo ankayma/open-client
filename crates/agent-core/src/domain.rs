@@ -326,6 +326,7 @@ pub struct AccessService {
     pub fqdn: String,
     pub label: String,
     pub node: String,
+    pub node_id: String,
     pub rule_ref: String,
 }
 

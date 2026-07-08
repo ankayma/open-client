@@ -132,9 +132,8 @@ export interface AccessService {
   fqdn: string;
   label: string;
   node: string;
+  node_id: string;
   rule_ref: string;
-  // TODO[A]: my_access doesn't return these yet — UI hides them until the
-  // command grows the field. tags/status mirror the mockup's pill/dot states.
   tags?: string[];
   status?: "online" | "offline" | "denied";
 }

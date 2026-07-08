@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { myAccess, openSubdomain } from "$lib/tauri";
+  import { myAccess, openSubdomain, openSsh } from "$lib/tauri";
   import type { MyAccess, AccessService } from "$lib/types";
   import { connection } from "$lib/stores";
   import ConnectionCard from "$lib/components/ConnectionCard.svelte";
@@ -78,7 +78,10 @@
               <div class="card-head">
                 <span class="label">{svc.label}</span>
                 {#if svc.status !== "denied"}
-                  <button class="btn-primary" onclick={() => openSubdomain(svc.fqdn)}>Open ↗</button>
+                  <div class="card-actions">
+                    <button class="btn-secondary ssh-btn" onclick={() => openSsh(svc.node_id)} title="SSH into this node">SSH</button>
+                    <button class="btn-primary" onclick={() => openSubdomain(svc.fqdn)}>Open ↗</button>
+                  </div>
                 {/if}
               </div>
               <code class="fqdn">{svc.fqdn}</code>
@@ -261,5 +264,16 @@
   .chain-btn {
     font-size: 12px;
     padding: 5px 10px;
+  }
+  .card-actions {
+    display: flex;
+    gap: 6px;
+    align-items: center;
+  }
+  .ssh-btn {
+    font-size: 12px;
+    padding: 5px 10px;
+    font-family: "SF Mono", "Fira Code", monospace;
+    font-weight: 600;
   }
 </style>

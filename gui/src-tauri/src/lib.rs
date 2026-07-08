@@ -20,9 +20,10 @@ use agent_core::{adapters, domain, reqwest, WgKeypair};
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager, State};
 
-// VPN bridge for iOS (frontend → Swift TunnelManager via a C ABI). Compiled on all
-// platforms; the iOS-only path is gated inside. [T:A.1.9]
+// VPN bridge for iOS and Android. iOS uses Swift C ABI; Android uses JNI. [T:A.1.9]
 mod vpn;
+#[cfg(target_os = "android")]
+pub mod vpn_android;
 
 /// Target OS this build runs on ("ios"/"macos"/"linux"/"windows"). The frontend uses
 /// it to pick the data-plane path: iOS brings the tunnel up in-app (Packet Tunnel
@@ -272,13 +273,12 @@ fn current_connection(state: &AppState) -> ConnectionState {
     }
 }
 
-/// Reuse the persisted identity from the handoff file (~/.ankayma/agent.json) —
+/// Reuse the persisted identity from the handoff file (ankayma data dir / agent.json) —
 /// the SAME node the daemon uses — but only if it still exists server-side, so a
 /// GUI restart/reconnect doesn't enroll a duplicate node. Returns None when there
 /// is no valid file or the stored node was removed (→ caller enrolls fresh).
 async fn load_handoff_node(state: &AppState, tok: &str) -> Option<EnrolledNode> {
-    let home = std::env::var("HOME").ok()?;
-    let path = std::path::Path::new(&home).join(".ankayma/agent.json");
+    let path = ankayma_state_dir()?.join("agent.json");
     let bytes = std::fs::read(&path).ok()?;
     #[derive(serde::Deserialize)]
     struct Stored {
@@ -431,7 +431,11 @@ fn open_url(url: &str) -> Result<(), String> {
     {
         vpn::open_external_url(url)
     }
-    #[cfg(not(target_os = "ios"))]
+    #[cfg(target_os = "android")]
+    {
+        vpn_android::open_url(url)
+    }
+    #[cfg(not(any(target_os = "ios", target_os = "android")))]
     {
         open::that(url).map_err(|e| format!("could not open browser: {e}"))
     }
@@ -581,7 +585,14 @@ async fn get_quota(state: State<'_, AppState>) -> Result<Quota, String> {
 
 fn device_hostname() -> String {
     // $HOSTNAME is set by shells on Linux but NOT by macOS launchd/GUI apps.
-    // Fall back to gethostname(2) which works on macOS, Linux, and iOS sandbox.
+    // COMPUTERNAME is the reliable env var on Windows (set by the OS, not the shell).
+    #[cfg(windows)]
+    if let Ok(h) = std::env::var("COMPUTERNAME") {
+        let h = h.trim().to_string();
+        if !h.is_empty() {
+            return h;
+        }
+    }
     if let Ok(h) = std::env::var("HOSTNAME") {
         let h = h.trim().to_string();
         if !h.is_empty() && h != "localhost" {
@@ -603,6 +614,28 @@ fn device_hostname() -> String {
         }
     }
     "ankayma-desktop".to_string()
+}
+
+/// Platform-aware ankayma data directory.
+///
+/// macOS/Linux: `$HOME/.ankayma`
+/// Windows: `%APPDATA%\ankayma`
+///
+/// This must match the path the privileged helper / Windows service passes to
+/// `agent up --state` so the GUI and daemon share the same identity file.
+fn ankayma_state_dir() -> Option<std::path::PathBuf> {
+    #[cfg(windows)]
+    {
+        std::env::var("APPDATA")
+            .ok()
+            .map(|p| std::path::PathBuf::from(p).join("ankayma"))
+    }
+    #[cfg(not(windows))]
+    {
+        std::env::var("HOME")
+            .ok()
+            .map(|p| std::path::PathBuf::from(p).join(".ankayma"))
+    }
 }
 
 #[tauri::command]
@@ -791,18 +824,19 @@ async fn join_enroll_node(
 
 const DATAPLANE_LISTEN_PORT: u16 = 51820; // WireGuard default; matches agent-daemon
 
-/// Persist the enrolled identity to `~/.ankayma/agent.json` — the same file the
-/// privileged `agent` daemon reads on `agent up`, so it reuses THIS node instead
-/// of enrolling a second one. Shape mirrors `agent-daemon::up::AgentState`.
+/// Persist the enrolled identity to the ankayma data directory — the same file
+/// the privileged daemon reads on `agent up`, so it reuses THIS node instead of
+/// enrolling a second one. Shape mirrors `agent-daemon::up::AgentState`.
+///
+/// Platform paths: `~/.ankayma/agent.json` (Unix), `%APPDATA%\ankayma\agent.json` (Windows).
 fn write_handoff_state(
     private_b64: &str,
     public_b64: &str,
     node_id: &str,
     overlay_ip: &str,
 ) -> Result<(), String> {
-    let home = std::env::var("HOME").map_err(|_| "HOME not set".to_string())?;
-    let dir = std::path::Path::new(&home).join(".ankayma");
-    std::fs::create_dir_all(&dir).map_err(|e| format!("mkdir ~/.ankayma: {e}"))?;
+    let dir = ankayma_state_dir().ok_or("cannot determine ankayma data directory")?;
+    std::fs::create_dir_all(&dir).map_err(|e| format!("mkdir {}: {e}", dir.display()))?;
     let state = serde_json::json!({
         "private_b64": private_b64,
         "public_b64": public_b64,
@@ -811,31 +845,183 @@ fn write_handoff_state(
         "listen_port": DATAPLANE_LISTEN_PORT,
     });
     let bytes = serde_json::to_vec_pretty(&state).map_err(|e| e.to_string())?;
-    std::fs::write(dir.join("agent.json"), bytes).map_err(|e| format!("write agent.json: {e}"))
+    std::fs::write(dir.join("agent.json"), bytes)
+        .map_err(|e| format!("write agent.json: {e}"))
 }
 
 /// Locate the `agent` daemon binary — next to this app (bundled) or a dev build.
 fn locate_agent_binary() -> Result<std::path::PathBuf, String> {
+    // On Windows the binary is `agent.exe`; on Unix it has no extension.
+    #[cfg(windows)]
+    let names = ["agent.exe", "agent"];
+    #[cfg(not(windows))]
+    let names = ["agent"];
+
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
-            let sib = dir.join("agent");
-            if sib.exists() {
-                return Ok(sib);
+            for name in names {
+                let sib = dir.join(name);
+                if sib.exists() {
+                    return Ok(sib);
+                }
             }
         }
     }
-    for p in [
+    #[cfg(windows)]
+    let dev_paths = [
+        "target\\debug\\agent.exe",
+        "target\\release\\agent.exe",
+        "..\\..\\target\\debug\\agent.exe",
+        "..\\..\\target\\release\\agent.exe",
+    ];
+    #[cfg(not(windows))]
+    let dev_paths = [
         "target/debug/agent",
         "target/release/agent",
         "../../target/debug/agent",
         "../../target/release/agent",
-    ] {
+    ];
+    for p in dev_paths {
         let pb = std::path::PathBuf::from(p);
         if pb.exists() {
             return Ok(pb.canonicalize().unwrap_or(pb));
         }
     }
     Err("agent daemon binary not found (looked next to the app and in target/)".into())
+}
+
+/// Windows Service IPC — analogous to the macOS helper_ipc below.
+///
+/// Opens `\\.\pipe\com.ankayma.helper` (named pipe created by the Windows
+/// Service running as LocalSystem). Retries on ERROR_FILE_NOT_FOUND (service
+/// not yet running) and ERROR_PIPE_BUSY (another client connected). No external
+/// crate needed: named pipes support standard `File::read`/`File::write`. `[A]`
+#[cfg(target_os = "windows")]
+mod helper_ipc {
+    use std::io::{BufRead, BufReader, Write};
+    use std::time::Duration;
+
+    const PIPE_PATH: &str = r"\\.\pipe\com.ankayma.helper";
+    const SERVICE_NAME: &str = "AnkaymaHelper";
+
+    #[derive(serde::Serialize)]
+    #[serde(tag = "command", rename_all = "lowercase")]
+    enum Request<'a> {
+        Start {
+            agent_bin: &'a str,
+            token: &'a str,
+            control_plane: &'a str,
+            /// User's ankayma data dir (`%APPDATA%\ankayma`), passed to the service
+            /// so the daemon writes its state there, not into LocalSystem's home.
+            home: &'a str,
+        },
+        Stop {
+            home: &'a str,
+        },
+    }
+
+    #[derive(serde::Deserialize)]
+    struct Response {
+        ok: bool,
+        error: Option<String>,
+    }
+
+    /// Ensure the Windows Service is running. The installer sets it AutoStart, so
+    /// this is only needed if the service stopped unexpectedly (e.g. first boot
+    /// race). `sc.exe start` is a no-op if already running. `[A verified-on-windows]`
+    pub fn ensure_service_running() -> Result<(), String> {
+        // Attempt to start; ignore errors (service may already be running).
+        let _ = std::process::Command::new("sc.exe")
+            .args(["start", SERVICE_NAME])
+            .status();
+        Ok(())
+    }
+
+    fn send(req: &Request) -> Result<(), String> {
+        let mut last_err = String::new();
+        // Retry loop: handles service not-yet-bound (ERROR_FILE_NOT_FOUND) and
+        // pipe-busy (ERROR_PIPE_BUSY = another client is being served). No
+        // WaitNamedPipeW call needed — sleep + retry is sufficient for our cadence
+        // (user clicks Connect/Disconnect once per session). `[A]`
+        for _ in 0..15 {
+            match try_send(req) {
+                Ok(()) => return Ok(()),
+                Err(e) => {
+                    last_err = e;
+                    std::thread::sleep(Duration::from_millis(200));
+                }
+            }
+        }
+        Err(format!("connect to Ankayma helper service: {last_err}"))
+    }
+
+    fn try_send(req: &Request) -> Result<(), String> {
+        // `std::fs::File::open` calls `CreateFileW` internally; named pipes support
+        // this for the client side in byte-stream mode. `[T:MSDN CreateFile#Named-Pipes]`
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(PIPE_PATH)
+            .map_err(|e| format!("open pipe: {e}"))?;
+
+        let body = serde_json::to_string(req).map_err(|e| e.to_string())?;
+        let mut writer = std::io::BufWriter::new(&file);
+        writeln!(writer, "{body}").map_err(|e| format!("write pipe: {e}"))?;
+        writer.flush().map_err(|e| format!("flush pipe: {e}"))?;
+        drop(writer);
+
+        let mut line = String::new();
+        BufReader::new(&file)
+            .read_line(&mut line)
+            .map_err(|e| format!("read pipe: {e}"))?;
+
+        let resp: Response =
+            serde_json::from_str(line.trim()).map_err(|e| format!("bad helper response: {e}"))?;
+        if resp.ok {
+            Ok(())
+        } else {
+            Err(resp.error.unwrap_or_else(|| "helper reported failure".into()))
+        }
+    }
+
+    pub fn start(
+        agent_bin: &str,
+        token: &str,
+        control_plane: &str,
+        home: &str,
+    ) -> Result<(), String> {
+        send(&Request::Start { agent_bin, token, control_plane, home })
+    }
+
+    pub fn stop(home: &str) -> Result<(), String> {
+        send(&Request::Stop { home })
+    }
+}
+
+/// Windows: launch the privileged agent via the `AnkaymaHelper` Windows Service.
+/// The service runs as LocalSystem and manages the agent process lifecycle.
+/// First call ensures the service is running; subsequent calls are instant.
+#[cfg(target_os = "windows")]
+fn bring_up_dataplane(
+    agent_bin: &std::path::Path,
+    token: &str,
+    control_plane: &str,
+) -> Result<(), String> {
+    helper_ipc::ensure_service_running()?;
+    let home = ankayma_state_dir()
+        .ok_or("cannot determine ankayma data directory (APPDATA not set)")?
+        .to_string_lossy()
+        .into_owned();
+    helper_ipc::start(&agent_bin.to_string_lossy(), token, control_plane, &home)
+}
+
+/// Windows: stop the agent daemon via the helper service.
+#[cfg(target_os = "windows")]
+fn stop_dataplane_inner() -> Result<(), String> {
+    let home = ankayma_state_dir()
+        .map(|d| d.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    helper_ipc::stop(&home)
 }
 
 /// Root-owned LaunchDaemon IPC (A.1.7 gap 1). Replaces the earlier osascript
@@ -972,9 +1158,9 @@ fn bring_up_dataplane(
     helper_ipc::start(&agent_bin.to_string_lossy(), token, control_plane, &home)
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
 fn bring_up_dataplane(_b: &std::path::Path, _t: &str, _c: &str) -> Result<(), String> {
-    Err("data plane is macOS-only at milestone 1.2".into())
+    Err("data plane requires macOS or Windows".into())
 }
 
 /// Hand the enrolled identity to the privileged daemon so a real WireGuard tunnel
@@ -1000,9 +1186,9 @@ fn stop_dataplane_inner() -> Result<(), String> {
     helper_ipc::stop(&home)
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
 fn stop_dataplane_inner() -> Result<(), String> {
-    Err("data plane is macOS-only".into())
+    Err("data plane requires macOS or Windows".into())
 }
 
 #[tauri::command]
@@ -1037,8 +1223,10 @@ async fn get_dataplane_status() -> Result<DataplaneStatus, String> {
         age_secs: None,
         peers: vec![],
     };
-    let home = std::env::var("HOME").map_err(|_| "HOME not set".to_string())?;
-    let path = std::path::Path::new(&home).join(".ankayma/agent-status.json");
+    let Some(dir) = ankayma_state_dir() else {
+        return Ok(down());
+    };
+    let path = dir.join("agent-status.json");
     let Ok(bytes) = std::fs::read(&path) else {
         return Ok(down());
     };
@@ -1195,6 +1383,49 @@ async fn delete_subdomain(label: String, state: State<'_, AppState>) -> Result<(
 #[tauri::command]
 async fn open_subdomain(fqdn: String) -> Result<(), String> {
     open_url(&format!("https://{fqdn}"))
+}
+
+/// Open an SSH session to a mesh node. Posts to the control plane to resolve
+/// the overlay IP + anchor an audit event, then spawns `ssh login@overlay_ip`
+/// in the system terminal. [T:Part C §H.3.6.1 F-2 + A.1.3 + A.1.8]
+#[tauri::command]
+async fn open_ssh(
+    state: State<'_, AppState>,
+    node_id: String,
+    login: Option<String>,
+) -> Result<(), String> {
+    let tok = state.token().ok_or("not signed in")?;
+    let req = domain::SshSessionRequest { node_id, login };
+    let resp = adapters::open_ssh_session(&state.http, &state.base_url, &tok, &req)
+        .await
+        .map_err(|e| e.to_string())?;
+    let login_part = resp.login.as_deref().unwrap_or("root");
+    let target = format!("{}@{}", login_part, resp.overlay_ip);
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("osascript")
+            .args(["-e", &format!(
+                "tell application \"Terminal\" to do script \"ssh {}\"",
+                target.replace('"', "\\\"")
+            )])
+            .spawn()
+            .map_err(|e| format!("open Terminal: {e}"))?;
+    }
+    #[cfg(target_os = "windows")]
+    {
+        std::process::Command::new("cmd")
+            .args(["/C", "start", "cmd", "/K", &format!("ssh {target}")])
+            .spawn()
+            .map_err(|e| format!("open cmd: {e}"))?;
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        std::process::Command::new("sh")
+            .args(["-c", &format!("ssh {target}")])
+            .spawn()
+            .map_err(|e| format!("spawn ssh: {e}"))?;
+    }
+    Ok(())
 }
 
 // ── F1 team membership ────────────────────────────────────────────────────────
@@ -1700,6 +1931,7 @@ pub fn run() {
             create_subdomain,
             delete_subdomain,
             open_subdomain,
+            open_ssh,
             get_subdomain_cert,
             list_members,
             invite_member,
