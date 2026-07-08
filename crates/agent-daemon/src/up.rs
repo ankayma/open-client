@@ -142,12 +142,17 @@ pub(crate) async fn serve_dataplane(
         state.node_id, self_overlay, state.listen_port
     );
 
-    // utun up + addressing.
-    let dev = crate::tun::open().context("open utun device (needs root)")?;
+    // Tun device up + addressing.
+    let dev = crate::tun::open().context("open tun device (needs root/SYSTEM)")?;
     let dev_name = dev.name().to_string();
-    let fd = dev.raw_fd();
-    configure_interface(&dev_name, self_overlay).context("configure utun interface")?;
+    configure_interface(&dev_name, self_overlay).context("configure tun interface")?;
     println!("interface {dev_name} up, overlay {self_overlay} (per-peer host routes)");
+
+    // Pull the platform-specific tunnel handle before handing dev to `_dev`.
+    #[cfg(unix)]
+    let fd = dev.raw_fd();
+    #[cfg(target_os = "windows")]
+    let wintun_session = dev.session();
 
     // UDP socket the whole mesh shares.
     let udp = Arc::new(
@@ -168,15 +173,25 @@ pub(crate) async fn serve_dataplane(
         &dev_name,
     );
 
-    // Hold the device for the process lifetime; the threads use the raw fd.
+    // Hold the device for the process lifetime; pump threads access the fd/session.
     let _dev = dev;
 
     // [slice 2] Publish live status for the GUI (proves the data plane is up,
     // not just enrolled). Refreshed every roster cycle below = a heartbeat.
     write_status(&state.node_id, &state.overlay_ip, state.listen_port, &peers);
 
-    pump::spawn_tx(fd, udp.clone(), peers.clone());
-    pump::spawn_rx(fd, udp.clone(), peers.clone());
+    // Spawn platform-specific data-plane pump threads.
+    #[cfg(unix)]
+    {
+        pump::spawn_tx(fd, udp.clone(), peers.clone());
+        pump::spawn_rx(fd, udp.clone(), peers.clone());
+    }
+    // Windows: Wintun ring-buffer pump (no fd) — see agent_core::pump_wintun.
+    #[cfg(target_os = "windows")]
+    {
+        agent_core::pump_wintun::spawn_tx(wintun_session.clone(), udp.clone(), peers.clone());
+        agent_core::pump_wintun::spawn_rx(wintun_session, udp.clone(), peers.clone());
+    }
     pump::spawn_timers(udp.clone(), peers.clone());
 
     // [F-3] Private DNS for branded names while the overlay is up: resolve the
@@ -473,9 +488,39 @@ impl Config {
     }
 }
 
+/// Platform-aware data directory for the agent's state files.
+///
+/// Priority (highest first):
+///   1. `ANKAYMA_DATA_DIR` env var — set by the Windows service before spawning
+///      the agent so the agent writes into the USER's AppData, not LocalSystem's.
+///   2. `%APPDATA%\ankayma` on Windows (user-profile path for CLI / dev runs).
+///   3. `$HOME/.ankayma` on Unix.
+fn data_dir() -> String {
+    if let Ok(d) = std::env::var("ANKAYMA_DATA_DIR") {
+        if !d.is_empty() {
+            return d;
+        }
+    }
+    #[cfg(windows)]
+    {
+        std::env::var("APPDATA")
+            .map(|p| format!("{p}\\ankayma"))
+            .unwrap_or_else(|_| ".".into())
+    }
+    #[cfg(not(windows))]
+    {
+        std::env::var("HOME")
+            .map(|h| format!("{h}/.ankayma"))
+            .unwrap_or_else(|_| ".".into())
+    }
+}
+
 fn default_state_path() -> String {
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
-    format!("{home}/.ankayma/agent.json")
+    let d = data_dir();
+    #[cfg(windows)]
+    { format!("{d}\\agent.json") }
+    #[cfg(not(windows))]
+    { format!("{d}/agent.json") }
 }
 
 // [slice 2] Live data-plane status, published for the GUI to read. The GUI runs
@@ -483,8 +528,11 @@ fn default_state_path() -> String {
 // the daemon is actually up (not just enrolled) + the current peer roster.
 // Connection-level only (hostname/overlay/endpoint) — never payload [T:A.1.1].
 fn status_path() -> String {
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
-    format!("{home}/.ankayma/agent-status.json")
+    let d = data_dir();
+    #[cfg(windows)]
+    { format!("{d}\\agent-status.json") }
+    #[cfg(not(windows))]
+    { format!("{d}/agent-status.json") }
 }
 
 #[derive(serde::Serialize)]
@@ -664,6 +712,17 @@ fn detect_lan_ip() -> Result<Ipv4Addr> {
 }
 
 fn hostname() -> String {
+    // Windows: COMPUTERNAME is the reliable env var (set by the OS, not the shell).
+    #[cfg(windows)]
+    {
+        if let Ok(h) = std::env::var("COMPUTERNAME") {
+            let h = h.trim().to_string();
+            if !h.is_empty() {
+                return h;
+            }
+        }
+        // Fallback via `hostname` command (available on all modern Windows).
+    }
     std::env::var("HOSTNAME")
         .ok()
         .filter(|h| !h.is_empty())
@@ -723,10 +782,43 @@ fn configure_interface(name: &str, overlay: IpAddr) -> Result<()> {
     Ok(())
 }
 
-#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+/// Windows: use `netsh` to assign the overlay address to the Wintun adapter.
+/// The adapter name is "Ankayma" (hardcoded in tun.rs). Requires SYSTEM/admin.
+/// `[A verified-on-windows]`
+#[cfg(target_os = "windows")]
+fn configure_interface(name: &str, overlay: IpAddr) -> Result<()> {
+    match overlay {
+        IpAddr::V4(v4) => {
+            // netsh interface ip set address "Ankayma" static <ip> 255.255.255.255
+            run_cmd(Command::new("netsh").args([
+                "interface",
+                "ip",
+                "set",
+                "address",
+                name,
+                "static",
+                &v4.to_string(),
+                "255.255.255.255",
+            ]))?;
+        }
+        IpAddr::V6(v6) => {
+            run_cmd(Command::new("netsh").args([
+                "interface",
+                "ipv6",
+                "add",
+                "address",
+                name,
+                &format!("{v6}/128"),
+            ]))?;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
 fn configure_interface(_name: &str, _overlay: IpAddr) -> Result<()> {
     Err(anyhow!(
-        "interface configuration is implemented for macOS + Linux [T:A.1.9]"
+        "interface configuration is implemented for macOS, Linux, and Windows [T:A.1.9]"
     ))
 }
 
@@ -769,12 +861,38 @@ fn add_peer_route(name: &str, overlay: IpAddr) {
     }
 }
 
-#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+/// Windows: add a host route for each peer's overlay address into the Wintun
+/// adapter using `netsh`. A /32 (v4) or /128 (v6) beats any overlapping pool
+/// route another overlay (e.g. Tailscale's 100.64.0.0/10) might hold. `[A]`
+#[cfg(target_os = "windows")]
+fn add_peer_route(name: &str, overlay: IpAddr) {
+    let dst = match overlay {
+        IpAddr::V4(a) => format!("{a}/32"),
+        IpAddr::V6(a) => format!("{a}/128"),
+    };
+    let result = Command::new("netsh")
+        .args(["interface", "ip", "add", "route", &dst, name])
+        .output()
+        .and_then(|o| {
+            if o.status.success() {
+                Ok(())
+            } else {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    String::from_utf8_lossy(&o.stderr).to_string(),
+                ))
+            }
+        });
+    if let Err(e) = result {
+        eprintln!("warning: could not route {dst} via {name}: {e}");
+    }
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
 fn add_peer_route(_name: &str, _overlay: IpAddr) {}
 
-// Only the macOS/Linux interface/route helpers above call this; gate it to match
-// so a build without those helpers doesn't flag it as dead code. [T:A.1.9]
-#[cfg(any(target_os = "macos", target_os = "linux"))]
+// macOS / Linux / Windows interface and route helpers call this.
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 fn run_cmd(cmd: &mut Command) -> Result<()> {
     let out = cmd.output().with_context(|| format!("run {cmd:?}"))?;
     if !out.status.success() {

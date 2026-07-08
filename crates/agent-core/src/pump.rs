@@ -33,8 +33,9 @@ pub const MTU: usize = 1420;
 pub struct PeerEntry {
     /// Connection-level peer metadata (hostname/overlay/key) — never payload.
     pub peer: DialablePeer,
-    endpoint: Mutex<Option<SocketAddr>>,
-    tunn: Mutex<Tunn>,
+    // pub(crate): accessed by pump_wintun (same crate, Windows-only pump).
+    pub(crate) endpoint: Mutex<Option<SocketAddr>>,
+    pub(crate) tunn: Mutex<Tunn>,
 }
 
 impl PeerEntry {
@@ -43,7 +44,8 @@ impl PeerEntry {
         *self.endpoint.lock().expect("endpoint lock")
     }
     /// Learn/refresh where this peer is reachable (handshake source / roaming).
-    fn set_endpoint(&self, ep: SocketAddr) {
+    /// pub(crate) so pump_wintun (Windows) can call it without duplicating the logic.
+    pub(crate) fn set_endpoint(&self, ep: SocketAddr) {
         *self.endpoint.lock().expect("endpoint lock") = Some(ep);
     }
 }
@@ -120,14 +122,16 @@ pub fn add_tunn_peers(
 
 /// Find the peer that owns an overlay destination (outgoing). Cheap linear scan —
 /// a personal mesh has a handful of peers.
-fn peer_by_overlay(peers: &Peers, dst: IpAddr) -> Option<Arc<PeerEntry>> {
+/// pub(crate): pump_wintun (Windows) uses this to route outbound packets.
+pub(crate) fn peer_by_overlay(peers: &Peers, dst: IpAddr) -> Option<Arc<PeerEntry>> {
     let g = peers.lock().expect("peers lock");
     g.iter().find(|p| p.peer.overlay_ip == dst).cloned()
 }
 
 /// Find the peer for a UDP source (incoming): exact endpoint first, then same-host
 /// (port may differ behind NAT), then the sole peer if there's only one.
-fn peer_by_source(peers: &Peers, src: SocketAddr) -> Option<Arc<PeerEntry>> {
+/// pub(crate): pump_wintun (Windows) uses this to demux inbound packets.
+pub(crate) fn peer_by_source(peers: &Peers, src: SocketAddr) -> Option<Arc<PeerEntry>> {
     let g = peers.lock().expect("peers lock");
     g.iter()
         .find(|p| p.endpoint() == Some(src))

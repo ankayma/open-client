@@ -66,8 +66,8 @@ mod imp {
     }
 }
 
-// Linux: IFF_NO_PI → read/write carry bare IP packets, no framing.
-#[cfg(target_os = "linux")]
+// Linux + Android: IFF_NO_PI / VpnService → bare IP packets, no framing.
+#[cfg(any(target_os = "linux", target_os = "android"))]
 mod imp {
     use std::io;
     use std::os::raw::c_void;
@@ -91,9 +91,9 @@ mod imp {
     }
 }
 
-// Windows/Android et al.: no tun fd plumbing yet — error at runtime, still compile
+// Windows et al.: no tun fd plumbing yet — error at runtime, still compile
 // (A.1.9). `[T:A.1.9]`
-#[cfg(not(any(target_os = "macos", target_os = "ios", target_os = "linux")))]
+#[cfg(not(any(target_os = "macos", target_os = "ios", target_os = "linux", target_os = "android")))]
 mod imp {
     use std::io;
 

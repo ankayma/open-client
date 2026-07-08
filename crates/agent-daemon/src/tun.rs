@@ -1,29 +1,55 @@
-//! tun — OS plumbing for the WireGuard data plane: a layer-3 utun device.
-//! OPEN, intensity **Critical** (platform `#[cfg]` + raw syscalls).
+//! tun — OS plumbing for the WireGuard data plane: a layer-3 tunnel device.
+//! OPEN, intensity **Critical** (platform `#[cfg]` + raw syscalls / Wintun API).
 //!
-//! macOS only for now (milestone-1.1 demo target). Other platforms compile to a
-//! stub that returns an error at runtime, so the daemon still builds on all 5
-//! targets (A.1.9). `[T:A.1.9]` Linux/Windows/iOS/Android utun adapters land later.
+//! Platform support:
+//!   macOS  — raw PF_SYSTEM/UTUN_CONTROL socket (`utunN` device). Requires root.
+//!   Linux  — /dev/net/tun + TUNSETIFF (`ankN` device). Requires CAP_NET_ADMIN.
+//!   Windows — Wintun named adapter. Requires LocalSystem (service) or admin.
+//!   others  — runtime error stub; daemon still compiles (A.1.9).
+//!
+//! The `TunDevice` type is platform-dependent: Unix targets expose a raw fd via
+//! `raw_fd()`; Windows exposes a `wintun::Session` Arc via `session()`. The pump
+//! threads for each platform read the right accessor. `[T:A.1.9]`
 
 use std::io;
+#[cfg(target_os = "windows")]
+use std::sync::Arc;
 
-/// A point-to-point layer-3 tunnel device. Read/write carry **bare IP packets**
-/// (the platform 4-byte framing is added/stripped inside this module).
+/// A point-to-point layer-3 tunnel device.
+///
+/// On Unix: backed by an open fd. Read/write via `tundev::read_packet` /
+/// `tundev::write_packet` (platform framing stripped/added there). `[T:A.1.9]`
+///
+/// On Windows: backed by a Wintun session. Read/write via the Wintun ring-buffer
+/// API in `pump_wintun`. `[T:A.1.9]`
 pub struct TunDevice {
-    fd: i32,
     name: String,
+    #[cfg(unix)]
+    fd: i32,
+    #[cfg(target_os = "windows")]
+    session: Arc<wintun::Session>,
+    /// Keep the adapter alive for the process lifetime on Windows (dropping it
+    /// deletes the Wintun adapter). On Unix this field doesn't exist.
+    #[cfg(target_os = "windows")]
+    _adapter: wintun::Adapter,
 }
 
 impl TunDevice {
-    /// Interface name, e.g. `utun4`.
+    /// Interface name, e.g. `utun4` (macOS), `ank0` (Linux), `Ankayma` (Windows).
     pub fn name(&self) -> &str {
         &self.name
     }
 
-    /// Raw fd — read/write happen from separate threads (one reads, one writes),
-    /// which is safe on a single utun fd.
+    /// Raw fd — used by the Unix fd-based pump threads. `[T:A.1.9]`
+    #[cfg(unix)]
     pub fn raw_fd(&self) -> i32 {
         self.fd
+    }
+
+    /// Wintun session — used by the Windows pump threads (`pump_wintun`). `[T:A.1.9]`
+    #[cfg(target_os = "windows")]
+    pub fn session(&self) -> Arc<wintun::Session> {
+        self.session.clone()
     }
 }
 
@@ -164,7 +190,56 @@ mod imp {
     // pump + the iOS Packet Tunnel extension). `[T:A.1.9]`
 }
 
-#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+#[cfg(target_os = "windows")]
+mod imp {
+    use super::TunDevice;
+    use std::io;
+    use std::sync::Arc;
+
+    const ADAPTER_NAME: &str = "Ankayma";
+    const TUNNEL_TYPE: &str = "Wintun";
+    // 4 MiB ring buffer — same as Tailscale's default. `[A verified-on-windows]`
+    const RING_CAPACITY: u32 = 0x400000;
+
+    /// Open (or create) the Wintun adapter and start a session.
+    ///
+    /// Requires the service to run as LocalSystem (or admin) so the Wintun driver
+    /// can install the virtual NIC. `wintun.dll` must reside in the same directory
+    /// as the service executable (placed there by the installer). `[T:wintun.net]`
+    ///
+    /// `[A verified-on-windows]` — tested integration needed on a real Windows host.
+    pub fn open() -> io::Result<TunDevice> {
+        // Load wintun.dll from the directory of the running executable.
+        // The installer places it there alongside ankayma-service.exe and agent.exe.
+        let lib = unsafe { wintun::load_from_path("wintun.dll") }.map_err(|e| {
+            io::Error::new(
+                io::ErrorKind::Other,
+                format!("load wintun.dll: {e} — ensure wintun.dll is in the install dir"),
+            )
+        })?;
+
+        // Try to open an existing adapter first (idempotent across service restarts);
+        // create a new one if it doesn't exist yet. Wintun adapters persist in the
+        // registry between reboots if not explicitly deleted. `[T:wintun.net]`
+        let adapter = wintun::Adapter::open(&lib, ADAPTER_NAME)
+            .or_else(|_| wintun::Adapter::create(&lib, ADAPTER_NAME, TUNNEL_TYPE, None))
+            .map_err(|e| {
+                io::Error::new(io::ErrorKind::Other, format!("Wintun adapter: {e}"))
+            })?;
+
+        let session = adapter.start_session(RING_CAPACITY).map_err(|e| {
+            io::Error::new(io::ErrorKind::Other, format!("Wintun start_session: {e}"))
+        })?;
+
+        Ok(TunDevice {
+            name: ADAPTER_NAME.to_string(),
+            session: Arc::new(session),
+            _adapter: adapter,
+        })
+    }
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
 mod imp {
     use super::TunDevice;
     use std::io;
@@ -172,12 +247,12 @@ mod imp {
     pub fn open() -> io::Result<TunDevice> {
         Err(io::Error::new(
             io::ErrorKind::Unsupported,
-            "kernel tun data plane is implemented for macOS + Linux [T:A.1.9]",
+            "kernel tun data plane is implemented for macOS, Linux, and Windows [T:A.1.9]",
         ))
     }
 }
 
-/// Open a fresh layer-3 tunnel device (root required on macOS).
+/// Open a fresh layer-3 tunnel device (root/SYSTEM required).
 pub fn open() -> io::Result<TunDevice> {
     imp::open()
 }

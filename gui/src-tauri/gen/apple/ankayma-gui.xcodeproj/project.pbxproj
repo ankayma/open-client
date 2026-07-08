@@ -1,0 +1,487 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 77;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		05EDCC2C0C99D2B2A2DD6664 /* libapp.a in Resources */ = {isa = PBXBuildFile; fileRef = B88F7DF28A107C5710A6C2F4 /* libapp.a */; };
+		0B499F7E208AB3294F14A7C7 /* libapp.a in Frameworks */ = {isa = PBXBuildFile; fileRef = FD1E4768F46920DCB44DF9C0 /* libapp.a */; };
+		2AA5550078025EB45306135F /* QuartzCore.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = EFB7F306629C4FF150C772E1 /* QuartzCore.framework */; };
+		30437A4BD3BFB8FD22F9808F /* LaunchScreen.storyboard in Resources */ = {isa = PBXBuildFile; fileRef = CBA2C835CDAEFF350149703F /* LaunchScreen.storyboard */; };
+		3BE3FF56FE438F48132D2623 /* assets in Resources */ = {isa = PBXBuildFile; fileRef = 1CBDB99F2FEB6662FD93AD81 /* assets */; };
+		5EC1F3F0E12C29BA2B1EF596 /* Security.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = D6082CA6408AC589CB489F9D /* Security.framework */; };
+		7CD04937F2DD5EEF4860EF6E /* main.mm in Sources */ = {isa = PBXBuildFile; fileRef = BFC2C2FDE1A6ED4C0B88E51A /* main.mm */; };
+		81B3EEA143D9A0310042B7D2 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = CB2A60E478F632F1F8BA7BD1 /* Assets.xcassets */; };
+		8A00C23BE57F26FF8A36EE67 /* CoreGraphics.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = FF888D9464A44E370FC81F46 /* CoreGraphics.framework */; };
+		9D1744DC2E9D322C7030950F /* MetalKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 211337E7BE1EFBBFB79DB11E /* MetalKit.framework */; };
+		A5C9B43C6A67E360570A12B3 /* UIKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 77BBB0A988DBEA9ED1500F1F /* UIKit.framework */; };
+		DC5214B28D36BB74A920CE32 /* WebKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = C4E01819F09BD3B7DD26459A /* WebKit.framework */; };
+		FBB43896ACEFE10A2259765F /* Metal.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = F85772ED59FEBEFFAE67B194 /* Metal.framework */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXFileReference section */
+		1CBDB99F2FEB6662FD93AD81 /* assets */ = {isa = PBXFileReference; lastKnownFileType = folder; path = assets; sourceTree = SOURCE_ROOT; };
+		211337E7BE1EFBBFB79DB11E /* MetalKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = MetalKit.framework; path = System/Library/Frameworks/MetalKit.framework; sourceTree = SDKROOT; };
+		22CA97240C4E0CC69C35E5F5 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
+		4D80C48C6CC79C8491AE8AE8 /* bindings.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = bindings.h; sourceTree = "<group>"; };
+		77BBB0A988DBEA9ED1500F1F /* UIKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = UIKit.framework; path = System/Library/Frameworks/UIKit.framework; sourceTree = SDKROOT; };
+		88B760A52F2076512C622A33 /* main.rs */ = {isa = PBXFileReference; path = main.rs; sourceTree = "<group>"; };
+		8A5953E0BB7CCF1DB8E690AB /* ankayma-gui_iOS.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = "ankayma-gui_iOS.entitlements"; sourceTree = "<group>"; };
+		8F64982518C299AB92B24D75 /* lib.rs */ = {isa = PBXFileReference; path = lib.rs; sourceTree = "<group>"; };
+		B88F7DF28A107C5710A6C2F4 /* libapp.a */ = {isa = PBXFileReference; lastKnownFileType = archive.ar; path = libapp.a; sourceTree = "<group>"; };
+		BFC2C2FDE1A6ED4C0B88E51A /* main.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = main.mm; sourceTree = "<group>"; };
+		C4E01819F09BD3B7DD26459A /* WebKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = WebKit.framework; path = System/Library/Frameworks/WebKit.framework; sourceTree = SDKROOT; };
+		CB2A60E478F632F1F8BA7BD1 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		CBA2C835CDAEFF350149703F /* LaunchScreen.storyboard */ = {isa = PBXFileReference; lastKnownFileType = file.storyboard; path = LaunchScreen.storyboard; sourceTree = "<group>"; };
+		D6082CA6408AC589CB489F9D /* Security.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Security.framework; path = System/Library/Frameworks/Security.framework; sourceTree = SDKROOT; };
+		E0256915C607091DE888684F /* ankayma-gui_iOS.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = "ankayma-gui_iOS.app"; sourceTree = BUILT_PRODUCTS_DIR; };
+		EFB7F306629C4FF150C772E1 /* QuartzCore.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = QuartzCore.framework; path = System/Library/Frameworks/QuartzCore.framework; sourceTree = SDKROOT; };
+		F85772ED59FEBEFFAE67B194 /* Metal.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Metal.framework; path = System/Library/Frameworks/Metal.framework; sourceTree = SDKROOT; };
+		FD1E4768F46920DCB44DF9C0 /* libapp.a */ = {isa = PBXFileReference; lastKnownFileType = archive.ar; path = libapp.a; sourceTree = "<group>"; };
+		FF888D9464A44E370FC81F46 /* CoreGraphics.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = CoreGraphics.framework; path = System/Library/Frameworks/CoreGraphics.framework; sourceTree = SDKROOT; };
+/* End PBXFileReference section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		F2ED1049A971B2EE3190E1A4 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				0B499F7E208AB3294F14A7C7 /* libapp.a in Frameworks */,
+				8A00C23BE57F26FF8A36EE67 /* CoreGraphics.framework in Frameworks */,
+				FBB43896ACEFE10A2259765F /* Metal.framework in Frameworks */,
+				9D1744DC2E9D322C7030950F /* MetalKit.framework in Frameworks */,
+				2AA5550078025EB45306135F /* QuartzCore.framework in Frameworks */,
+				5EC1F3F0E12C29BA2B1EF596 /* Security.framework in Frameworks */,
+				A5C9B43C6A67E360570A12B3 /* UIKit.framework in Frameworks */,
+				DC5214B28D36BB74A920CE32 /* WebKit.framework in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		0EEB3F2D57DB7D9B4BEC885F = {
+			isa = PBXGroup;
+			children = (
+				1CBDB99F2FEB6662FD93AD81 /* assets */,
+				CB2A60E478F632F1F8BA7BD1 /* Assets.xcassets */,
+				CBA2C835CDAEFF350149703F /* LaunchScreen.storyboard */,
+				43A55A1F1B8925F0EFF16C7C /* ankayma-gui_iOS */,
+				91D86242AF9EDB6ABCFA6FF3 /* Externals */,
+				ECF7093E97003CC3089D4269 /* Sources */,
+				972EC6C15CBFA5A00D0F7260 /* src */,
+				42F7AAE7C64F85CED35CB5E2 /* Frameworks */,
+				342827FB3DBD2E7CC0F89B46 /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		342827FB3DBD2E7CC0F89B46 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				E0256915C607091DE888684F /* ankayma-gui_iOS.app */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+		42F7AAE7C64F85CED35CB5E2 /* Frameworks */ = {
+			isa = PBXGroup;
+			children = (
+				FF888D9464A44E370FC81F46 /* CoreGraphics.framework */,
+				FD1E4768F46920DCB44DF9C0 /* libapp.a */,
+				F85772ED59FEBEFFAE67B194 /* Metal.framework */,
+				211337E7BE1EFBBFB79DB11E /* MetalKit.framework */,
+				EFB7F306629C4FF150C772E1 /* QuartzCore.framework */,
+				D6082CA6408AC589CB489F9D /* Security.framework */,
+				77BBB0A988DBEA9ED1500F1F /* UIKit.framework */,
+				C4E01819F09BD3B7DD26459A /* WebKit.framework */,
+			);
+			name = Frameworks;
+			sourceTree = "<group>";
+		};
+		43A55A1F1B8925F0EFF16C7C /* ankayma-gui_iOS */ = {
+			isa = PBXGroup;
+			children = (
+				8A5953E0BB7CCF1DB8E690AB /* ankayma-gui_iOS.entitlements */,
+				22CA97240C4E0CC69C35E5F5 /* Info.plist */,
+			);
+			path = "ankayma-gui_iOS";
+			sourceTree = "<group>";
+		};
+		563E17B79B56BEF15D3730A5 /* arm64 */ = {
+			isa = PBXGroup;
+			children = (
+				B7F0C47878CEB76804086E90 /* release */,
+			);
+			path = arm64;
+			sourceTree = "<group>";
+		};
+		91D86242AF9EDB6ABCFA6FF3 /* Externals */ = {
+			isa = PBXGroup;
+			children = (
+				563E17B79B56BEF15D3730A5 /* arm64 */,
+			);
+			path = Externals;
+			sourceTree = "<group>";
+		};
+		972EC6C15CBFA5A00D0F7260 /* src */ = {
+			isa = PBXGroup;
+			children = (
+				8F64982518C299AB92B24D75 /* lib.rs */,
+				88B760A52F2076512C622A33 /* main.rs */,
+			);
+			name = src;
+			path = ../../src;
+			sourceTree = "<group>";
+		};
+		9B7F8B125BB496DE84E6F8CA /* bindings */ = {
+			isa = PBXGroup;
+			children = (
+				4D80C48C6CC79C8491AE8AE8 /* bindings.h */,
+			);
+			path = bindings;
+			sourceTree = "<group>";
+		};
+		B7F0C47878CEB76804086E90 /* release */ = {
+			isa = PBXGroup;
+			children = (
+				B88F7DF28A107C5710A6C2F4 /* libapp.a */,
+			);
+			path = release;
+			sourceTree = "<group>";
+		};
+		ECF7093E97003CC3089D4269 /* Sources */ = {
+			isa = PBXGroup;
+			children = (
+				F0B7B17562F8FDCA50C20F31 /* ankayma-gui */,
+			);
+			path = Sources;
+			sourceTree = "<group>";
+		};
+		F0B7B17562F8FDCA50C20F31 /* ankayma-gui */ = {
+			isa = PBXGroup;
+			children = (
+				BFC2C2FDE1A6ED4C0B88E51A /* main.mm */,
+				9B7F8B125BB496DE84E6F8CA /* bindings */,
+			);
+			path = "ankayma-gui";
+			sourceTree = "<group>";
+		};
+		"TEMP_20901314-E186-472E-9318-33C6C46E2895" /* x86_64 */ = {
+			isa = PBXGroup;
+			children = (
+			);
+			path = x86_64;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		7FECFEDA19CC6989461B67F3 /* ankayma-gui_iOS */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = F59EAA4C7DB83EB1B11B47C8 /* Build configuration list for PBXNativeTarget "ankayma-gui_iOS" */;
+			buildPhases = (
+				C1EA4E1F1CD493B30CFD82D7 /* Build Rust Code */,
+				AC521FE69063D6D2B4FB3341 /* Sources */,
+				1A91FA7F14791F35A63DED0C /* Resources */,
+				F2ED1049A971B2EE3190E1A4 /* Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = "ankayma-gui_iOS";
+			packageProductDependencies = (
+			);
+			productName = "ankayma-gui_iOS";
+			productReference = E0256915C607091DE888684F /* ankayma-gui_iOS.app */;
+			productType = "com.apple.product-type.application";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		E29452BA853BEC6D377C496E /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = YES;
+				LastUpgradeCheck = 1430;
+				TargetAttributes = {
+				};
+			};
+			buildConfigurationList = E176A02F72149E1D92A9BDCE /* Build configuration list for PBXProject "ankayma-gui" */;
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				Base,
+				en,
+			);
+			mainGroup = 0EEB3F2D57DB7D9B4BEC885F;
+			minimizedProjectReferenceProxies = 1;
+			preferredProjectObjectVersion = 77;
+			productRefGroup = 342827FB3DBD2E7CC0F89B46 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				7FECFEDA19CC6989461B67F3 /* ankayma-gui_iOS */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		1A91FA7F14791F35A63DED0C /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				81B3EEA143D9A0310042B7D2 /* Assets.xcassets in Resources */,
+				30437A4BD3BFB8FD22F9808F /* LaunchScreen.storyboard in Resources */,
+				3BE3FF56FE438F48132D2623 /* assets in Resources */,
+				05EDCC2C0C99D2B2A2DD6664 /* libapp.a in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXShellScriptBuildPhase section */
+		C1EA4E1F1CD493B30CFD82D7 /* Build Rust Code */ = {
+			isa = PBXShellScriptBuildPhase;
+			alwaysOutOfDate = 1;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputFileListPaths = (
+			);
+			inputPaths = (
+			);
+			name = "Build Rust Code";
+			outputFileListPaths = (
+			);
+			outputPaths = (
+				"$(SRCROOT)/Externals/x86_64/${CONFIGURATION}/libapp.a",
+				"$(SRCROOT)/Externals/arm64/${CONFIGURATION}/libapp.a",
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "cargo tauri ios xcode-script -v --platform ${PLATFORM_DISPLAY_NAME:?} --sdk-root ${SDKROOT:?} --framework-search-paths \"${FRAMEWORK_SEARCH_PATHS:?}\" --header-search-paths \"${HEADER_SEARCH_PATHS:?}\" --gcc-preprocessor-definitions \"${GCC_PREPROCESSOR_DEFINITIONS:-}\" --configuration ${CONFIGURATION:?} ${FORCE_COLOR} ${ARCHS:?}";
+		};
+/* End PBXShellScriptBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		AC521FE69063D6D2B4FB3341 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				7CD04937F2DD5EEF4860EF6E /* main.mm in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin XCBuildConfiguration section */
+		1F313F850829FFBE478067F0 /* debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_DYNAMIC_NO_PIC = NO;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"$(inherited)",
+					"DEBUG=1",
+				);
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 16.0;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				MTL_FAST_MATH = YES;
+				ONLY_ACTIVE_ARCH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+				SWIFT_VERSION = 5.0;
+			};
+			name = debug;
+		};
+		8CDE25323EC2A04C223751B4 /* debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_EMBED_SWIFT_STANDARD_LIBRARIES = YES;
+				ARCHS = (
+					arm64,
+				);
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_ENTITLEMENTS = "ankayma-gui_iOS/ankayma-gui_iOS.entitlements";
+				CODE_SIGN_IDENTITY = "iPhone Developer";
+				ENABLE_BITCODE = NO;
+				"EXCLUDED_ARCHS[sdk=iphoneos*]" = x86_64;
+				FRAMEWORK_SEARCH_PATHS = (
+					"$(inherited)",
+					"\".\"",
+				);
+				INFOPLIST_FILE = "ankayma-gui_iOS/Info.plist";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				"LIBRARY_SEARCH_PATHS[arch=arm64]" = "$(inherited) $(PROJECT_DIR)/Externals/arm64/$(CONFIGURATION) $(SDKROOT)/usr/lib/swift $(DEVELOPER_DIR)/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/$(PLATFORM_NAME) $(DEVELOPER_DIR)/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift-5.0/$(PLATFORM_NAME)";
+				"LIBRARY_SEARCH_PATHS[arch=x86_64]" = "$(inherited) $(PROJECT_DIR)/Externals/x86_64/$(CONFIGURATION) $(SDKROOT)/usr/lib/swift $(DEVELOPER_DIR)/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/$(PLATFORM_NAME) $(DEVELOPER_DIR)/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift-5.0/$(PLATFORM_NAME)";
+				PRODUCT_BUNDLE_IDENTIFIER = com.ankayma.app;
+				PRODUCT_NAME = "Ankayma";
+				SDKROOT = iphoneos;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				VALID_ARCHS = arm64;
+			};
+			name = debug;
+		};
+		9D40DD448C684EFBF64B3545 /* release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_EMBED_SWIFT_STANDARD_LIBRARIES = YES;
+				ARCHS = (
+					arm64,
+				);
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_ENTITLEMENTS = "ankayma-gui_iOS/ankayma-gui_iOS.entitlements";
+				CODE_SIGN_IDENTITY = "iPhone Developer";
+				ENABLE_BITCODE = NO;
+				"EXCLUDED_ARCHS[sdk=iphoneos*]" = x86_64;
+				FRAMEWORK_SEARCH_PATHS = (
+					"$(inherited)",
+					"\".\"",
+				);
+				INFOPLIST_FILE = "ankayma-gui_iOS/Info.plist";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				"LIBRARY_SEARCH_PATHS[arch=arm64]" = "$(inherited) $(PROJECT_DIR)/Externals/arm64/$(CONFIGURATION) $(SDKROOT)/usr/lib/swift $(DEVELOPER_DIR)/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/$(PLATFORM_NAME) $(DEVELOPER_DIR)/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift-5.0/$(PLATFORM_NAME)";
+				"LIBRARY_SEARCH_PATHS[arch=x86_64]" = "$(inherited) $(PROJECT_DIR)/Externals/x86_64/$(CONFIGURATION) $(SDKROOT)/usr/lib/swift $(DEVELOPER_DIR)/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/$(PLATFORM_NAME) $(DEVELOPER_DIR)/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift-5.0/$(PLATFORM_NAME)";
+				PRODUCT_BUNDLE_IDENTIFIER = com.ankayma.app;
+				PRODUCT_NAME = "Ankayma";
+				SDKROOT = iphoneos;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				VALID_ARCHS = arm64;
+			};
+			name = release;
+		};
+		CE47B552014C4F5B31284B1A /* release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 16.0;
+				MTL_ENABLE_DEBUG_INFO = NO;
+				MTL_FAST_MATH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SWIFT_COMPILATION_MODE = wholemodule;
+				SWIFT_OPTIMIZATION_LEVEL = "-O";
+				SWIFT_VERSION = 5.0;
+			};
+			name = release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		E176A02F72149E1D92A9BDCE /* Build configuration list for PBXProject "ankayma-gui" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				1F313F850829FFBE478067F0 /* debug */,
+				CE47B552014C4F5B31284B1A /* release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = debug;
+		};
+		F59EAA4C7DB83EB1B11B47C8 /* Build configuration list for PBXNativeTarget "ankayma-gui_iOS" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				8CDE25323EC2A04C223751B4 /* debug */,
+				9D40DD448C684EFBF64B3545 /* release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = debug;
+		};
+/* End XCConfigurationList section */
+	};
+	rootObject = E29452BA853BEC6D377C496E /* Project object */;
+}

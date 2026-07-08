@@ -25,6 +25,13 @@ boringtun = "0.7"
 # crate — minimal/auditable surface; same version as agent-daemon.
 libc = "0.2"
 
+# [T:A.1.21] Windows TUN adapter: Wintun is the userspace WireGuard TUN driver
+# used by Tailscale and the official WireGuard-Windows client. The `wintun` crate
+# provides safe Rust bindings; `wintun.dll` (Microsoft-signed) must be bundled in
+# the installer alongside the app. `[A verified-on-windows]`
+[target.'cfg(target_os = "windows")'.dependencies]
+wintun = "0.5"
+
 [dev-dependencies]
 serde_json = "1"
 tokio      = { version = "1", features = ["rt", "macros"] }

@@ -1,0 +1,28 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "build": {
+    "beforeBuildCommand": "cmd /c ..\\..\\packaging\\windows\\build-ankayma-windows.bat"
+  },
+  "bundle": {
+    "externalBin": [
+      "../../target/release/agent",
+      "../../target/release/ankayma-service"
+    ],
+    "windows": {
+      "wix": {
+        "fragmentPaths": ["wix/service-fragment.wxs"],
+        "componentRefs": ["AnkaymaServiceComponent"]
+      },
+      "nsis": {
+        "installMode": "perMachine"
+      }
+    }
+  },
+  "plugins": {
+    "updater": {
+      "endpoints": [
+        "https://get.ankayma.com/windows/latest.json"
+      ]
+    }
+  }
+}

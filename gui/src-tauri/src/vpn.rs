@@ -1,8 +1,8 @@
-//! VPN bridge — frontend connect/disconnect/status for iOS. The JS layer invokes
-//! these commands; on iOS they call into the Swift `TunnelManager` over a C ABI
-//! (gui/src-tauri/ios/AppSupport/VpnBridge.swift), which installs the Packet Tunnel
-//! and starts the extension. On desktop the privileged `agent` daemon owns the
-//! tunnel, so these are not used. [T:A.1.9]
+//! VPN bridge — frontend connect/disconnect/status for iOS and Android.
+//! iOS: calls into the Swift TunnelManager over C ABI (VpnBridge.swift / Packet Tunnel).
+//! Android: calls into AnkaymaVpnService (Kotlin VpnService) via JNI (vpn_android.rs).
+//! Desktop: the privileged agent daemon owns the tunnel; these commands are unused.
+//! [T:A.1.9]
 
 use serde::Serialize;
 use tauri::State;
@@ -58,9 +58,10 @@ pub struct VpnStatus {
     pub status: String,
 }
 
-/// Build the resolved tunnel config JSON for the extension from the enrolled node.
+/// Build the resolved tunnel config JSON for the VPN extension from the enrolled node.
 /// Shape matches `agent-ios-ptp`'s `Config` (private key + overlay + peers). [T:A.1.1]
-#[cfg(target_os = "ios")]
+/// Used on iOS (Packet Tunnel) and Android (AnkaymaVpnService).
+#[cfg(any(target_os = "ios", target_os = "android"))]
 fn build_config(state: &AppState) -> Result<String, String> {
     let guard = state.node.lock().expect("node lock poisoned");
     let node = guard.as_ref().ok_or("not enrolled yet")?;
@@ -73,8 +74,7 @@ fn build_config(state: &AppState) -> Result<String, String> {
     serde_json::to_string(&cfg).map_err(|e| e.to_string())
 }
 
-/// Enroll on the control plane (reusing the shared connect flow), build the resolved
-/// config, and start the iOS Packet Tunnel.
+/// Enroll on the control plane, build the resolved config, and start the platform VPN.
 #[tauri::command]
 pub async fn vpn_connect(state: State<'_, AppState>) -> Result<(), String> {
     #[cfg(target_os = "ios")]
@@ -89,14 +89,21 @@ pub async fn vpn_connect(state: State<'_, AppState>) -> Result<(), String> {
         }
         Ok(())
     }
-    #[cfg(not(target_os = "ios"))]
+    #[cfg(target_os = "android")]
+    {
+        crate::connect_inner(&state).await?;
+        let config = build_config(&state)?;
+        crate::vpn_android::start_service(&config)?;
+        Ok(())
+    }
+    #[cfg(not(any(target_os = "ios", target_os = "android")))]
     {
         let _ = &state;
-        Err("vpn_connect is iOS-only; desktop uses the agent daemon".into())
+        Err("vpn_connect is mobile-only; desktop uses the agent daemon".into())
     }
 }
 
-/// Stop the iOS tunnel.
+/// Stop the platform VPN tunnel.
 #[tauri::command]
 pub fn vpn_disconnect() -> Result<(), String> {
     #[cfg(target_os = "ios")]
@@ -105,9 +112,13 @@ pub fn vpn_disconnect() -> Result<(), String> {
         unsafe { ffi::ankayma_vpn_disconnect() };
         Ok(())
     }
-    #[cfg(not(target_os = "ios"))]
+    #[cfg(target_os = "android")]
     {
-        Err("vpn_disconnect is iOS-only".into())
+        crate::vpn_android::stop_service()
+    }
+    #[cfg(not(any(target_os = "ios", target_os = "android")))]
+    {
+        Err("vpn_disconnect is mobile-only".into())
     }
 }
 
@@ -122,7 +133,14 @@ pub fn vpn_status() -> VpnStatus {
             status: status_string(code).to_string(),
         }
     }
-    #[cfg(not(target_os = "ios"))]
+    #[cfg(target_os = "android")]
+    {
+        let running = crate::vpn_android::VPN_RUNNING.load(std::sync::atomic::Ordering::Relaxed);
+        VpnStatus {
+            status: if running { "connected" } else { "disconnected" }.to_string(),
+        }
+    }
+    #[cfg(not(any(target_os = "ios", target_os = "android")))]
     {
         VpnStatus {
             status: "unsupported".to_string(),

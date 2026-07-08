@@ -1,0 +1,59 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  WiX fragment: install ankayma-service.exe as a Windows Service.
+
+  The Tauri WiX installer includes this via tauri.windows.conf.json
+  → bundle.windows.wix.fragmentPaths. The component ref
+  "AnkaymaServiceComponent" is listed in componentRefs so WiX links it into
+  the Feature element automatically. [A verified-on-windows]
+
+  Service account: LocalSystem (no password needed, broad device access for
+  wintun adapter creation). StartType=auto so it starts on every boot without
+  the GUI app needing to call `sc start`. [T:WiX ServiceInstall docs]
+-->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
+     xmlns:util="http://wixtoolset.org/schemas/v4/wxs/util">
+
+  <Fragment>
+    <ComponentGroup Id="AnkaymaServiceComponents" Directory="INSTALLDIR">
+
+      <Component Id="AnkaymaServiceComponent" Guid="E2A3F1B0-7C4D-4E8A-9D21-3F5A6B8C1D0E">
+
+        <!-- ankayma-service.exe — placed in INSTALLDIR by the Tauri bundler
+             because it is listed in bundle.externalBin. -->
+        <File Id="AnkaymaServiceExe"
+              Source="$(var.SourceDir)\ankayma-service.exe"
+              KeyPath="yes" />
+
+        <!-- wintun.dll — Microsoft-signed TUN driver DLL. Must sit next to
+             ankayma-service.exe so wintun::load_from_path("wintun.dll") finds
+             it at runtime. Downloaded during the build script step. [T:wintun.net] -->
+        <File Id="WintunDll"
+              Source="$(var.SourceDir)\wintun.dll" />
+
+        <ServiceInstall
+            Id="AnkaymaHelperSvc"
+            Name="AnkaymaHelper"
+            DisplayName="Ankayma Mesh Helper"
+            Description="Manages the Ankayma WireGuard tunnel device (requires LocalSystem)."
+            Type="ownProcess"
+            Start="auto"
+            Account="LocalSystem"
+            ErrorControl="normal"
+            Interactive="no"
+            Vital="yes" />
+
+        <!-- Stop before upgrade / uninstall; delete on uninstall. -->
+        <ServiceControl
+            Id="StopAnkaymaHelper"
+            Name="AnkaymaHelper"
+            Stop="both"
+            Remove="uninstall"
+            Wait="yes" />
+
+      </Component>
+
+    </ComponentGroup>
+  </Fragment>
+
+</Wix>

@@ -20,13 +20,13 @@
 	let connectError = $state<string | null>(null);
 	let dp = $state<DataplaneStatus | null>(null);
 	let hostname = $state<string | null>(null);
-	// iOS runs the data plane in-app (Packet Tunnel extension); desktop hands off to
-	// the privileged daemon. The connect toggle picks the path from this. [T:A.1.9]
-	let isIos = $state(false);
+	// iOS and Android run the data plane in-app (VPN extension/service); desktop
+	// hands off to the privileged daemon. The connect toggle picks the path from this.
+	let isMobile = $state(false);
 
 	async function refreshDataplane() {
 		try {
-			if (isIos) {
+			if (isMobile) {
 				const s = await vpnStatus();
 				const running = s.status === 'connected' || s.status === 'reasserting';
 				dp = running ? { running: true, pid: null, age_secs: null, peers: [] } : null;
@@ -41,8 +41,8 @@
 	let dpTimer: ReturnType<typeof setInterval> | undefined;
 	onMount(() => {
 		getPlatform()
-			.then((os) => { isIos = os === 'ios'; refreshDataplane(); })
-			.catch(() => (isIos = false));
+			.then((os) => { isMobile = os === 'ios' || os === 'android'; refreshDataplane(); })
+			.catch(() => (isMobile = false));
 		refreshDataplane();
 		dpTimer = setInterval(refreshDataplane, 4000);
 		getNodeInfo().then((n) => (hostname = n.hostname)).catch(() => {});
@@ -55,7 +55,7 @@
 		try {
 			const conn = $connection;
 			if (conn.status === 'connected') {
-				if (isIos) {
+				if (isMobile) {
 					await vpnDisconnect();
 				} else {
 					try { await stopDataplane(); } catch { /* ignore — daemon may not be running */ }
@@ -64,7 +64,7 @@
 				connection.set({ status: 'disconnected' });
 			} else {
 				connection.set({ status: 'connecting' });
-				if (isIos) {
+				if (isMobile) {
 					await vpnConnect();
 				} else {
 					await connect();
