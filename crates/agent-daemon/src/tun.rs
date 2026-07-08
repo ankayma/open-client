@@ -31,7 +31,7 @@ pub struct TunDevice {
     /// Keep the adapter alive for the process lifetime on Windows (dropping it
     /// deletes the Wintun adapter). On Unix this field doesn't exist.
     #[cfg(target_os = "windows")]
-    _adapter: wintun::Adapter,
+    _adapter: Arc<wintun::Adapter>,
 }
 
 impl TunDevice {

@@ -56,6 +56,11 @@ libc = "0.2"
 [target.'cfg(target_os = "linux")'.dependencies]
 libc = "0.2"
 
+# [T:A.1.21] Windows TUN via Wintun — the same crate agent-core links (same version →
+# Cargo deduplicates). Declared here too so tun.rs can write `wintun::` in agent-daemon.
+[target.'cfg(target_os = "windows")'.dependencies]
+wintun = "0.5"
+
 [features]
 default = []
 # Gate A.1.4 NC: client escrows session key onto NATS data subject as a separate

@@ -23,8 +23,13 @@ const QTYPE_AAAA: u16 = 28;
 const RCODE_OK: u8 = 0;
 const RCODE_NXDOMAIN: u8 = 3;
 
-/// Loopback port the responder listens on (a high port → no privilege needed for
-/// the socket itself; the `/etc/resolver` file points here). [T:macOS scoped DNS]
+/// Loopback port the responder listens on.
+/// macOS: high port (no root needed for the socket; /etc/resolver(5) specifies the port).
+/// Windows: port 53 (SYSTEM privilege from the service allows binding; NRPT rules
+///   point queries to 127.0.0.1 which defaults to :53). [T:macOS resolver(5) / Windows NRPT]
+#[cfg(target_os = "windows")]
+pub const RESOLVER_PORT: u16 = 53;
+#[cfg(not(target_os = "windows"))]
 pub const RESOLVER_PORT: u16 = 5354;
 
 /// The live name→overlay-address map, swapped wholesale each refresh cycle.
@@ -186,9 +191,40 @@ pub fn remove_scoped_resolver(zone: &str) {
     let _ = std::fs::remove_file(format!("/etc/resolver/{zone}"));
 }
 
-#[cfg(not(target_os = "macos"))]
+/// Windows split-DNS via NRPT (Name Resolution Policy Table) — mirrors Tailscale's
+/// MagicDNS approach. Routes ONLY `.<zone>` to our loopback responder on port 53;
+/// all other names keep the system resolver. Runs as LocalSystem so the PowerShell
+/// cmdlet has permission. Idempotent: removes any existing ankayma rule for the zone
+/// before re-adding. [T:Windows NRPT / Add-DnsClientNrptRule docs]
+#[cfg(target_os = "windows")]
+pub fn install_scoped_resolver(zone: &str) {
+    let rule_name = format!("ankayma-{zone}");
+    let script = format!(
+        "Remove-DnsClientNrptRule -Name '{rule_name}' -ErrorAction SilentlyContinue -Force; \
+         Add-DnsClientNrptRule -Name '{rule_name}' -Namespace '.{zone}' -NameServers '127.0.0.1'",
+    );
+    if let Err(e) = std::process::Command::new("powershell")
+        .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+        .output()
+    {
+        eprintln!("resolver: NRPT install for zone {zone} failed: {e}");
+    }
+}
+
+#[cfg(target_os = "windows")]
+pub fn remove_scoped_resolver(zone: &str) {
+    let rule_name = format!("ankayma-{zone}");
+    let script = format!(
+        "Remove-DnsClientNrptRule -Name '{rule_name}' -ErrorAction SilentlyContinue -Force"
+    );
+    let _ = std::process::Command::new("powershell")
+        .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+        .output();
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
 pub fn install_scoped_resolver(_zone: &str) {}
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
 pub fn remove_scoped_resolver(_zone: &str) {}
 
 #[cfg(test)]
