@@ -61,7 +61,7 @@ pub struct VpnStatus {
 /// Build the resolved tunnel config JSON for the VPN extension from the enrolled node.
 /// Shape matches `agent-ios-ptp`'s `Config` (private key + overlay + peers). [T:A.1.1]
 /// Used on iOS (Packet Tunnel) and Android (AnkaymaVpnService).
-#[cfg(any(target_os = "ios", target_os = "android"))]
+#[cfg(target_os = "ios")]
 fn build_config(state: &AppState) -> Result<String, String> {
     let guard = state.node.lock().expect("node lock poisoned");
     let node = guard.as_ref().ok_or("not enrolled yet")?;
