@@ -287,24 +287,20 @@ fn current_connection(state: &AppState) -> ConnectionState {
     }
 }
 
-/// Reuse the persisted identity from the handoff file (~/.ankayma/agent.json) —
-/// the SAME node the daemon uses — but only if it still exists server-side, so a
-/// GUI restart/reconnect doesn't enroll a duplicate node. Returns None when there
-/// is no valid file or the stored node was removed (→ caller enrolls fresh).
-/// Where the node identity (agent.json) is persisted. On iOS this MUST be the app
-/// data dir: `$HOME` in the sandbox is not a stable, persistent location, so a
-/// handoff written there is lost between launches — which made every Connect
-/// enroll a BRAND-NEW node with a fresh WireGuard key (roster filled with
-/// duplicate "ankayma-desktop" nodes; peers that already knew the old key dropped
-/// the new handshakes → tunnel stuck at rx 0). On desktop it MUST stay under
-/// `$HOME/.ankayma` because the privileged `agent up` daemon reads it from there.
-/// `[T:A.1.10]`
+/// Where the node identity (agent.json) is persisted. On iOS AND Android this MUST
+/// be the app data dir: `$HOME` in either sandbox is not a stable, persistent,
+/// writable location, so a handoff written there is lost (or never written) between
+/// launches — which made every Connect enroll a BRAND-NEW node with a fresh
+/// WireGuard key (roster filled with duplicate nodes; peers that already knew the
+/// old key dropped the new handshakes → tunnel stuck at rx 0). On desktop it MUST
+/// stay under `$HOME/.ankayma` because the privileged `agent up` daemon reads it
+/// from there. `[T:A.1.10]`
 fn handoff_state_dir(state: &AppState) -> std::path::PathBuf {
-    #[cfg(target_os = "ios")]
+    #[cfg(any(target_os = "ios", target_os = "android"))]
     {
         return state.data_dir.join(".ankayma");
     }
-    #[cfg(not(target_os = "ios"))]
+    #[cfg(not(any(target_os = "ios", target_os = "android")))]
     {
         let _ = state;
         let home = std::env::var("HOME").unwrap_or_default();
@@ -312,52 +308,47 @@ fn handoff_state_dir(state: &AppState) -> std::path::PathBuf {
     }
 }
 
-async fn load_handoff_node(state: &AppState, tok: &str) -> Option<EnrolledNode> {
-    let path = handoff_state_dir(state).join("agent.json");
-    let bytes = std::fs::read(&path).ok()?;
+/// The WireGuard keypair persisted by a previous enroll, if any. Body testable
+/// without touching the process-global HOME (mirrors `write_handoff_state_to`).
+///
+/// Deliberately does NOT check the control plane for the node's continued
+/// existence. The old code verified via `GET /api/v1/peers` and treated ANY
+/// failure — a transient network error, or an owner-scoped roster that hides a
+/// null-owner node from a member session — as "no identity", falling through to
+/// `WgKeypair::generate()` and enrolling a duplicate. Failing to *verify* an
+/// identity must never mint a *new* one. `[T:P.2 no back doors]`
+fn load_stored_keypair_from(dir: &std::path::Path) -> Option<WgKeypair> {
+    let bytes = std::fs::read(dir.join("agent.json")).ok()?;
     #[derive(serde::Deserialize)]
     struct Stored {
         private_b64: String,
         public_b64: String,
-        node_id: String,
-        overlay_ip: String,
     }
     let s: Stored = serde_json::from_slice(&bytes).ok()?;
-    let peers = adapters::peers(&state.http, &state.base_url, tok)
-        .await
-        .ok()?;
-    // The stored node must still be in the tenant roster (not deleted server-side),
-    // else fall through to a fresh enroll instead of showing a ghost node.
-    if !peers.iter().any(|p| p.node_id == s.node_id) {
-        return None;
-    }
-    Some(EnrolledNode {
+    Some(WgKeypair {
         private_b64: s.private_b64,
         public_b64: s.public_b64,
-        node_id: s.node_id,
-        overlay_ip: s.overlay_ip,
-        peers,
     })
 }
 
-/// Real control-plane enrollment. Idempotent: reuses a persisted identity if one
-/// exists; a no-op if already enrolled in-process.
+/// Real control-plane enrollment. Idempotent: a no-op if already enrolled
+/// in-process, otherwise enrolls with the persisted keypair when one exists.
+///
+/// Always enrolling — rather than trusting a locally cached node_id — is what
+/// makes this safe in both directions. `POST /api/v1/enrollment` is idempotent on
+/// the enrolled public key: if the node still exists the server returns the SAME
+/// node_id and overlay_ip; if it was retired, exactly one node is recreated for
+/// that key. Neither branch can produce a duplicate. Mirrors
+/// `agent-daemon::up::load_or_enroll`. `[T:A.1.10 / adapters::enroll contract]`
 async fn connect_inner(state: &AppState) -> Result<(), String> {
     let tok = state.token().ok_or("not signed in")?;
     if state.node.lock().expect("node lock poisoned").is_some() {
         return Ok(());
     }
 
-    // Reuse the persisted identity (the daemon's node) if it still exists — so a
-    // GUI restart/reconnect does NOT enroll a duplicate node. Only enroll fresh
-    // when there is no valid identity. [T:A.1.10]
-    if let Some(node) = load_handoff_node(state, &tok).await {
-        *state.node.lock().expect("node lock poisoned") = Some(node);
-        return Ok(());
-    }
-
-    // Fresh: new WireGuard keypair → enroll → overlay IP + peers.
-    let kp = WgKeypair::generate();
+    // Reuse the persisted keypair when present; a fresh one only on first enroll.
+    let kp =
+        load_stored_keypair_from(&handoff_state_dir(state)).unwrap_or_else(WgKeypair::generate);
     let req = EnrollRequest {
         public_key: kp.public_b64.clone(),
         hostname: device_hostname(),
@@ -370,8 +361,13 @@ async fn connect_inner(state: &AppState) -> Result<(), String> {
 
     // Handoff: persist this identity so the NEXT connect reuses THIS node instead
     // of enrolling a duplicate. Desktop writes ~/.ankayma/agent.json for the
-    // privileged `agent up` daemon to read; iOS writes the app data dir (the PTP
-    // runs in-app, no daemon) — see handoff_state_dir. [T:A.1.10 / up.rs load_or_enroll]
+    // privileged `agent up` daemon to read; iOS/Android write the app data dir (the
+    // tunnel runs in-app, no daemon) — see handoff_state_dir.
+    //
+    // Fail CLOSED. An enroll that succeeds server-side but whose identity we cannot
+    // persist is worse than no enroll at all: the node exists, counts against the
+    // tier quota, and the next Connect enrolls another one. Roll the node back and
+    // surface the error. `[T:P.2 front-load, no "ship now fix later"]`
     if let Err(e) = write_handoff_state_to(
         &handoff_state_dir(state),
         &kp.private_b64,
@@ -379,7 +375,17 @@ async fn connect_inner(state: &AppState) -> Result<(), String> {
         &resp.node_id,
         &resp.overlay_ip,
     ) {
-        log::warn!("handoff state not written ({e}); a reconnect would re-enroll");
+        // Best-effort rollback. A multi-user tenant gates DELETE behind a step-up
+        // proof we do not hold here (see `adapters::delete_node`), so this can fail;
+        // the node then leaks and an admin must retire it. A solo tenant — where the
+        // node quota is tightest — is ungated and rolls back cleanly. `[A: revisit
+        // when the client can mint a step-up proof non-interactively]`
+        if let Err(del) =
+            adapters::delete_node(&state.http, &state.base_url, &tok, &resp.node_id, None).await
+        {
+            log::error!("enroll rollback failed for {}: {del}", resp.node_id);
+        }
+        return Err(format!("cannot persist node identity: {e}"));
     }
 
     *state.node.lock().expect("node lock poisoned") = Some(EnrolledNode {
@@ -591,6 +597,29 @@ fn handle_deep_links(app: &AppHandle, urls: Vec<url::Url>) {
 
 #[tauri::command]
 async fn sign_out(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
+    // Retire the node server-side BEFORE forgetting it locally. Dropping only the
+    // local handoff strands the node in the tenant roster forever: it still counts
+    // against the tier's node quota, and the next Connect enrolls a replacement. A
+    // few sign-out cycles exhaust the quota and Connect starts failing.
+    //
+    // Best-effort: a multi-user tenant gates DELETE behind a step-up proof we do
+    // not hold here (see `adapters::delete_node`), so this can fail. Sign-out must
+    // still clear local state — a session that cannot be dropped is a worse failure
+    // than a leaked node. `[T:adapters::delete_node step-up contract]`
+    let retiring = state
+        .node
+        .lock()
+        .expect("node lock poisoned")
+        .as_ref()
+        .map(|n| n.node_id.clone());
+    if let (Some(tok), Some(node_id)) = (state.token(), retiring) {
+        if let Err(e) =
+            adapters::delete_node(&state.http, &state.base_url, &tok, &node_id, None).await
+        {
+            log::warn!("could not retire {node_id} on sign-out ({e}); an admin must remove it");
+        }
+    }
+
     clear_session_from_disk(&state.data_dir);
     state.set_token(None);
     state.set_email(None);
@@ -2198,7 +2227,8 @@ pub fn run() {
                         let scroll: *mut AnyObject = msg_send![wk, scrollView];
                         if !scroll.is_null() {
                             // UIScrollViewContentInsetAdjustmentNever = 2
-                            let _: () = msg_send![scroll, setContentInsetAdjustmentBehavior: 2_isize];
+                            let _: () =
+                                msg_send![scroll, setContentInsetAdjustmentBehavior: 2_isize];
                         }
                     });
                 }
@@ -2361,6 +2391,50 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::{parse_deep_link, DeepLinkKind};
+
+    fn scratch(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("ankayma-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        dir
+    }
+
+    // The round trip that keeps one device on one node: what enroll persists is
+    // exactly what the next Connect re-enrolls with. A mismatch here means the
+    // control plane sees an unknown public key and mints a duplicate node.
+    #[test]
+    fn stored_keypair_round_trips_through_the_handoff_file() {
+        let dir = scratch("handoff-roundtrip");
+        super::write_handoff_state_to(&dir, "priv-b64", "pub-b64", "node-1", "100.64.0.1")
+            .expect("handoff write succeeds");
+        let kp = super::load_stored_keypair_from(&dir).expect("keypair is recovered");
+        assert_eq!(kp.private_b64, "priv-b64");
+        assert_eq!(kp.public_b64, "pub-b64");
+    }
+
+    // Regression guard for the duplicate-node bug. `None` means "no identity yet"
+    // and makes the caller generate a fresh key — so it must be returned ONLY when
+    // no usable identity exists, never as a fallback for a read/parse hiccup that
+    // happens to sit next to a perfectly good key.
+    #[test]
+    fn missing_or_corrupt_handoff_yields_no_keypair() {
+        let dir = scratch("handoff-corrupt");
+        assert!(
+            super::load_stored_keypair_from(&dir).is_none(),
+            "no file yet → no identity"
+        );
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        std::fs::write(dir.join("agent.json"), b"{ not json").expect("write garbage");
+        assert!(
+            super::load_stored_keypair_from(&dir).is_none(),
+            "unparseable file → no identity"
+        );
+        // A file that parses but lacks the key fields is equally unusable.
+        std::fs::write(dir.join("agent.json"), br#"{"node_id":"node-1"}"#).expect("write partial");
+        assert!(
+            super::load_stored_keypair_from(&dir).is_none(),
+            "no keypair fields → no identity"
+        );
+    }
 
     // agent.json carries the WG private key; anything wider than 0600 leaks
     // the node identity to other local users (regression guard — this path
