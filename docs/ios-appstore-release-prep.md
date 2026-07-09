@@ -174,6 +174,13 @@ double-click to install. Repeat for `com.ankayma.app.tunnel`.
    update after Stripe milestone 1.3 is done).
 4. **App Store tab → 1.0 Prepare for Submission**:
    - **Description** (English draft — owner should revise the wording before submitting, do not paste verbatim):
+
+     > ⚠️ **Guideline 2.3.10** — metadata **must not name third-party platforms**. Submission
+     > 1.1.1 (2026-07) was rejected because the cross-platform bullet said "Android". Don't list
+     > OS names in the description (including desktop — the reviewer reads "third-party
+     > platforms" more broadly than "other mobile platforms" in the guideline text). Describe
+     > capabilities, not a list of OSes.
+
      ```
      Ankayma connects your devices into a private, encrypted mesh — no port-forwarding,
      no manual WireGuard config, no servers to manage.
@@ -181,7 +188,8 @@ double-click to install. Repeat for `com.ankayma.app.tunnel`.
      • One-tap connect — sign in, tap Connect, you're on the mesh.
      • True peer-to-peer — traffic flows directly between your devices over WireGuard,
        encrypted end-to-end. We never see the content of your tunnel.
-     • Cross-platform — macOS, Linux, Windows, iOS, and Android share the same mesh.
+     • Every device, one mesh — your phone, your laptop, and your servers reach each
+       other by name, wherever they are.
      • Built on WireGuard — the modern, audited VPN protocol, not custom crypto.
 
      Ankayma is for developers, remote teams, and anyone who wants to reach their own
