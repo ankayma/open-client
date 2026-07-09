@@ -46,13 +46,19 @@ export interface NodeInfo {
 export interface PathPeer {
   hostname: string;
   overlay_ip: string;
+  /** True = direct WireGuard (no vendor relay). False = relayed (A.1.12 / P.3). */
   direct: boolean;
   endpoint: string | null;
+  /** Seconds since last WireGuard handshake; null if no handshake yet. */
+  last_handshake_secs: number | null;
+  tx_bytes: number;
+  rx_bytes: number;
 }
 
 export interface PathProof {
   connected: boolean;
   control_plane: string;
+  /** True if any peer routes via vendor relay. Computed, not hardcoded (P.3). */
   vendor_on_data_path: boolean;
   peers: PathPeer[];
 }

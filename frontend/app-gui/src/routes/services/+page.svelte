@@ -1,8 +1,8 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { goto } from "$app/navigation";
-  import { myAccess, openSubdomain, getNodeInfo, listNodes, listCiPolicies, ciHistory } from "$lib/tauri";
-  import type { MyAccess, AccessService, PeerBrief, CiPolicy, CiRun } from "$lib/types";
+  import { myAccess, openSubdomain, getNodeInfo, listNodes, listCiPolicies, ciHistory, getPathProof } from "$lib/tauri";
+  import type { MyAccess, AccessService, PeerBrief, CiPolicy, CiRun, PathProof, PathPeer } from "$lib/types";
   import { connection } from "$lib/stores";
   import ConnectionCard from "$lib/components/ConnectionCard.svelte";
   import PathChain from "$lib/components/PathChain.svelte";
@@ -19,6 +19,7 @@
   let myHostname = $state<string | null>(null);
   let myNodeId = $state<string | null>(null);
   let peers = $state<PeerBrief[]>([]);
+  let proof = $state<PathProof | null>(null);
 
   onMount(() => {
     load();
@@ -113,6 +114,20 @@
       .then((r) => (ciRuns = r))
       .catch((e) => (ciErr = String(e)));
   }
+
+  // Load live path proof when opening path chain for a service.
+  $effect(() => {
+    if (pathChainSvc) {
+      getPathProof().then((p) => (proof = p)).catch(() => {});
+    } else {
+      proof = null;
+    }
+  });
+
+  // Find the WireGuard peer that backs the selected service node.
+  const pathChainPeer: PathPeer | null = $derived(
+    proof?.peers.find((p) => p.hostname === pathChainSvc?.node) ?? null
+  );
 </script>
 
 <main>
@@ -304,7 +319,11 @@
 {/snippet}
 
 {#if pathChainSvc}
-  <PathChain node={pathChainSvc.node} onclose={() => (pathChainSvc = null)} />
+  <PathChain
+    node={pathChainSvc.node}
+    peer={pathChainPeer}
+    onclose={() => (pathChainSvc = null)}
+  />
 {/if}
 
 <!-- [F-1 viewer] CI history — deploy rules + recent runs for one node, straight

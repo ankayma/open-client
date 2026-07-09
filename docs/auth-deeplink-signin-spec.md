@@ -1,114 +1,114 @@
 # Auth deep-link sign-in — build-spec
 
-> Bản dành cho **repo client** (public) + **phần việc cho control-plane** (repo riêng, CLOSED).
-> Mục tiêu: sau khi đăng nhập GitHub trong browser, bấm **"Open Ankayma"** là mở thẳng app **kèm session token** — **không phải copy/paste token thủ công** nữa.
-> `[T]` = verify được · `[A]` = giả định · `[A-p]` = pending có đường kiểm.
-> Code/identifier = English; giải thích = Vietnamese.
-> Repo layout: GUI = `frontend/app-gui` (Svelte 5 + SvelteKit) + `gui/src-tauri` (Tauri 2) + `crates/agent-core`. Control-plane = repo riêng, chỉ chạm qua HTTP + **deep-link URL contract** dưới đây.
+> For the **client repo** (public) + **control-plane tasks** (separate repo, CLOSED).
+> Goal: after signing in with GitHub in the browser, clicking **"Open Ankayma"** opens the app directly **with the session token** — **no more manual copy/paste of the token**.
+> `[T]` = verifiable · `[A]` = assumption · `[A-p]` = pending with a verification path.
+> Code/identifier = English; explanations = English.
+> Repo layout: GUI = `frontend/app-gui` (Svelte 5 + SvelteKit) + `gui/src-tauri` (Tauri 2) + `crates/agent-core`. Control-plane = separate repo, accessed only via HTTP + **deep-link URL contract** below.
 
 -----
 
-## ⚠️ Guard box (đọc trước)
+## ⚠️ Guard box (read first)
 
-- Đây **KHÔNG** đổi cơ chế auth: vẫn là GitHub OAuth ở control-plane, vẫn cấp **cùng một `session_token`** như hiện tại (validate qua `GET /api/v1/session`). Chỉ đổi **cách giao token từ browser về app**: thay vì hiện ra cho user copy → đẩy qua **custom URL scheme** `ankayma://`.
-- **Copy/paste KHÔNG bị xoá** — giữ nguyên làm fallback ("If the app didn't open"). Deep-link là happy-path, không phải đường duy nhất.
-- Token vẫn **chỉ sống trong RAM của app** (như hiện tại — `AppState.session`, không persist). Deep-link không thêm chỗ lưu token mới.
-
------
-
-## 1. Vấn đề hiện tại
-
-Flow bây giờ (2 màn, thủ công):
-1. App `sign_in_github` → mở browser tới `https://cp.ankayma.com/auth/github` (`gui/src-tauri/src/lib.rs:229`). `[T]`
-2. Browser xong OAuth → trang hiện **"Signed in as …"** + token + nút **"Open Ankayma"**. Nút này hiện **chưa mở được app** (app chưa đăng ký scheme nào) → user buộc phải copy token.
-3. App nhảy sang màn "Paste session token" → user dán → `submit_session_token` validate + lưu (`lib.rs:237`). `[T]`
-
-→ Bỏ bước copy/paste: nút "Open Ankayma" mở `ankayma://auth?token=…`, app nhận token tự động.
+- This **does NOT** change the auth mechanism: still GitHub OAuth at the control-plane, still issues the **same `session_token`** as currently (validated via `GET /api/v1/session`). Only changes **how the token is delivered from browser to app**: instead of showing it for the user to copy → push via **custom URL scheme** `ankayma://`.
+- **Copy/paste is NOT removed** — kept as fallback ("If the app didn't open"). Deep-link is the happy path, not the only path.
+- Token still **lives only in app RAM** (as currently — `AppState.session`, not persisted). Deep-link does not add a new place to store the token.
 
 -----
 
-## 2. Deep-link URL contract (phần CHUNG — chốt giữa client & control-plane)
+## 1. Current problem
 
-**Scheme + shape — đây là toàn bộ hợp đồng:**
+Current flow (2 screens, manual):
+1. App `sign_in_github` → opens browser to `https://cp.ankayma.com/auth/github` (`gui/src-tauri/src/lib.rs:229`). `[T]`
+2. Browser completes OAuth → page shows **"Signed in as …"** + token + **"Open Ankayma"** button. This button currently **cannot open the app** (app has not registered any scheme) → user must copy the token.
+3. App switches to "Paste session token" screen → user pastes → `submit_session_token` validates + stores (`lib.rs:237`). `[T]`
+
+→ Eliminate the copy/paste step: the "Open Ankayma" button opens `ankayma://auth?token=…`, the app receives the token automatically.
+
+-----
+
+## 2. Deep-link URL contract (SHARED part — agreed between client & control-plane)
+
+**Scheme + shape — this is the full contract:**
 
 ```
 ankayma://auth?token=<SESSION_TOKEN>
 ```
 
-- Scheme: `ankayma` (lowercase). Host/path: `auth`. Query param **`token`** = đúng `session_token` mà control-plane đang hiện cho user copy (không đổi định dạng token).
-- `token` phải **URL-encoded** (token hiện là hex `[0-9a-f]` nên thực tế không có ký tự đặc biệt, nhưng CP **vẫn nên** `encodeURIComponent` cho chắc). `[A]`
-- App parse `token`, validate qua `GET /api/v1/session` (Bearer), giống hệt `submit_session_token`. Token sai/expired → app báo lỗi + rơi về màn paste. `[T]`
-- Cùng một URL dùng được trên **desktop (macOS) và mobile (iOS/Android)** — chỉ khác cách OS định tuyến scheme.
+- Scheme: `ankayma` (lowercase). Host/path: `auth`. Query param **`token`** = exactly the `session_token` that the control-plane currently shows for the user to copy (token format unchanged).
+- `token` must be **URL-encoded** (current token is hex `[0-9a-f]` so there are no special characters in practice, but CP **should still** `encodeURIComponent` for safety). `[A]`
+- App parses `token`, validates via `GET /api/v1/session` (Bearer), exactly like `submit_session_token`. Invalid/expired token → app shows error + falls back to paste screen. `[T]`
+- The same URL works on **desktop (macOS) and mobile (iOS/Android)** — only the OS scheme routing differs.
 
 -----
 
-## 3. Phần việc CONTROL-PLANE (repo CLOSED) — cần làm
+## 3. CONTROL-PLANE tasks (CLOSED repo) — what needs to be done
 
-Trang kết quả OAuth (trang hiện "Signed in as …" + token) chỉ cần **1 thay đổi**: cho nút **"Open Ankayma"** trỏ tới deep-link.
+The OAuth result page (page that shows "Signed in as …" + token) needs **1 change**: make the **"Open Ankayma"** button point to the deep-link.
 
-**3.1 Nút "Open Ankayma"** — đổi thành anchor mở scheme:
+**3.1 "Open Ankayma" button** — change to an anchor that opens the scheme:
 
 ```html
-<!-- token = session token vừa cấp; PHẢI encodeURIComponent -->
+<!-- token = the session token just issued; MUST encodeURIComponent -->
 <a class="btn-primary" href="ankayma://auth?token=ENCODED_TOKEN">Open Ankayma</a>
 ```
 
-hoặc tự mở ngay khi trang load (UX mượt hơn, vẫn giữ nút làm fallback):
+or auto-open when the page loads (smoother UX, still keep the button as fallback):
 
 ```html
 <script>
   const token = "…";                      // server render
   const deeplink = "ankayma://auth?token=" + encodeURIComponent(token);
-  // thử mở app tự động; nếu OS không có app, không sao — user bấm nút/copy
+  // attempt to open app automatically; if OS has no app, that's fine — user clicks button/copies
   location.href = deeplink;
 </script>
 ```
 
-**3.2 Giữ nguyên** phần hiện token + chữ "If the app didn't open, copy your session token" làm fallback (đề phòng app chưa cài / scheme chưa đăng ký / browser chặn auto-redirect). **Không** bỏ.
+**3.2 Keep** the token display + "If the app didn't open, copy your session token" text as fallback (in case app not installed / scheme not registered / browser blocks auto-redirect). **Do not** remove.
 
-**3.3 KHÔNG cần** đổi gì ở `/auth/github`, `/api/v1/session`, hay định dạng token. Không cần `redirect_uri`, không cần loopback. Chỉ là 1 dòng `href` ở trang kết quả.
+**3.3 NO changes needed** to `/auth/github`, `/api/v1/session`, or token format. No `redirect_uri` needed, no loopback needed. Just 1 `href` line on the result page.
 
-> Lưu ý cho CP: một số browser chặn `location.href = "custom://"` nếu không do user-gesture. Nên ưu tiên **anchor `<a href>`** (user bấm) làm chính; auto-redirect chỉ là bonus.
+> Note for CP: some browsers block `location.href = "custom://"` if not triggered by a user gesture. Prefer **anchor `<a href>`** (user click) as the primary mechanism; auto-redirect is just a bonus.
 
 -----
 
-## 4. Phần việc CLIENT (repo này) — cần làm
+## 4. CLIENT tasks (this repo) — what needs to be done
 
-### 4.1 Đăng ký scheme `ankayma://`
-- Thêm plugin: `tauri-plugin-deep-link` (v2) — đăng ký scheme + nhận URL. Kèm `tauri-plugin-single-instance` (desktop) để khi đang chạy mà mở deep-link thì **focus instance cũ** + forward URL thay vì mở app thứ 2. `[A]` (single-instance phải là plugin đăng ký **đầu tiên** theo doc Tauri).
-- `tauri.conf.json` → `plugins.deep-link.desktop.schemes = ["ankayma"]` (và `mobile` tương ứng). Bundler sẽ tự ghi `CFBundleURLTypes` vào Info.plist (macOS/iOS) + intent-filter (Android). `[A-p]` (verify Info.plist sau khi `cargo tauri build`).
-- Capability: thêm `deep-link:default` vào `gui/src-tauri/capabilities/*.json`.
+### 4.1 Register the `ankayma://` scheme
+- Add plugin: `tauri-plugin-deep-link` (v2) — registers the scheme + receives URLs. Also add `tauri-plugin-single-instance` (desktop) so that when a deep-link is opened while the app is running, it **focuses the existing instance** + forwards the URL instead of opening a second app. `[A]` (single-instance must be the **first** plugin registered, per Tauri docs).
+- `tauri.conf.json` → `plugins.deep-link.desktop.schemes = ["ankayma"]` (and `mobile` accordingly). The bundler will automatically write `CFBundleURLTypes` to Info.plist (macOS/iOS) + intent-filter (Android). `[A-p]` (verify Info.plist after `cargo tauri build`).
+- Capability: add `deep-link:default` to `gui/src-tauri/capabilities/*.json`.
 
-### 4.2 Xử lý URL khi nhận được
-- Trong `setup()`: `app.deep_link().on_open_url(|event| { … })`.
-- Parse từng URL: scheme == `ankayma`, host == `auth`, lấy query `token`.
-- Refactor logic của `submit_session_token` (`lib.rs:237`) ra 1 helper dùng chung `apply_session_token(app, token)`:
-  - validate `adapters::session_info` → set `email` + `token` vào `AppState` → `apply_connection_change(app)`.
-- Sau khi token OK: `show_main_window(app)` (show + focus) và emit event mới **`signed-in`** mang `AuthState::Authenticated{user}`.
+### 4.2 Handle URL when received
+- In `setup()`: `app.deep_link().on_open_url(|event| { … })`.
+- Parse each URL: scheme == `ankayma`, host == `auth`, extract query `token`.
+- Refactor the logic of `submit_session_token` (`lib.rs:237`) into a shared helper `apply_session_token(app, token)`:
+  - validate `adapters::session_info` → set `email` + `token` in `AppState` → `apply_connection_change(app)`.
+- After token is OK: `show_main_window(app)` (show + focus) and emit new event **`signed-in`** carrying `AuthState::Authenticated{user}`.
 
-### 4.3 Frontend nhận event
-- `frontend/app-gui/src/routes/+layout.svelte`: thêm listener `listen('signed-in', …)` → `auth.set(payload)` + `goto('/dashboard')` (xử lý cả trường hợp deep-link tới **sau** khi `onMount`/`checkAuthState` đã chạy).
-- `welcome/+page.svelte`: giữ nguyên màn paste làm fallback. (Tùy chọn: đổi chữ hint thành "Bấm 'Open Ankayma' trong browser — app sẽ tự mở. Không mở được thì dán token bên dưới.")
+### 4.3 Frontend receives event
+- `frontend/app-gui/src/routes/+layout.svelte`: add listener `listen('signed-in', …)` → `auth.set(payload)` + `goto('/dashboard')` (handles the case where deep-link arrives **after** `onMount`/`checkAuthState` has already run).
+- `welcome/+page.svelte`: keep the paste screen as fallback. (Optional: change hint text to "Click 'Open Ankayma' in the browser — the app will open automatically. If it doesn't open, paste your token below.")
 
 ### 4.4 Verify `[T]`
-- macOS: `cargo tauri build --bundles app`, mở 1 lần để LaunchServices ghi nhận scheme, rồi `open "ankayma://auth?token=<token-thật>"` → app focus + vào dashboard, không qua màn paste.
-- Token sai: `open "ankayma://auth?token=bad"` → app báo lỗi, rơi về màn paste, không crash.
-- Đang chạy sẵn (window ẩn xuống tray) → mở deep-link → focus lại đúng instance (single-instance), không mở app thứ 2.
+- macOS: `cargo tauri build --bundles app`, open once to let LaunchServices register the scheme, then `open "ankayma://auth?token=<real-token>"` → app focuses + goes to dashboard, without going through the paste screen.
+- Invalid token: `open "ankayma://auth?token=bad"` → app shows error, falls back to paste screen, does not crash.
+- Already running (window hidden in tray) → open deep-link → focuses the correct instance (single-instance), does not open a second app.
 
 -----
 
-## 5. Bảo mật / rủi ro (ghi để không quên)
+## 5. Security / risks (noted to not forget)
 
-- **Token trong URL scheme**: custom scheme có thể bị app khác trên máy đăng ký trùng (`ankayma://`) và "cướp" URL → đọc được token. Đây là hạn chế cố hữu của custom-scheme deep-link (Tailscale & nhiều app desktop chấp nhận). Chấp nhận cho F0. `[A]`
-  - **Nâng cấp về sau (nếu cần chặt hơn)**: theo RFC 8252 — app mở HTTP server loopback `127.0.0.1:<random>`, truyền `redirect_uri=http://127.0.0.1:<port>/cb` cho CP, CP redirect token về loopback. Tránh hijack scheme, nhưng cần CP hỗ trợ `redirect_uri` + app chạy server tạm. **Ngoài phạm vi bản này.**
-- Token **không** ghi ra disk/log. Khi log URL (debug) phải **redact** `token` (`ankayma://auth?token=***`).
-- App **luôn** validate token với control-plane trước khi tin (đã có sẵn ở `submit_session_token` / `check_auth_state`). Deep-link không bỏ bước validate này.
+- **Token in URL scheme**: custom scheme can be registered by another app on the machine with the same name (`ankayma://`) and "hijack" the URL → read the token. This is an inherent limitation of custom-scheme deep-links (Tailscale and many desktop apps accept this). Accepted for F0. `[A]`
+  - **Future upgrade (if stricter security needed)**: per RFC 8252 — app opens HTTP loopback server `127.0.0.1:<random>`, passes `redirect_uri=http://127.0.0.1:<port>/cb` to CP, CP redirects token to loopback. Avoids scheme hijacking, but requires CP to support `redirect_uri` + app to run a temporary server. **Out of scope for this version.**
+- Token **is not** written to disk/log. When logging the URL (debug) must **redact** `token` (`ankayma://auth?token=***`).
+- App **always** validates token with the control-plane before trusting it (already present in `submit_session_token` / `check_auth_state`). Deep-link does not skip this validation step.
 
 -----
 
-## 6. Tóm tắt phân chia
+## 6. Division summary
 
-| Bên | Việc |
+| Side | Task |
 |---|---|
-| **Control-plane** (CLOSED) | Trang kết quả OAuth: nút "Open Ankayma" → `href="ankayma://auth?token=<encodeURIComponent(token)>"`. Giữ phần copy-token làm fallback. Không đổi API/token. |
-| **Client** (repo này) | Đăng ký scheme `ankayma://` (deep-link + single-instance plugin), xử lý `on_open_url` → validate + lưu token + focus window + emit `signed-in`; frontend listen `signed-in` → goto `/dashboard`. Giữ màn paste làm fallback. |
+| **Control-plane** (CLOSED) | OAuth result page: "Open Ankayma" button → `href="ankayma://auth?token=<encodeURIComponent(token)>"`. Keep copy-token section as fallback. No API/token changes. |
+| **Client** (this repo) | Register `ankayma://` scheme (deep-link + single-instance plugin), handle `on_open_url` → validate + store token + focus window + emit `signed-in`; frontend listens to `signed-in` → goto `/dashboard`. Keep paste screen as fallback. |

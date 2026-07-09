@@ -1,43 +1,28 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
-  import { getPathProof } from '$lib/tauri';
-  import type { PathProof } from '$lib/types';
+  import type { PathPeer } from '$lib/types';
 
   interface Props {
     node?: string;
+    peer?: PathPeer | null;
     ledgerEntry?: string;
     ledgerTime?: string;
     onclose?: () => void;
   }
-  let { node = '', ledgerEntry = '', ledgerTime = '', onclose }: Props = $props();
+  let { node = '', peer = null, ledgerEntry = '', ledgerTime = '', onclose }: Props = $props();
 
-  // [F-5 "Prove it"] Route + vendor rows are measured from the live WireGuard
-  // state (get_path_proof), not hardcoded — the panel is a proof, not a claim.
-  let proof = $state<PathProof | null>(null);
-  let proofErr = $state('');
-  let expanded = $state(false);
-  // Endpoint = the node's static public IP:port. Masked by default so a shared
-  // screenshot of the proof never leaks it; one tap reveals (owner asked for
-  // this trade-off — proof stays available, leak needs intent, 2026-07-05).
-  let revealEndpoint = $state(false);
-  onMount(() => {
-    getPathProof()
-      .then((p) => (proof = p))
-      .catch((e) => (proofErr = String(e)));
-  });
-  // [A] my_access `node` and path-proof `hostname` are both the peer's hostname
-  // today; verify the join once my_access grows node ids.
-  let peer = $derived(proof?.peers.find((p) => p.hostname === node) ?? null);
-  let route = $derived(
-    proof === null
-      ? '…'
-      : peer === null
-        ? 'no active tunnel'
-        : peer.direct
-          ? 'direct peer-to-peer'
-          : 'relayed · end-to-end encrypted'
-  );
-  let vendorInPath = $derived(proof?.vendor_on_data_path ?? null);
+  function fmtBytes(n: number): string {
+    if (n < 1024) return `${n} B`;
+    if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+    return `${(n / 1024 / 1024).toFixed(1)} MB`;
+  }
+
+  function fmtHandshake(secs: number): string {
+    if (secs < 60) return `${secs}s ago`;
+    if (secs < 3600) return `${Math.floor(secs / 60)}m ago`;
+    return `${Math.floor(secs / 3600)}h ago`;
+  }
+
+  const hasTraffic = $derived(peer != null && (peer.tx_bytes > 0 || peer.rx_bytes > 0));
 </script>
 
 <div
@@ -72,18 +57,46 @@
     <div class="info-rows">
       <div class="info-row">
         <span class="info-label">Route</span>
-        <span class="info-val">{route}</span>
+        {#if peer}
+          {#if peer.direct}
+            <span class="info-val">direct peer-to-peer</span>
+          {:else}
+            <span class="info-val relay">relayed (encrypted)</span>
+          {/if}
+        {:else}
+          <span class="info-val dim">—</span>
+        {/if}
       </div>
       <div class="info-row">
         <span class="info-label">Vendor in path</span>
-        {#if vendorInPath === null}
-          <span class="info-val">…</span>
-        {:else if vendorInPath}
-          <span class="info-val warn">Yes ⚠</span>
+        {#if peer}
+          {#if peer.direct}
+            <span class="info-val check">No ✓</span>
+          {:else}
+            <span class="info-val relay-warn">Yes · relay (content encrypted)</span>
+          {/if}
         {:else}
-          <span class="info-val check">No ✓</span>
+          <span class="info-val dim">—</span>
         {/if}
       </div>
+      {#if peer?.endpoint}
+        <div class="info-row">
+          <span class="info-label">Endpoint</span>
+          <code class="info-val ep">{peer.endpoint}</code>
+        </div>
+      {/if}
+      {#if peer?.last_handshake_secs != null}
+        <div class="info-row">
+          <span class="info-label">Handshake</span>
+          <span class="info-val">{fmtHandshake(peer.last_handshake_secs)}</span>
+        </div>
+      {/if}
+      {#if hasTraffic && peer}
+        <div class="info-row">
+          <span class="info-label">Traffic</span>
+          <span class="info-val">↑ {fmtBytes(peer.tx_bytes)} · ↓ {fmtBytes(peer.rx_bytes)}</span>
+        </div>
+      {/if}
       {#if ledgerEntry}
         <div class="info-row">
           <span class="info-label">Ledger entry</span>
@@ -91,55 +104,14 @@
         </div>
       {/if}
     </div>
-
-    {#if expanded}
-      <div class="detail">
-        {#if proofErr}
-          <p class="detail-err">Could not read the path proof: {proofErr}</p>
-        {:else if proof === null}
-          <p class="detail-note">Reading live path proof…</p>
-        {:else}
-          <div class="info-row">
-            <span class="info-label">Node</span>
-            <span class="info-val mono">{node}</span>
-          </div>
-          {#if peer}
-            <div class="info-row">
-              <span class="info-label">Overlay IP</span>
-              <span class="info-val mono">{peer.overlay_ip}</span>
-            </div>
-            <div class="info-row">
-              <span class="info-label">Endpoint</span>
-              {#if !peer.endpoint}
-                <span class="info-val mono">—</span>
-              {:else if revealEndpoint}
-                <span class="info-val mono">{peer.endpoint}</span>
-              {:else}
-                <button
-                  class="reveal-btn"
-                  title="Public IP of your node — hidden from screenshots by default"
-                  onclick={() => (revealEndpoint = true)}
-                >••••••••••:••••&nbsp; tap to reveal</button>
-              {/if}
-            </div>
-          {:else}
-            <p class="detail-note">No active tunnel to this node right now — connect and reopen to capture the live path.</p>
-          {/if}
-          <div class="info-row">
-            <span class="info-label">Control plane</span>
-            <span class="info-val mono">{proof.control_plane}</span>
-          </div>
-          <p class="detail-note">
-            Coordination only — the control plane never carries your traffic. Measured
-            live from the WireGuard session; signed per-session receipts land with the
-            ledger export.
-          </p>
-        {/if}
-      </div>
+    {#if !peer}
+      <p class="no-data">Connect the tunnel to see live path evidence.</p>
+    {:else if !peer.direct}
+      <p class="relay-note">
+        Traffic flows through a vendor-operated relay encrypted end-to-end — vendor cannot read content.
+        See <strong>Pricing &amp; Plans</strong> for direct P2P options.
+      </p>
     {/if}
-    <button class="link-btn" onclick={() => (expanded = !expanded)}>
-      {expanded ? 'Hide ledger detail' : 'View full ledger entry'}
-    </button>
   </div>
 </div>
 
@@ -246,57 +218,39 @@
     color: var(--sec-allow);
   }
 
-  .info-val.warn {
-    color: var(--c-warn);
+  .info-val.dim {
+    color: var(--c-text-dim);
   }
 
-  .info-val.mono {
+  .info-val.relay {
+    color: var(--c-text-dim);
+  }
+
+  .info-val.relay-warn {
+    color: var(--c-warn, #f5a623);
+  }
+
+  .info-val.ep {
     font-family: 'SF Mono', 'Fira Code', monospace;
     font-size: 12px;
-    word-break: break-all;
-    text-align: right;
+    color: var(--c-text-dim);
   }
 
-  .detail {
-    display: flex;
-    flex-direction: column;
-    gap: 8px;
-    margin-bottom: 16px;
-    padding: 12px;
-    background: var(--c-bg);
-    border-radius: 8px;
+  .no-data {
+    font-size: 12px;
+    color: var(--c-text-dim);
+    text-align: center;
+    padding: 8px 0;
   }
 
-  .detail-note {
+  .relay-note {
     font-size: 12px;
     color: var(--c-text-dim);
     line-height: 1.5;
-  }
-
-  .detail-err {
-    font-size: 12px;
-    color: var(--c-danger);
-  }
-
-  .reveal-btn {
-    font-family: 'SF Mono', 'Fira Code', monospace;
-    font-size: 11px;
-    color: var(--c-text-dim);
-    background: none;
-    border: 1px dashed var(--c-border);
+    padding: 10px;
+    background: var(--c-bg);
     border-radius: 6px;
-    padding: 2px 8px;
-    cursor: pointer;
-  }
-  .reveal-btn:hover {
-    color: var(--c-text);
-    border-color: var(--c-text-dim);
-  }
-
-  .link-btn {
-    color: var(--c-accent);
-    font-size: 13px;
-    text-decoration: underline;
+    margin-top: 4px;
   }
 
   @media (min-width: 760px) {

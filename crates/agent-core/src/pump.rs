@@ -83,6 +83,14 @@ impl PeerEntry {
     fn idle_for(&self) -> Duration {
         self.last_activity.lock().expect("activity lock").elapsed()
     }
+    /// WireGuard session statistics: time since last handshake (None if none yet),
+    /// cumulative bytes sent, cumulative bytes received. Evidence for F-5 proof.
+    /// [T:A.1.1] — byte counters prove data moved without transiting the vendor.
+    pub fn stats(&self) -> (Option<Duration>, usize, usize) {
+        let tunn = self.tunn.lock().expect("tunn lock");
+        let (hs, tx, rx, _, _) = tunn.stats();
+        (hs, tx, rx)
+    }
 }
 
 /// The shared, mutable peer roster. `Arc<Mutex<…>>` because the three pump threads

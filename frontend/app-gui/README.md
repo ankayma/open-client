@@ -15,7 +15,7 @@ To recreate this project with the same configuration:
 
 ```sh
 # recreate this project
-npx sv@0.16.1 create --template minimal --types ts --install npm /Users/bobby/Documents/AI-Teams/p2p/codespace/client/frontend/app-gui
+npx sv@0.16.1 create --template minimal --types ts --install npm app-gui
 ```
 
 ## Developing

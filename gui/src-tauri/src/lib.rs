@@ -244,23 +244,31 @@ pub struct NodeInfo {
     pub public_key: String,
 }
 
-/// [F-5 / A.1.1] One mesh peer on the data path. `direct` = a reachable endpoint is
-/// known, so traffic is peer-to-peer. No NAT-fallback relay exists yet.
+/// [F-5 / A.1.1] One mesh peer on the data path. `direct` = endpoint is known and
+/// traffic is peer-to-peer (no relay). Stats are live from boringtun via
+/// agent-status.json — evidence that data moved without transiting the vendor.
 #[derive(Serialize, Deserialize, Clone)]
 pub struct PathPeer {
     pub hostname: String,
     pub overlay_ip: String,
+    /// True = direct WireGuard (no relay). False = relayed (vendor in data path per
+    /// A.1.12; honest per P.3). Currently always true — relay not yet implemented.
     pub direct: bool,
     pub endpoint: Option<String>,
+    /// Seconds since the last WireGuard handshake; None if no handshake yet.
+    pub last_handshake_secs: Option<u64>,
+    pub tx_bytes: u64,
+    pub rx_bytes: u64,
 }
 
-/// [F-5 "Prove it"] Path-proof: your traffic is peer-to-peer; the vendor (control
-/// plane) is the control channel only, never on the data path (A.1.1).
+/// [F-5 "Prove it"] Path-proof: each peer's data-path type, live WireGuard evidence,
+/// and whether the vendor is on the data path. [T:A.1.1 / P.3]
 #[derive(Serialize, Deserialize, Clone)]
 pub struct PathProof {
     pub connected: bool,
     pub control_plane: String,
-    /// Always false: A.1.1 keeps the vendor off the data path.
+    /// True only when any peer routes via vendor relay (A.1.12 Personal line).
+    /// Computed from peers, not hardcoded — turns correct automatically when relay lands.
     pub vendor_on_data_path: bool,
     pub peers: Vec<PathPeer>,
 }
@@ -697,36 +705,77 @@ async fn get_node_info(state: State<'_, AppState>) -> Result<NodeInfo, String> {
     })
 }
 
-/// [F-5 "Prove it"] Surface the data path for the current connection: each peer is
-/// reached peer-to-peer, and the vendor is never on the data path (A.1.1). Built from
-/// the enrolled node's peer list — no extra control-plane round-trip.
+/// [F-5 "Prove it"] Live data-path proof read from the daemon's heartbeat file.
+/// Returns per-peer WireGuard stats (handshake age, byte counts) so the viewer can
+/// verify the connection is real and peer-to-peer without trusting the GUI alone.
+/// vendor_on_data_path is computed from peer states — honest per P.3, not hardcoded.
 #[tauri::command]
 async fn get_path_proof(state: State<'_, AppState>) -> Result<PathProof, String> {
-    let guard = state.node.lock().expect("node lock poisoned");
-    let (connected, peers) = match &*guard {
-        Some(n) => {
-            let peers = n
-                .peers
-                .iter()
-                .map(|p| PathPeer {
-                    hostname: p.hostname.clone(),
-                    overlay_ip: p.overlay_ip.clone(),
-                    // A reachable endpoint ⇒ a direct dial. No relay exists yet, so a
-                    // responder-only peer (no endpoint) is still reached peer-to-peer.
-                    direct: p.endpoint.is_some(),
-                    endpoint: p.endpoint.clone(),
-                })
-                .collect();
-            (true, peers)
-        }
-        None => (false, Vec::new()),
+    let control_plane = state.base_url.clone();
+    let not_connected = || PathProof {
+        connected: false,
+        control_plane: control_plane.clone(),
+        vendor_on_data_path: false,
+        peers: vec![],
     };
+
+    let home = std::env::var("HOME").map_err(|_| "HOME not set".to_string())?;
+    let path = std::path::Path::new(&home).join(".ankayma/agent-status.json");
+    let Ok(bytes) = std::fs::read(&path) else {
+        return Ok(not_connected());
+    };
+
+    #[derive(serde::Deserialize)]
+    struct FilePeer {
+        hostname: String,
+        overlay_ip: String,
+        endpoint: Option<String>,
+        #[serde(default)]
+        direct: bool,
+        #[serde(default)]
+        last_handshake_secs: Option<u64>,
+        #[serde(default)]
+        tx_bytes: u64,
+        #[serde(default)]
+        rx_bytes: u64,
+    }
+    #[derive(serde::Deserialize)]
+    struct FileStatus {
+        updated_at: u64,
+        peers: Vec<FilePeer>,
+    }
+
+    let Ok(s) = serde_json::from_slice::<FileStatus>(&bytes) else {
+        return Ok(not_connected());
+    };
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let connected = now.saturating_sub(s.updated_at) <= 15;
+
+    // vendor_on_data_path: computed from relay state of each peer (P.3 honest).
+    // Currently always false — relay not yet implemented. Becomes correct automatically
+    // when relay lands and any peer has direct=false (Personal NAT relay, A.1.12).
+    let vendor_on_data_path = s.peers.iter().any(|p| !p.direct);
+
     Ok(PathProof {
         connected,
-        control_plane: state.base_url.clone(),
-        // [T:A.1.1] data plane never transits the vendor — structural, not a setting.
-        vendor_on_data_path: false,
-        peers,
+        control_plane,
+        vendor_on_data_path,
+        peers: s
+            .peers
+            .into_iter()
+            .map(|p| PathPeer {
+                hostname: p.hostname,
+                overlay_ip: p.overlay_ip,
+                direct: p.direct,
+                endpoint: p.endpoint,
+                last_handshake_secs: p.last_handshake_secs,
+                tx_bytes: p.tx_bytes,
+                rx_bytes: p.rx_bytes,
+            })
+            .collect(),
     })
 }
 

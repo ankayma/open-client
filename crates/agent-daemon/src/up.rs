@@ -174,7 +174,7 @@ pub(crate) async fn serve_dataplane(
     initial_peers: Vec<agent_core::domain::PeerInfo>,
     ctx: RefreshCtx,
 ) -> Result<()> {
-    // [T:A.1.3] family-agnostic: control plane có thể cấp IPv4 hoặc IPv6 ULA.
+    // [T:A.1.3] family-agnostic: control plane may assign IPv4 or IPv6 ULA.
     let self_overlay: IpAddr = state
         .overlay_ip
         .parse()
@@ -751,6 +751,15 @@ struct StatusPeer {
     hostname: String,
     overlay_ip: String,
     endpoint: Option<String>,
+    /// Endpoint is known ⇒ direct WireGuard (no relay). False until handshake
+    /// completes for a responder-only peer; flips to false for relay peers when
+    /// relay lands (A.1.12). [T:A.1.1]
+    direct: bool,
+    /// Seconds since the last WireGuard handshake, or absent if none yet.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    last_handshake_secs: Option<u64>,
+    tx_bytes: u64,
+    rx_bytes: u64,
 }
 
 #[derive(serde::Serialize)]
@@ -774,10 +783,18 @@ fn write_status(node_id: &str, overlay_ip: &str, listen_port: u16, peers: &Peers
         .lock()
         .expect("peers lock")
         .iter()
-        .map(|p| StatusPeer {
-            hostname: p.peer.hostname.clone(),
-            overlay_ip: p.peer.overlay_ip.to_string(),
-            endpoint: p.endpoint().map(|e| e.to_string()),
+        .map(|p| {
+            let ep = p.endpoint();
+            let (hs, tx, rx) = p.stats();
+            StatusPeer {
+                hostname: p.peer.hostname.clone(),
+                overlay_ip: p.peer.overlay_ip.to_string(),
+                endpoint: ep.map(|e| e.to_string()),
+                direct: ep.is_some(),
+                last_handshake_secs: hs.map(|d| d.as_secs()),
+                tx_bytes: tx as u64,
+                rx_bytes: rx as u64,
+            }
         })
         .collect();
     let status = DataplaneStatus {
@@ -1056,7 +1073,7 @@ fn configure_interface(name: &str, overlay: IpAddr) -> Result<()> {
         IpAddr::V4(_) => {
             run_cmd(Command::new("ifconfig").args([name, "inet", &ip, &ip, "up"]))?;
         }
-        // [A? verify-on-macOS] IPv6: gán host /128 lên utun; per-peer /128 route thêm sau.
+        // [A? verify-on-macOS] IPv6: assign host /128 on utun; per-peer /128 routes added later.
         IpAddr::V6(_) => {
             run_cmd(Command::new("ifconfig").args([name, "inet6", &ip, "prefixlen", "128", "up"]))?;
         }
@@ -1115,7 +1132,7 @@ fn configure_interface(_name: &str, _overlay: IpAddr) -> Result<()> {
 /// (e.g. a stale Tailscale route). Best-effort: a failure is logged, not fatal.
 #[cfg(target_os = "macos")]
 fn add_peer_route(name: &str, overlay: IpAddr) {
-    // host route per-peer: /32 (v4) hoặc /128 (v6) — thắng mọi dải trùng (vd Tailscale /10).
+    // host route per-peer: /32 (v4) or /128 (v6) — wins over any overlapping range (e.g. Tailscale /10).
     let (inet, dst) = match overlay {
         IpAddr::V4(a) => ("-inet", format!("{a}/32")),
         IpAddr::V6(a) => ("-inet6", format!("{a}/128")),
