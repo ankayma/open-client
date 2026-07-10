@@ -6,15 +6,52 @@
 	import { goto } from '$app/navigation';
 	import { onMount } from 'svelte';
 	import { connection, quota } from '$lib/stores';
-	import { listNodes, getNodeInfo, deleteNode, getQuota } from '$lib/tauri';
+	import { listNodes, getNodeInfo, deleteNode, getQuota, getPathProof } from '$lib/tauri';
 	import { runWithStepUp } from '$lib/stepup';
 	import type { PeerBrief } from '$lib/types';
 
-	// "Online" dot: this device follows the app's connection state; peers use
-	// the server-side `active` field (expires_at check from /api/v1/nodes).
-	function isOnline(d: PeerBrief): boolean {
-		if (d.node_id === thisNodeId) return $connection.status === 'connected';
-		return d.active;
+	// A peer counts as live only if WireGuard handshook with it this recently.
+	// WireGuard rekeys well inside two minutes on an active tunnel, so three is
+	// slack, not evidence of nothing.
+	const HANDSHAKE_FRESH_SECS = 180;
+
+	// Liveness is DATA-PLANE evidence, never a control-plane claim. The old code
+	// read the server's `active` flag, which is `expires_at IS NULL OR expires_at
+	// > NOW()` -- always true for a persistent node, so every device showed green
+	// forever, including ones dead for months.
+	//
+	// The vendor is off the data path by design (A.1.1), so the control plane
+	// CANNOT know which devices are reachable on the mesh. Only the two tunnel
+	// endpoints know. This device already measures it: the daemon publishes each
+	// peer's last WireGuard handshake age, surfaced by `get_path_proof`.
+	//
+	// Where we have no measurement -- disconnected, or a peer this tunnel has
+	// never handshook with -- the answer is `unknown`, not `offline`. Claiming a
+	// device is down when we simply cannot see it would be the same lie in the
+	// other direction. `[T:A.1.1 + P.3 honest gap]`
+	type Liveness = 'live' | 'unknown';
+
+	function liveness(d: PeerBrief): Liveness {
+		if (d.node_id === thisNodeId) {
+			return $connection.status === 'connected' ? 'live' : 'unknown';
+		}
+		const secs = handshakeAge.get(d.overlay_ip);
+		if (secs === undefined || secs === null) return 'unknown';
+		return secs <= HANDSHAKE_FRESH_SECS ? 'live' : 'unknown';
+	}
+
+	// Why a peer is not shown as live -- so the dot never has to carry the whole
+	// story on its own.
+	function livenessTitle(d: PeerBrief): string {
+		if (d.node_id === thisNodeId) {
+			return $connection.status === 'connected' ? 'Connected' : 'Not connected';
+		}
+		if (!pathKnown) return 'Connect to see which devices are reachable';
+		const secs = handshakeAge.get(d.overlay_ip);
+		if (secs === undefined || secs === null) return 'No handshake with this device yet';
+		if (secs <= HANDSHAKE_FRESH_SECS) return `Handshake ${secs}s ago`;
+		const mins = Math.round(secs / 60);
+		return mins < 60 ? `Silent for ${mins}m` : `Silent for ${Math.round(mins / 60)}h`;
 	}
 
 	let devices = $state<PeerBrief[]>([]);
@@ -23,18 +60,31 @@
 	let error = $state('');
 	let confirmNode = $state<PeerBrief | null>(null);
 	let removing = $state(false);
+	// overlay_ip -> seconds since last handshake. overlay_ip is unique per node,
+	// and is the only key both the roster and the data-plane status share.
+	let handshakeAge = $state(new Map<string, number | null>());
+	// False when the data plane cannot be read at all (not connected, or a
+	// platform with no daemon status file). Every peer is then `unknown`.
+	let pathKnown = $state(false);
 
 	async function load() {
 		loading = true;
 		error = '';
 		try {
-			// This device first (so we can flag it), then the full peer list.
-			const [self, peers] = await Promise.all([
+			// This device first (so we can flag it), then the full peer list. The
+			// data-plane proof is best-effort: without it every peer reads `unknown`,
+			// which is the honest answer, so its failure must not fail the page.
+			const [self, peers, proof] = await Promise.all([
 				getNodeInfo().catch(() => null),
-				listNodes()
+				listNodes(),
+				getPathProof().catch(() => null)
 			]);
 			thisNodeId = self?.node_id ?? null;
 			devices = peers;
+			pathKnown = proof?.connected ?? false;
+			handshakeAge = new Map(
+				(proof?.peers ?? []).map((p) => [p.overlay_ip, p.last_handshake_secs])
+			);
 		} catch (e) {
 			error = String(e);
 		} finally {
@@ -139,7 +189,12 @@
 		<ul class="device-list">
 			{#each sorted as d (d.node_id)}
 				<li class="device">
-					<span class="dot" class:online={isOnline(d)}></span>
+					<span
+						class="dot"
+						class:online={liveness(d) === 'live'}
+						title={livenessTitle(d)}
+						aria-label={livenessTitle(d)}
+					></span>
 					<div class="info">
 						<div class="name-row">
 							<span class="name">{d.hostname}</span>
@@ -319,16 +374,21 @@
 	}
 	.device:last-child { border-bottom: none; }
 
+	/* Hollow = we have no data-plane evidence about this device, which is not the
+	   same as knowing it is off. A filled grey dot would assert "offline" -- a
+	   claim this client cannot make (A.1.1 / P.3). Hover for the reason. */
 	.dot {
 		width: 9px;
 		height: 9px;
 		border-radius: 50%;
-		background: var(--c-text-dim);
+		background: transparent;
+		border: 1.5px solid var(--c-text-dim);
 		margin-top: 5px;
 		flex-shrink: 0;
 	}
 	.dot.online {
 		background: var(--sec-allow);
+		border-color: var(--sec-allow);
 		box-shadow: 0 0 8px var(--sec-allow);
 	}
 

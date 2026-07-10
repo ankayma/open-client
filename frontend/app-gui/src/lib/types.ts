@@ -87,7 +87,16 @@ export interface PeerBrief {
   node_id: string;
   overlay_ip: string;
   hostname: string;
-  /** Server-side active status from GET /api/v1/nodes (expires_at check). */
+  /**
+   * NOT a liveness signal. This is `expires_at IS NULL OR expires_at > NOW()`
+   * from GET /api/v1/nodes -- it only says an ephemeral node's lease has not
+   * lapsed. A persistent node has no expiry, so this is permanently `true`,
+   * even for a device that died months ago.
+   *
+   * For "is this device reachable", use the WireGuard handshake age from
+   * `getPathProof()`. The vendor is off the data path (A.1.1), so the control
+   * plane cannot answer that question at all. `[T:P.3]`
+   */
   active: boolean;
   owner_user_id?: string;
 }
