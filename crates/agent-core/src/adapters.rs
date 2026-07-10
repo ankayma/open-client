@@ -165,8 +165,9 @@ pub async fn list_nodes(
 
 /// Fetch the current mesh roster. `GET /api/v1/peers`. `[T:B.5.1]`
 /// Used to discover peers that enrolled *after* this node did, so a long-running
-/// agent's view of the mesh stays fresh without re-enrolling (which would create
-/// a new node each time — the control plane does not dedup by public key).
+/// agent's view of the mesh stays fresh. Re-enrolling to refresh the roster would
+/// be wasteful, not harmful: enrollment is idempotent on the machine key, and on
+/// the WireGuard key before that.
 pub async fn peers(
     http: &reqwest::Client,
     base_url: &str,
@@ -301,6 +302,10 @@ pub struct JoinEnrollRequest {
     pub hostname: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub endpoint: Option<String>,
+    /// See `domain::EnrollRequest::machine_proof`. Redeeming an invite also lifts an
+    /// administrator's revocation of this device — the invite IS the re-admission.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub machine_proof: Option<String>,
 }
 
 /// Redeem a node invite (`ankayma://join?token=…`) to enroll THIS device into the
@@ -1373,6 +1378,7 @@ mod tests {
             hostname: "h".into(),
             endpoint: None,
             workload_kind: None,
+            machine_proof: None,
         };
         let err = enroll(&http, "https://cp.ankayma.com", "bogus-token", &req)
             .await
@@ -1403,6 +1409,7 @@ mod tests {
             public_key: "x".into(),
             hostname: "h".into(),
             endpoint: None,
+            machine_proof: None,
         };
         let err = enroll_via_join_token(&http, "https://cp.ankayma.com", &req)
             .await
@@ -1456,6 +1463,7 @@ mod tests {
                 public_key: kp.public_b64,
                 hostname: "layer2-regression-e3".into(),
                 endpoint: None,
+                machine_proof: None,
             },
         )
         .await

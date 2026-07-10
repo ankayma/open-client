@@ -16,6 +16,14 @@ pub struct EnrollRequest {
     /// [T:Part B §B.1.4] Canonical workload kind (e.g. "AppServer", "ClientDevice").
     #[serde(skip_serializing_if = "Option::is_none")]
     pub workload_kind: Option<String>,
+    /// Proof of possession of this device's machine key (`machine_key::MachineKey`).
+    /// The control plane matches a node to a DEVICE on this, so a rotated WireGuard
+    /// key updates the node in place instead of enrolling a second one.
+    ///
+    /// `Option` only while control planes that predate machine keys are still in the
+    /// field: omitting it falls back to matching on `public_key`. Always send it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub machine_proof: Option<String>,
 }
 
 /// Control-plane response to a successful enrollment. `[T:B.5.1]`
@@ -443,12 +451,23 @@ mod tests {
             hostname: "laptop".into(),
             endpoint: None,
             workload_kind: None,
+            machine_proof: None,
         };
         let v: serde_json::Value = serde_json::to_value(&req).unwrap();
         assert_eq!(v["public_key"], "PUBKEY");
         assert_eq!(v["hostname"], "laptop");
         // endpoint omitted when None (matches control-plane #[serde(default)]).
         assert!(v.get("endpoint").is_none());
+        // Same for machine_proof: an older control plane rejects unknown nulls less
+        // gracefully than an absent key, and absence is what "no proof" means.
+        assert!(v.get("machine_proof").is_none());
+
+        let signed = EnrollRequest {
+            machine_proof: Some("payload.sig".into()),
+            ..req
+        };
+        let v: serde_json::Value = serde_json::to_value(&signed).unwrap();
+        assert_eq!(v["machine_proof"], "payload.sig");
     }
 
     #[test]

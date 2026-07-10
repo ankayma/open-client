@@ -18,6 +18,7 @@
 use std::fs::OpenOptions;
 use std::io::Write as _;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket};
+use std::path::Path;
 use std::process::Command;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -869,6 +870,16 @@ async fn load_or_enroll(http: &reqwest::Client, cfg: &Config) -> Result<AgentSta
 /// `existing`'s keypair on re-enroll — rather than generating a new one — is what
 /// makes this idempotent: the enrollment endpoint keys a persistent node on its
 /// enrolled public key, so the same key returns the same node.
+///
+/// The machine proof makes that idempotency survive losing the keypair as well: the
+/// server matches the DEVICE, so a rebuilt `agent.json` rotates the node's key in
+/// place. A headless node has no keystore, so the machine key is a 0600 file beside
+/// `agent.json`. It is NOT derived from `/etc/machine-id`, which systemd itself
+/// generates randomly and forbids putting on the network. `[T:man 5 machine-id]`
+///
+/// Golden images must ship without `machine.key`, exactly as systemd requires for
+/// `/etc/machine-id`: every clone would otherwise be the same device and fight over
+/// one node. `[T:systemd.io/BUILDING_IMAGES]`
 async fn enroll_and_persist(
     http: &reqwest::Client,
     cfg: &Config,
@@ -882,6 +893,16 @@ async fn enroll_and_persist(
         },
         None => WgKeypair::generate(),
     };
+    let state_dir = Path::new(&cfg.state_path)
+        .parent()
+        .unwrap_or(Path::new("."))
+        .to_path_buf();
+    let machine = agent_core::machine_key::MachineKey::load_or_create(&state_dir)
+        .context("load or create this device's machine key")?;
+    let proof = machine
+        .proof_now(&kp.public_b64)
+        .context("sign the enrollment with this device's machine key")?;
+
     let lan_ip = detect_lan_ip().context("detect this machine's LAN IP")?;
     let endpoint = format!("{lan_ip}:{}", cfg.listen_port);
     println!("enrolling node (advertising endpoint {endpoint})…");
@@ -892,6 +913,7 @@ async fn enroll_and_persist(
         endpoint: Some(endpoint),
         // [T:Part B §B.1.4] server nodes default to AppServer.
         workload_kind: Some("AppServer".to_string()),
+        machine_proof: Some(proof),
     };
     let resp = adapters::enroll(http, &cfg.control_plane, token, &req)
         .await

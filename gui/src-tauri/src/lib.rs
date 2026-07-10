@@ -16,7 +16,7 @@
 use std::sync::Mutex;
 
 use agent_core::domain::EnrollRequest;
-use agent_core::{adapters, domain, reqwest, WgKeypair};
+use agent_core::{adapters, domain, machine_key, reqwest, WgKeypair};
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager, State};
 
@@ -340,20 +340,35 @@ fn load_stored_keypair_from(dir: &std::path::Path) -> Option<WgKeypair> {
 /// node_id and overlay_ip; if it was retired, exactly one node is recreated for
 /// that key. Neither branch can produce a duplicate. Mirrors
 /// `agent-daemon::up::load_or_enroll`. `[T:A.1.10 / adapters::enroll contract]`
+///
+/// The machine proof carries this further: the server matches on the DEVICE, so even
+/// a lost WireGuard key rotates the node we already have instead of enrolling a
+/// second one. `agent.json` is the WireGuard key and dies with the tenant;
+/// `machine.key` is the device and outlives every tenant it joins.
 async fn connect_inner(state: &AppState) -> Result<(), String> {
     let tok = state.token().ok_or("not signed in")?;
     if state.node.lock().expect("node lock poisoned").is_some() {
         return Ok(());
     }
 
+    let state_dir = handoff_state_dir(state);
     // Reuse the persisted keypair when present; a fresh one only on first enroll.
-    let kp =
-        load_stored_keypair_from(&handoff_state_dir(state)).unwrap_or_else(WgKeypair::generate);
+    let kp = load_stored_keypair_from(&state_dir).unwrap_or_else(WgKeypair::generate);
+    // Fail closed. Enrolling without the proof would silently fall back to matching on
+    // the WireGuard key — exactly the behaviour whose failures fill a roster with
+    // ghosts of one device. `[T:P.2 no back doors]`
+    let machine = machine_key::MachineKey::load_or_create(&state_dir)
+        .map_err(|e| format!("cannot load this device's identity: {e}"))?;
+    let proof = machine
+        .proof_now(&kp.public_b64)
+        .map_err(|e| format!("cannot prove this device's identity: {e}"))?;
+
     let req = EnrollRequest {
         public_key: kp.public_b64.clone(),
         hostname: device_hostname(),
         endpoint: None,
         workload_kind: Some("ClientDevice".to_string()),
+        machine_proof: Some(proof),
     };
     let resp = adapters::enroll(&state.http, &state.base_url, &tok, &req)
         .await
@@ -369,7 +384,7 @@ async fn connect_inner(state: &AppState) -> Result<(), String> {
     // tier quota, and the next Connect enrolls another one. Roll the node back and
     // surface the error. `[T:P.2 front-load, no "ship now fix later"]`
     if let Err(e) = write_handoff_state_to(
-        &handoff_state_dir(state),
+        &state_dir,
         &kp.private_b64,
         &kp.public_b64,
         &resp.node_id,
@@ -629,10 +644,15 @@ async fn sign_out(app: AppHandle, state: State<'_, AppState>) -> Result<(), Stri
     state.set_token(None);
     state.set_email(None);
     disconnect_inner(&state);
-    // Forget the enrolled mesh identity too. Otherwise, signing in to a DIFFERENT
-    // tenant (or as a different user) on the same device would carry the previous
-    // tenant's node handoff — the next Connect could reuse it and land in the wrong
-    // mesh (services mismatch / peer unreachable). Signing out = forget this device.
+    // Forget the enrolled MESH identity. Otherwise, signing in to a DIFFERENT tenant
+    // (or as a different user) on the same device would carry the previous tenant's
+    // node handoff — the next Connect could reuse it and land in the wrong mesh
+    // (services mismatch / peer unreachable).
+    //
+    // The DEVICE identity (`machine.key`) deliberately survives. It is not tenant
+    // state; it is what makes the next enrollment — in this tenant or another — land
+    // on one node instead of minting a fresh one. Deleting it here would rebuild the
+    // duplicate-node bug out of a sign-out.
     *state.node.lock().expect("node lock poisoned") = None;
     let handoff = handoff_state_dir(&state).join("agent.json");
     let _ = std::fs::remove_file(&handoff);
@@ -1021,13 +1041,23 @@ async fn join_enroll_node(
         }
     };
 
-    // Fresh WireGuard identity for this device, same as a first-device enroll.
+    // Fresh WireGuard identity for this device, same as a first-device enroll. The
+    // MACHINE identity is not fresh — it is whatever this device has always had, and
+    // presenting it here is what lets an invite re-admit a device an administrator
+    // previously revoked.
+    let state_dir = handoff_state_dir(state.inner());
     let kp = WgKeypair::generate();
+    let machine = machine_key::MachineKey::load_or_create(&state_dir)
+        .map_err(|e| format!("cannot load this device's identity: {e}"))?;
+    let proof = machine
+        .proof_now(&kp.public_b64)
+        .map_err(|e| format!("cannot prove this device's identity: {e}"))?;
     let req = adapters::JoinEnrollRequest {
         join_token,
         public_key: kp.public_b64.clone(),
         hostname,
         endpoint: None,
+        machine_proof: Some(proof),
     };
     let resp = adapters::enroll_via_join_token(&state.http, &state.base_url, &req)
         .await
@@ -1036,7 +1066,7 @@ async fn join_enroll_node(
     // Handoff: persist this identity so a reconnect reuses THIS node — no
     // duplicate enroll. iOS→app data dir, desktop→~/.ankayma. [T:A.1.10 / up.rs]
     if let Err(e) = write_handoff_state_to(
-        &handoff_state_dir(state.inner()),
+        &state_dir,
         &kp.private_b64,
         &kp.public_b64,
         &resp.node_id,
