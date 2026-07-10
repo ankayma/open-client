@@ -976,9 +976,10 @@ pub async fn delete_ci_policy(
 }
 
 /// Remove one of the tenant's own mesh nodes (retire a device).
-/// `DELETE /api/v1/nodes/{id}` (session-authed, tenant-scoped). In a multi-user
-/// tenant the server gates this behind a step-up; pass a `proof_token` from
-/// `verify_step_up` (None for a solo tenant). `[T:A.1.6 + Part D §Authority model]`
+/// `DELETE /api/v1/nodes/{id}` (session-authed, tenant-scoped). The server gates
+/// this behind a step-up on every tier above the free one — NOT on whether the
+/// tenant has more than one member. Pass a `proof_token` from `verify_step_up`;
+/// `None` succeeds only on the free tier. `[T:A.1.6 + Part D §Authority model]`
 pub async fn delete_node(
     http: &reqwest::Client,
     base_url: &str,

@@ -375,10 +375,11 @@ async fn connect_inner(state: &AppState) -> Result<(), String> {
         &resp.node_id,
         &resp.overlay_ip,
     ) {
-        // Best-effort rollback. A multi-user tenant gates DELETE behind a step-up
-        // proof we do not hold here (see `adapters::delete_node`), so this can fail;
-        // the node then leaks and an admin must retire it. A solo tenant — where the
-        // node quota is tightest — is ungated and rolls back cleanly. `[A: revisit
+        // Best-effort rollback. The server gates DELETE behind a step-up proof —
+        // which we do not hold here — for every tier above the free one (see
+        // `adapters::delete_node`), so this can fail; the node then leaks and an
+        // admin must retire it. The free tier, whose node quota is the tightest and
+        // where a leak hurts soonest, is ungated and rolls back cleanly. `[A: revisit
         // when the client can mint a step-up proof non-interactively]`
         if let Err(del) =
             adapters::delete_node(&state.http, &state.base_url, &tok, &resp.node_id, None).await
@@ -602,10 +603,14 @@ async fn sign_out(app: AppHandle, state: State<'_, AppState>) -> Result<(), Stri
     // against the tier's node quota, and the next Connect enrolls a replacement. A
     // few sign-out cycles exhaust the quota and Connect starts failing.
     //
-    // Best-effort: a multi-user tenant gates DELETE behind a step-up proof we do
-    // not hold here (see `adapters::delete_node`), so this can fail. Sign-out must
-    // still clear local state — a session that cannot be dropped is a worse failure
-    // than a leaked node. `[T:adapters::delete_node step-up contract]`
+    // Best-effort, and only fully effective on the free tier: every tier above it
+    // gates DELETE behind a step-up proof we do not hold here (see
+    // `adapters::delete_node`), so the retire fails and the node is left for an
+    // admin. Sign-out must still clear local state either way — a session that
+    // cannot be dropped is a worse failure than a leaked node.
+    // `[T:adapters::delete_node step-up contract]`
+    // `[A: closing the paid-tier leak needs a non-interactive step-up proof; asking
+    //  a user to pass MFA in order to SIGN OUT is not an acceptable trade]`
     let retiring = state
         .node
         .lock()

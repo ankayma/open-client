@@ -315,7 +315,7 @@ pub(crate) async fn serve_dataplane(
                 match adapters::peers(&http, &cp, &svc_token).await {
                     Ok(list) => {
                         consecutive_sync_failures = 0;
-                        let added = add_new_peers(
+                        let (added, removed) = reconcile_new_and_stale_peers(
                             &peers,
                             &index,
                             &static_private,
@@ -327,6 +327,9 @@ pub(crate) async fn serve_dataplane(
                         );
                         if added > 0 {
                             println!("discovered {added} peer(s) on sync");
+                        }
+                        if removed > 0 {
+                            println!("pruned {removed} stale peer(s) on sync");
                         }
                     }
                     Err(e) => {
@@ -491,9 +494,18 @@ async fn consume_peer_sse(
                         }
                     }
                 }
-                // peer_removed: Phase 1 — full resync on reconnect handles stale peers.
-                // (Removing a WireGuard peer requires the public key, which would need
-                // a lookup; defer to the resync-on-reconnect path for now.)
+                if evt_type == "peer_removed" && !evt_data.is_empty() {
+                    #[derive(serde::Deserialize)]
+                    struct SseRemoved {
+                        node_id: String,
+                    }
+                    if let Ok(r) = serde_json::from_str::<SseRemoved>(&evt_data) {
+                        if pump::remove_peer_by_node_id(peers, &r.node_id) {
+                            println!("SSE: removed peer {}", r.node_id);
+                            write_status(node_id, overlay_s, port, peers);
+                        }
+                    }
+                }
                 if evt_type == "cert_issued" && !evt_data.is_empty() {
                     #[derive(serde::Deserialize)]
                     struct SseCert {
@@ -854,8 +866,9 @@ async fn load_or_enroll(http: &reqwest::Client, cfg: &Config) -> Result<AgentSta
 
 /// Enroll (or idempotently re-enroll, if `existing` carries a keypair already
 /// known to the control plane) and persist the resulting identity. Reusing
-/// `existing`'s keypair on re-enroll — rather than generating a new one — is
-/// what makes this idempotent server-side (`find_persistent_node_by_pubkey`).
+/// `existing`'s keypair on re-enroll — rather than generating a new one — is what
+/// makes this idempotent: the enrollment endpoint keys a persistent node on its
+/// enrolled public key, so the same key returns the same node.
 async fn enroll_and_persist(
     http: &reqwest::Client,
     cfg: &Config,
@@ -1212,6 +1225,38 @@ fn add_new_peers(
         add_peer_route(dev_name, *overlay);
     }
     added.len()
+}
+
+/// Like `add_new_peers`, but also prunes any peer no longer in `list` — the
+/// resync-on-reconnect path uses this instead of the pure-additive `add_new_peers`
+/// so a revoked/replaced peer's real IP actually disappears from local state
+/// (`pump::reconcile_peers`, A.5.3). Route cleanup for removed peers is left as-is
+/// (stale `/32` host route is cosmetic residue, not a visibility leak — no session
+/// exists to answer it).
+#[allow(clippy::too_many_arguments)]
+fn reconcile_new_and_stale_peers(
+    peers: &Peers,
+    index: &Arc<Mutex<u32>>,
+    static_private: &StaticSecret,
+    self_overlay: IpAddr,
+    list: &[agent_core::domain::PeerInfo],
+    udp: &Arc<UdpSocket>,
+    dev_name: &str,
+    keepalive: Option<u16>,
+) -> (usize, usize) {
+    let (added, removed) = pump::reconcile_peers(
+        peers,
+        index,
+        static_private,
+        self_overlay,
+        list,
+        udp,
+        keepalive,
+    );
+    for overlay in &added {
+        add_peer_route(dev_name, *overlay);
+    }
+    (added.len(), removed)
 }
 
 #[cfg(test)]

@@ -170,6 +170,53 @@ pub fn add_tunn_peers(
     added
 }
 
+/// Reconcile the roster against the control plane's authoritative list: drop any
+/// peer no longer present, then add anything new via `add_tunn_peers`. Dropping the
+/// `Arc<PeerEntry>` is sufficient teardown for its boringtun session — nothing else
+/// holds a longer-lived clone. Closes the "no peer registry" promise (A.5.3): without
+/// this, a revoked/replaced peer's real IP stays in local state
+/// (`agent-status.json`) forever instead of disappearing with the peer. `[T:A.5.3]`
+pub fn reconcile_peers(
+    peers: &Peers,
+    index: &Arc<Mutex<u32>>,
+    static_private: &StaticSecret,
+    self_overlay: IpAddr,
+    list: &[PeerInfo],
+    udp: &Arc<UdpSocket>,
+    keepalive: Option<u16>,
+) -> (Vec<IpAddr>, usize) {
+    let live: HashSet<String> = dataplane::dialable_peers(list, self_overlay)
+        .into_iter()
+        .map(|d| d.public_key_b64)
+        .collect();
+    let removed = {
+        let mut guard = peers.lock().expect("peers lock");
+        let before = guard.len();
+        guard.retain(|p| live.contains(&p.peer.public_key_b64));
+        before - guard.len()
+    };
+    let added = add_tunn_peers(
+        peers,
+        index,
+        static_private,
+        self_overlay,
+        list,
+        udp,
+        keepalive,
+    );
+    (added, removed)
+}
+
+/// Remove a single peer by `node_id` — matches CP's `PeerEvent::Removed { node_id }`
+/// wire shape, for prompt removal on ephemeral-peer TTL expiry (SSE) without waiting
+/// for the next resync cycle. Returns true if a peer was actually removed.
+pub fn remove_peer_by_node_id(peers: &Peers, node_id: &str) -> bool {
+    let mut guard = peers.lock().expect("peers lock");
+    let before = guard.len();
+    guard.retain(|p| p.peer.node_id != node_id);
+    before != guard.len()
+}
+
 /// Find the peer that owns an overlay destination (outgoing). Cheap linear scan —
 /// a personal mesh has a handful of peers.
 fn peer_by_overlay(peers: &Peers, dst: IpAddr) -> Option<Arc<PeerEntry>> {
@@ -786,5 +833,73 @@ mod tests {
         );
         // never-handshaked peer must be untouched (index only advanced once).
         assert_eq!(*index.lock().unwrap(), 11);
+    }
+
+    fn entry_keyed(overlay: &str, key_b64: &str) -> Arc<PeerEntry> {
+        let sp = StaticSecret::random_from_rng(OsRng);
+        let pp = PublicKey::from(&StaticSecret::random_from_rng(OsRng));
+        Arc::new(PeerEntry {
+            peer: DialablePeer {
+                node_id: "n".into(),
+                hostname: "h".into(),
+                public_key: [0u8; 32],
+                public_key_b64: key_b64.into(),
+                overlay_ip: overlay.parse().unwrap(),
+                endpoint: None,
+            },
+            endpoint: Mutex::new(None),
+            tunn: Mutex::new(make_tunn(sp, pp, 1, None)),
+            last_activity: Mutex::new(Instant::now()),
+            keepalive: None,
+        })
+    }
+
+    // A.5.3: a peer no longer in the fresh CP roster must disappear from the local
+    // roster (not linger forever, per `peer-roster-no-registry-gap-2026-07-10.md`).
+    #[test]
+    fn reconcile_peers_prunes_stale_and_keeps_live() {
+        let keep_key = crypto::WgKeypair::generate().public_b64;
+        let peers: Peers = Arc::new(Mutex::new(vec![
+            entry_keyed("10.0.0.1", &keep_key),
+            entry_keyed("10.0.0.2", "stale-b"),
+            entry_keyed("10.0.0.3", "stale-c"),
+        ]));
+
+        let fresh = vec![PeerInfo {
+            node_id: "n".into(),
+            hostname: "h".into(),
+            public_key: keep_key,
+            overlay_ip: "10.0.0.1".into(),
+            endpoint: None,
+        }];
+
+        let index = Arc::new(Mutex::new(0u32));
+        let static_private = StaticSecret::random_from_rng(OsRng);
+        let udp = Arc::new(UdpSocket::bind("127.0.0.1:0").unwrap());
+        let self_overlay: IpAddr = "10.0.0.99".parse().unwrap();
+
+        let (added, removed) = reconcile_peers(
+            &peers,
+            &index,
+            &static_private,
+            self_overlay,
+            &fresh,
+            &udp,
+            None,
+        );
+
+        assert_eq!(
+            removed, 2,
+            "the two peers absent from `fresh` must be pruned"
+        );
+        assert!(
+            added.is_empty(),
+            "the surviving peer was already known, not newly added"
+        );
+        assert_eq!(peers.lock().unwrap().len(), 1);
+        assert_eq!(
+            peers.lock().unwrap()[0].peer.overlay_ip,
+            "10.0.0.1".parse::<IpAddr>().unwrap()
+        );
     }
 }
