@@ -2,10 +2,11 @@
   import { onMount } from "svelte";
   import { getPolicy, submitPolicy, listMembers } from "$lib/tauri";
 
-  // PolicyBlock authoring (Slice B). Admin edits the typed rules (from a principal
+  // PolicyBlock authoring (Slice B). An admin edits the typed rules (from a principal
   // selector → to a resource selector) and publishes a new block onto the tenant's
-  // tamper-evident chain. Members see it read-only. Default-deny: only listed Allow
-  // rules grant access.
+  // tamper-evident chain. The raw tenant policy is cross-user data, so a MEMBER cannot
+  // read it (A.1.6) — the server 403s get_policy for them; they see their OWN effective
+  // access elsewhere. Default-deny: only listed Allow rules grant access.
   type Sel = Record<string, string | number>;
   interface Rule {
     from: Sel;
@@ -32,12 +33,17 @@
     loading = true;
     error = "";
     try {
-      const [p, m] = await Promise.all([getPolicy(), listMembers()]);
-      version = p.version;
-      chainIntact = p.chain_intact;
-      blockHash = p.block_hash ?? null;
-      rules = Array.isArray(p.rules) ? (p.rules as Rule[]) : [];
+      // Role first (member-ok). Only an admin may read the raw tenant policy; a
+      // member calling get_policy would be 403'd, so we don't call it for them.
+      const m = await listMembers();
       isAdmin = m.your_role === "admin";
+      if (isAdmin) {
+        const p = await getPolicy();
+        version = p.version;
+        chainIntact = p.chain_intact;
+        blockHash = p.block_hash ?? null;
+        rules = Array.isArray(p.rules) ? (p.rules as Rule[]) : [];
+      }
     } catch (e: unknown) {
       error = e instanceof Error ? e.message : "Failed to load policy";
     } finally {
@@ -104,6 +110,11 @@
 
   {#if loading}
     <div class="empty">Loading…</div>
+  {:else if !isAdmin}
+    <div class="empty">
+      Access policy is managed by your team's admins. You can reach only what a rule
+      grants you — ask an admin to add a rule if you need access to something.
+    </div>
   {:else}
     <ul class="rules">
       {#each rules as r, i (i)}

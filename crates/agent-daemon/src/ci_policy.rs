@@ -86,7 +86,10 @@ pub async fn run(args: &[String]) -> Result<()> {
                 environment,
                 target_hostname: flag(rest, "--target"),
             };
-            adapters::register_ci_policy(&http, &cp, &token, &req)
+            // CLI passes no step-up proof. On a paid tier the server will answer
+            // STEP_UP_REQUIRED; interactive CLI step-up is a separate item. F0 (no
+            // gate) works as before. [A: CLI step-up TODO]
+            adapters::register_ci_policy(&http, &cp, &token, &req, None)
                 .await
                 .map_err(|e| anyhow!("{e}"))?;
             println!("ok: {repo}");
@@ -96,7 +99,7 @@ pub async fn run(args: &[String]) -> Result<()> {
             let rest = &args[1..];
             let repo = positional(rest).ok_or_else(|| anyhow!("missing <owner/repo>\n{USAGE}"))?;
             let (cp, token) = resolve(rest)?;
-            adapters::delete_ci_policy(&http, &cp, &token, &repo)
+            adapters::delete_ci_policy(&http, &cp, &token, &repo, None)
                 .await
                 .map_err(|e| anyhow!("{e}"))?;
             println!("deleted: {repo}");

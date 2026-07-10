@@ -4,6 +4,7 @@
 	import { goto } from '$app/navigation';
 	import { onMount } from 'svelte';
 	import { addCiPolicy, listNodes } from '$lib/tauri';
+	import { runWithStepUp } from '$lib/stepup';
 	import type { CiPolicy, PeerBrief } from '$lib/types';
 
 	let { initial = null }: { initial?: CiPolicy | null } = $props();
@@ -48,13 +49,20 @@
 		if (errors.length) return; // do NOT call API on client-validation failure
 		saving = true;
 		try {
-			await addCiPolicy({
-				issuer,
-				repo: repo.trim(),
-				ref: scopeType === 'ref' ? scopeValue.trim() : undefined,
-				environment: scopeType === 'environment' ? scopeValue.trim() : undefined,
-				target_hostname: targetHostname || undefined
-			});
+			// Paid tiers step up before a deploy-rule change (E-7); runWithStepUp drives
+			// the modal and retries transparently. Solo F0 never hits the gate.
+			await runWithStepUp('manage_ci_policy', (proof) =>
+				addCiPolicy(
+					{
+						issuer,
+						repo: repo.trim(),
+						ref: scopeType === 'ref' ? scopeValue.trim() : undefined,
+						environment: scopeType === 'environment' ? scopeValue.trim() : undefined,
+						target_hostname: targetHostname || undefined
+					},
+					proof
+				)
+			);
 			goto('/policies');
 		} catch (err) {
 			// Surface the control plane's reason verbatim (400/409 safe-by-default).

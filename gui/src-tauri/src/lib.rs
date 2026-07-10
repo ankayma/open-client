@@ -1749,7 +1749,11 @@ async fn ci_history(
 }
 
 #[tauri::command]
-async fn add_ci_policy(req: CiPolicyDraft, state: State<'_, AppState>) -> Result<(), String> {
+async fn add_ci_policy(
+    req: CiPolicyDraft,
+    state: State<'_, AppState>,
+    proof_token: Option<String>,
+) -> Result<(), String> {
     let tok = state.token().ok_or("not signed in")?;
     let nonempty = |s: Option<String>| s.filter(|v| !v.trim().is_empty());
     let body = domain::CiPolicyReq {
@@ -1759,17 +1763,35 @@ async fn add_ci_policy(req: CiPolicyDraft, state: State<'_, AppState>) -> Result
         environment: nonempty(req.environment),
         target_hostname: nonempty(req.target_hostname),
     };
-    adapters::register_ci_policy(&state.http, &state.base_url, &tok, &body)
-        .await
-        .map_err(|e| e.to_string())
+    // Paid tiers gate a deploy-policy change behind a step-up (E-7): the first call
+    // returns STEP_UP_REQUIRED, the GUI runs the flow and retries with a proof.
+    adapters::register_ci_policy(
+        &state.http,
+        &state.base_url,
+        &tok,
+        &body,
+        proof_token.as_deref(),
+    )
+    .await
+    .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-async fn delete_ci_policy(repo: String, state: State<'_, AppState>) -> Result<(), String> {
+async fn delete_ci_policy(
+    repo: String,
+    state: State<'_, AppState>,
+    proof_token: Option<String>,
+) -> Result<(), String> {
     let tok = state.token().ok_or("not signed in")?;
-    adapters::delete_ci_policy(&state.http, &state.base_url, &tok, &repo)
-        .await
-        .map_err(|e| e.to_string())
+    adapters::delete_ci_policy(
+        &state.http,
+        &state.base_url,
+        &tok,
+        &repo,
+        proof_token.as_deref(),
+    )
+    .await
+    .map_err(|e| e.to_string())
 }
 
 // ── F-3 branded subdomains ────────────────────────────────────────────────────

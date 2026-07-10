@@ -949,9 +949,17 @@ pub async fn register_ci_policy(
     base_url: &str,
     session_token: &str,
     req: &CiPolicyReq,
+    proof_token: Option<&str>,
 ) -> Result<(), ApiError> {
+    // Step-up gated on paid tiers (E-7 "F-1 CI"): first call has no proof, the server
+    // answers STEP_UP_REQUIRED, the GUI runs the flow and retries with proof_token.
+    let base = url(base_url, "/api/v1/ci/policy");
+    let endpoint = match proof_token {
+        Some(p) => format!("{base}?proof_token={p}"),
+        None => base,
+    };
     let resp = http
-        .post(url(base_url, "/api/v1/ci/policy"))
+        .post(endpoint)
         .bearer_auth(session_token)
         .json(req)
         .timeout(CP_REST_TIMEOUT)
@@ -968,10 +976,18 @@ pub async fn delete_ci_policy(
     base_url: &str,
     session_token: &str,
     repo: &str,
+    proof_token: Option<&str>,
 ) -> Result<(), ApiError> {
-    let path = format!("/api/v1/ci/policy/{}", repo.trim_matches('/'));
+    let base = url(
+        base_url,
+        &format!("/api/v1/ci/policy/{}", repo.trim_matches('/')),
+    );
+    let endpoint = match proof_token {
+        Some(p) => format!("{base}?proof_token={p}"),
+        None => base,
+    };
     let resp = http
-        .delete(url(base_url, &path))
+        .delete(endpoint)
         .bearer_auth(session_token)
         .timeout(CP_REST_TIMEOUT)
         .send()

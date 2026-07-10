@@ -48,6 +48,7 @@ const PURPOSE_LABEL: Record<string, string> = {
   revoke_node: "remove this device",
   invite_member: "invite this member",
   remove_member: "remove this member",
+  manage_ci_policy: "change this deploy rule",
 };
 export function purposeLabel(p: string): string {
   return PURPOSE_LABEL[p] ?? p;

@@ -3,6 +3,7 @@
 	import { goto } from '$app/navigation';
 	import { onMount } from 'svelte';
 	import { listCiPolicies, deleteCiPolicy } from '$lib/tauri';
+	import { runWithStepUp } from '$lib/stepup';
 	import type { CiPolicy } from '$lib/types';
 
 	let policies = $state<CiPolicy[]>([]);
@@ -37,7 +38,8 @@
 	async function doDelete(repo: string) {
 		deleting = true;
 		try {
-			await deleteCiPolicy(repo);
+			// Paid tiers step up before removing a deploy rule (E-7).
+			await runWithStepUp('manage_ci_policy', (proof) => deleteCiPolicy(repo, proof));
 			confirmRepo = null;
 			await load();
 		} catch (e) {
