@@ -281,8 +281,8 @@ static FORWARD_HOOK: std::sync::OnceLock<fn(u64, &[u8])> = std::sync::OnceLock::
 type PendingEntry = (Vec<u8>, Vec<u8>);
 static DNS_PENDING: std::sync::OnceLock<Mutex<HashMap<u64, PendingEntry>>> =
     std::sync::OnceLock::new();
-/// The tun fd to write forwarded replies back to.
-static DNS_TUN_FD: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(-1);
+/// The tun handle to write forwarded DNS replies back to (set by `dns_forward`).
+static DNS_TUN: Mutex<Option<crate::tundev::TunHandle>> = Mutex::new(None);
 static DNS_TOKEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
 fn dns_pending() -> &'static Mutex<HashMap<u64, PendingEntry>> {
@@ -296,11 +296,11 @@ pub fn set_dns_forward_hook(f: fn(u64, &[u8])) {
 
 /// Park `request` (the original query IP packet) under a fresh token and hand the
 /// bare DNS `query` to the platform bridge. No-op (drop → OS fallback) if no bridge.
-fn dns_forward(fd: i32, request: &[u8], query: &[u8]) {
+fn dns_forward(tun: &crate::tundev::TunHandle, request: &[u8], query: &[u8]) {
     let Some(hook) = FORWARD_HOOK.get() else {
         return; // no forwarder (desktop) — drop, OS resolves itself
     };
-    DNS_TUN_FD.store(fd, std::sync::atomic::Ordering::Relaxed);
+    *DNS_TUN.lock().expect("dns tun lock") = Some(tun.clone());
     let token = DNS_TOKEN.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     {
         let mut pending = dns_pending().lock().expect("dns pending lock");
@@ -333,11 +333,9 @@ pub fn dns_reply(token: u64, response: &[u8]) {
                 response.len()
             )),
             Some(reply) => {
-                let fd = DNS_TUN_FD.load(std::sync::atomic::Ordering::Relaxed);
-                let w = if fd >= 0 {
-                    crate::tundev::write_packet(fd, &reply)
-                } else {
-                    Ok(0)
+                let w = match DNS_TUN.lock().expect("dns tun lock").as_ref() {
+                    Some(tun) => tun.write_packet(&reply),
+                    None => Ok(0),
                 };
                 plog(&format!(
                     "dns→tun reply token={token} wrote={w:?} ({}B)",
@@ -370,11 +368,9 @@ pub fn dns_fail(token: u64) {
             match reply {
                 None => plog(&format!("dns→tun servfail token={token} build FAILED")),
                 Some(reply) => {
-                    let fd = DNS_TUN_FD.load(std::sync::atomic::Ordering::Relaxed);
-                    let w = if fd >= 0 {
-                        crate::tundev::write_packet(fd, &reply)
-                    } else {
-                        Ok(0)
+                    let w = match DNS_TUN.lock().expect("dns tun lock").as_ref() {
+                        Some(tun) => tun.write_packet(&reply),
+                        None => Ok(0),
                     };
                     plog(&format!("dns→tun SERVFAIL token={token} wrote={w:?}"));
                 }
@@ -386,7 +382,12 @@ pub fn dns_fail(token: u64) {
 /// tun → encapsulate → UDP. Reads bare IP packets, routes by destination.
 /// `dns`: if a packet is a query addressed at our own overlay IP on port 53,
 /// answer it locally and never route it to a peer (self_ip is never a mesh peer).
-pub fn spawn_tx(fd: i32, udp: Arc<UdpSocket>, peers: Peers, dns: Option<DnsResponder>) {
+pub fn spawn_tx(
+    tun: crate::tundev::TunHandle,
+    udp: Arc<UdpSocket>,
+    peers: Peers,
+    dns: Option<DnsResponder>,
+) {
     std::thread::spawn(move || {
         let mut pkt = [0u8; MTU + 80];
         // Encapsulate needs src.len()+32 of headroom `[T:boringtun@0.7 session.rs]`
@@ -395,7 +396,7 @@ pub fn spawn_tx(fd: i32, udp: Arc<UdpSocket>, peers: Peers, dns: Option<DnsRespo
         // packets at the interface-default 1500 MTU were the reproducer).
         let mut enc = [0u8; MTU + 80 + 32];
         loop {
-            let n = match crate::tundev::read_packet(fd, &mut pkt) {
+            let n = match tun.read_packet(&mut pkt) {
                 Ok(0) => continue,
                 Ok(n) => n,
                 Err(e) => {
@@ -440,7 +441,7 @@ pub fn spawn_tx(fd: i32, udp: Arc<UdpSocket>, peers: Peers, dns: Option<DnsRespo
                         if let Some(reply) =
                             answer.and_then(|a| crate::dns::build_dns_reply(&pkt[..n], &a))
                         {
-                            let _ = crate::tundev::write_packet(fd, &reply);
+                            let _ = tun.write_packet(&reply);
                         }
                         plog("tun→dns private answered");
                     } else if responder.forward {
@@ -453,7 +454,7 @@ pub fn spawn_tx(fd: i32, udp: Arc<UdpSocket>, peers: Peers, dns: Option<DnsRespo
                             "tun→dns forward {}",
                             crate::dns::query_name(query).unwrap_or_default()
                         ));
-                        dns_forward(fd, &pkt[..n], query);
+                        dns_forward(&tun, &pkt[..n], query);
                     } else {
                         // No forwarder (desktop never hits this path) — NXDOMAIN.
                         let answer = {
@@ -463,7 +464,7 @@ pub fn spawn_tx(fd: i32, udp: Arc<UdpSocket>, peers: Peers, dns: Option<DnsRespo
                         if let Some(reply) =
                             answer.and_then(|a| crate::dns::build_dns_reply(&pkt[..n], &a))
                         {
-                            let _ = crate::tundev::write_packet(fd, &reply);
+                            let _ = tun.write_packet(&reply);
                         }
                     }
                     continue; // handled (answered / forwarded / dropped) — never a peer
@@ -496,7 +497,7 @@ pub fn spawn_tx(fd: i32, udp: Arc<UdpSocket>, peers: Peers, dns: Option<DnsRespo
 
 /// UDP → decapsulate → tun. Demuxes packets to the owning peer, draining queued
 /// output. `[T:WireGuard]`
-pub fn spawn_rx(fd: i32, udp: Arc<UdpSocket>, peers: Peers) {
+pub fn spawn_rx(tun: crate::tundev::TunHandle, udp: Arc<UdpSocket>, peers: Peers) {
     std::thread::spawn(move || {
         let mut datagram = [0u8; 2048];
         let mut out = [0u8; 2048];
@@ -537,7 +538,7 @@ pub fn spawn_rx(fd: i32, udp: Arc<UdpSocket>, peers: Peers) {
                         }
                         TunnResult::WriteToTunnelV4(pkt, _)
                         | TunnResult::WriteToTunnelV6(pkt, _) => {
-                            let _ = crate::tundev::write_packet(fd, pkt);
+                            let _ = tun.write_packet(pkt);
                             // Inbound data decrypted — tunnel in use (handshake
                             // and keepalive frames don't reach this arm).
                             entry.touch();

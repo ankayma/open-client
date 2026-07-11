@@ -366,8 +366,9 @@ fn start_inner(fd: i32, config_json: &str, bound_if: u32) -> Result<Box<PtpHandl
         Some(25),
     );
 
-    pump::spawn_tx(fd, udp.clone(), peers.clone(), p.dns);
-    pump::spawn_rx(fd, udp.clone(), peers.clone());
+    let tun = agent_core::tundev::TunHandle::Fd(fd);
+    pump::spawn_tx(tun.clone(), udp.clone(), peers.clone(), p.dns);
+    pump::spawn_rx(tun, udp.clone(), peers.clone());
     pump::spawn_timers(
         udp.clone(),
         peers.clone(),

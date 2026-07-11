@@ -236,8 +236,9 @@ pub(crate) async fn serve_dataplane(
     // DNS answers via the loopback resolver below (fed by /etc/resolver/<zone>),
     // never on the tun fd itself — no DnsResponder needed here (iOS-only, no
     // split-DNS hook to piggyback on).
-    pump::spawn_tx(fd, udp.clone(), peers.clone(), None);
-    pump::spawn_rx(fd, udp.clone(), peers.clone());
+    let tun = agent_core::tundev::TunHandle::Fd(fd);
+    pump::spawn_tx(tun.clone(), udp.clone(), peers.clone(), None);
+    pump::spawn_rx(tun, udp.clone(), peers.clone());
     pump::spawn_timers(
         udp.clone(),
         peers.clone(),

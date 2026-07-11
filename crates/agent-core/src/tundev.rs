@@ -22,6 +22,43 @@ pub fn write_packet(fd: i32, packet: &[u8]) -> io::Result<usize> {
     imp::write_packet(fd, packet)
 }
 
+/// A handle to the OPEN tunnel device the pump drives. macOS/iOS/Linux/Android all
+/// hand us a POSIX fd (same read/write, per-platform framing); Windows' Wintun gives
+/// a *session* (a ring buffer + a ready event), NEVER a POSIX fd. This enum is the
+/// abstraction that lets `pump::spawn_tx`/`spawn_rx` (and the DNS-reply path) drive
+/// either kind without the old `fd: i32` assumption. Clone is cheap — `Fd` is Copy,
+/// `Wintun` is an `Arc` — so tx, rx, and the DNS path can each hold one.
+/// [T:gate A.0-a refactor; part-d-client-platform-architecture.md §H.8.1]
+#[derive(Clone)]
+pub enum TunHandle {
+    /// POSIX tunnel fd — utun (macOS/iOS), `/dev/net/tun` (Linux), or the Android
+    /// `VpnService` ParcelFileDescriptor. Read/write go through the `imp` framing.
+    Fd(i32),
+    /// Windows: a Wintun session, shared (`Arc`) across the pump threads.
+    #[cfg(target_os = "windows")]
+    Wintun(std::sync::Arc<wintun::Session>),
+}
+
+impl TunHandle {
+    /// Read one bare IP packet (framing stripped per platform).
+    pub fn read_packet(&self, buf: &mut [u8]) -> io::Result<usize> {
+        match self {
+            TunHandle::Fd(fd) => imp::read_packet(*fd, buf),
+            #[cfg(target_os = "windows")]
+            TunHandle::Wintun(sess) => win::read_packet(sess, buf),
+        }
+    }
+
+    /// Write one bare IP packet (framing added per platform).
+    pub fn write_packet(&self, packet: &[u8]) -> io::Result<usize> {
+        match self {
+            TunHandle::Fd(fd) => imp::write_packet(*fd, packet),
+            #[cfg(target_os = "windows")]
+            TunHandle::Wintun(sess) => win::write_packet(sess, packet),
+        }
+    }
+}
+
 // macOS + iOS: utun prepends a 4-byte address-family header. Both get the fd as a
 // utun device (iOS via the extension's tunnelFileDescriptor), so framing is
 // identical. `[T:Apple-XNU net/if_utun.h]`
@@ -215,6 +252,27 @@ mod imp {
         Err(io::Error::new(
             io::ErrorKind::Unsupported,
             "no tun fd plumbing on this platform",
+        ))
+    }
+}
+
+// Windows: Wintun session I/O (ring buffer, not a POSIX fd). The real
+// receive/allocate-send lands with the Wintun TUN device (task 12); this stub keeps
+// the `TunHandle::Wintun` abstraction compiling. [T:gate A.0-a; §H.8.1]
+#[cfg(target_os = "windows")]
+mod win {
+    use std::io;
+
+    pub fn read_packet(_sess: &wintun::Session, _buf: &mut [u8]) -> io::Result<usize> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "Wintun read not implemented yet",
+        ))
+    }
+    pub fn write_packet(_sess: &wintun::Session, _packet: &[u8]) -> io::Result<usize> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "Wintun write not implemented yet",
         ))
     }
 }
