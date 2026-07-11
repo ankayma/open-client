@@ -3,7 +3,7 @@ name = "ankayma-helper"
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.77.2"
-license = "Apache-2.0"
+license = "LicenseRef-Elastic-2.0"
 description = "Root LaunchDaemon that starts/stops the Ankayma agent daemon on behalf of the sandboxed GUI (A.1.7 gap 1 — replaces per-connect osascript admin prompts)."
 
 [[bin]]

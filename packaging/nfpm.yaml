@@ -20,7 +20,7 @@ version: ${VERSION}
 maintainer: Ankayma <ops@ankayma.com>
 description: Ankayma mesh client (mesh CLI + agent daemon)
 homepage: https://ankayma.com
-license: Apache-2.0
+license: LicenseRef-Elastic-2.0
 contents:
   - src: dist/${VERSION}/mesh-linux-amd64
     dst: /usr/bin/mesh

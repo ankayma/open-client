@@ -22,7 +22,7 @@ This repo = **the OPEN portion** of the P2P Zero Trust Platform (exact Tailscale
 3. **Agent OPEN auditable** — customers audit code running on their nodes; this is part of the moat `[T per A.1.4 + P.7]`. Open-source rollout from Day 1 (milestone 1.1/1.2) `[T per Part C §H.1.4]`.
 4. **Scope gate (P.8)** — only build what the current Part C milestone authorizes; DO NOT pre-build Phase 2 infra / Org/Workspace (A.1.24) / F3 capabilities (HSM/Conf VM/BYOK) before the trigger `[T per Part C §H.7.2 anti-pattern]`.
 
-> ⚠️ **Epistemic honesty**: license = Apache-2.0 `[T per owner 2026-06-17]`; all NFR A.4 = `[A]` unmeasured (owner confirmed Part A H.7 #5); Tauri 2 mobile is "stable but not yet first-class" `[T per Tauri team, Part D §D.3.2]` — reassess trigger if consumer-mobile-polish becomes a viral lever.
+> ⚠️ **Epistemic honesty**: license = Elastic License 2.0 (ELv2) `[T per owner — Apache-2.0 2026-06-17, switched ELv2 2026-07-10]`; all NFR A.4 = `[A]` unmeasured (owner confirmed Part A H.7 #5); Tauri 2 mobile is "stable but not yet first-class" `[T per Tauri team, Part D §D.3.2]` — reassess trigger if consumer-mobile-polish becomes a viral lever.
 
 -----
 
@@ -94,7 +94,7 @@ Violating any of these = **STOP, report to human** (amend Part A first, do not d
 | Repo structure | 2 code repos (open client / closed control-plane) + shared open crates | Part D §D.4 | none |
 | OS rollout timing | client repos public from Day 1 (milestone 1.1) | Part C §H.1.4 + Part D §D.5 | none |
 | Frontend framework (React/Svelte/Vue) | **TBD per team** | Part D §D.7 + frontend/README | finalized when scaffolding frontend at milestone 1.1 |
-| License (workspace) | **Apache-2.0** (owner-chosen 2026-06-17) | Part D §D.7 | finalized — open-code spirit, patent grant |
+| License (workspace) | **Elastic License 2.0 (ELv2)** (Apache-2.0 2026-06-17 → ELv2 2026-07-10) | Part D §D.7 | source-available, patent grant, no hosted-service reuse |
 
 -----
 
@@ -143,7 +143,7 @@ Before reporting "done" to the human: run all 4 commands above. Report results *
 
 > Returned to owner (D-00 §3). Each item below *may appear* to be already settled but is in fact a **decision that humans must make** or an **unverified assumption**.
 
-1. **License = Apache-2.0** `[T per Part D §D.7 — owner-chosen 2026-06-17]` — open-code spirit for the client portion, permissive + explicit patent grant (appropriate for security/crypto products). `Cargo.toml` (workspace + `gui/src-tauri`) sets `license = "Apache-2.0"`; see `LICENSE` + `NOTICE`. Contributions default to Apache-2.0 §5.
+1. **License = Elastic License 2.0 (ELv2)** `[T per Part D §D.7 — Apache-2.0 owner-chosen 2026-06-17, switched to ELv2 2026-07-10]` — source-available for the client portion: use/copy/modify/distribute freely, but no offering it to third parties as a hosted/managed service; includes a patent grant. `Cargo.toml` (workspace + `gui/src-tauri`) sets `license = "LicenseRef-Elastic-2.0"`; see `LICENSE` + `NOTICE`. Contributions default to ELv2.
 2. **Frontend framework** — TBD per team (Part D §D.7); finalized when scaffolding frontend at milestone 1.1. Options: React / Svelte / Vue (Tauri webview-agnostic).
 3. **NFR A.4 figures are `[A]` unmeasured** — owner confirmed 2026-06-05 (Part A H.7 #5). Do not quote NFR figures in customer-facing docs as guaranteed; any subset included in contracts (e.g. uptime SLO) requires legal/ops sign-off.
 4. **Tauri mobile reassess trigger** — Part D §D.3.3. *Missing*: concrete definition of "consumer-mobile-polish becomes a viral lever" (mobile signup rate? install rate? mobile DAU/total?) — owner must own the trigger threshold.

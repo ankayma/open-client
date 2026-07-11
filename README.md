@@ -143,7 +143,7 @@ Toolchain: Rust stable (version will be pinned before production — A.1.21). Be
 ## 9. Governance & status
 
 - **Working model**: Claude Code authoring, human review + QC test. Workflow in [`CONTRIBUTING.md`](./CONTRIBUTING.md).
-- **License**: **Apache-2.0** (see [`LICENSE`](./LICENSE) + [`NOTICE`](./NOTICE)) `[T per Part D §D.7 — owner-chosen 2026-06-17]`. Permissive + explicit patent grant, consistent with the open-client spirit. Contributions submitted to this repo default to Apache-2.0 §5.
+- **License**: **Elastic License 2.0 (ELv2)** (see [`LICENSE`](./LICENSE) + [`NOTICE`](./NOTICE)) `[T per Part D §D.7 — owner-chosen 2026-06-17; switched Apache-2.0 → ELv2 2026-07-10]`. Source-available: use, copy, modify, and distribute freely, but you may not offer it to third parties as a hosted or managed service. Includes a patent grant. Contributions submitted to this repo default to ELv2.
 - **Frontend framework**: Svelte (SvelteKit + Tauri webview).
 
 > Read before editing code: [`ARCHITECTURE.md`](./ARCHITECTURE.md) (crate map + invariant index) → then the relevant blueprint section.
