@@ -284,7 +284,14 @@ impl ConnHandler {
                 Ok(c)
             }
             ShellSpec::LoginShell(user) => {
+                // geteuid() is POSIX-only. On Windows the embedded server's user
+                // landing (su/provision below) is out of scope for now (the Windows
+                // build targets the CLIENT path first) — fall to the current-user
+                // shell. [T:gate A.0-a windows-compat]
+                #[cfg(unix)]
                 let am_root = unsafe { libc::geteuid() } == 0;
+                #[cfg(not(unix))]
+                let am_root = false;
                 let already_user = current_username().as_deref() == Some(user.as_str());
                 let mut c = if am_root && !already_user {
                     // Landing a DIFFERENT user → provision if needed, then `su -`
