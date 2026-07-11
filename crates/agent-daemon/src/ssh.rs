@@ -22,7 +22,7 @@ const DEFAULT_CONTROL_PLANE: &str = "https://cp.ankayma.com";
 /// Where the device's persistent ed25519 mesh-SSH identity lives — next to
 /// `agent.json` under `~/.ankayma/`. `[T:A.1.3]`
 fn mesh_ssh_key_path() -> std::path::PathBuf {
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+    let home = crate::up::home_root();
     std::path::Path::new(&home)
         .join(".ankayma")
         .join("mesh-ssh-ed25519")

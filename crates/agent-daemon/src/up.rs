@@ -212,6 +212,13 @@ pub(crate) async fn serve_dataplane(
             .with_context(|| format!("bind udp/{}", state.listen_port))?,
     );
 
+    // [port-to-Windows] Windows Firewall default-denies unsolicited inbound UDP, so
+    // peers' handshake RESPONSES get dropped and every session stalls re-initiating —
+    // the classic WireGuard-on-Windows symptom (the official WG client installs this
+    // rule too). Advise the exact netsh command; the elevated daemon adds it itself on
+    // the ANKAYMA_OPEN_FIREWALL=1 opt-in. No-op off Windows. `[T:P.2 no silent side-effects]`
+    advise_wg_firewall(state.listen_port);
+
     let peers: Peers = Arc::new(Mutex::new(Vec::new()));
     let index = Arc::new(Mutex::new(0u32));
 
@@ -620,9 +627,17 @@ impl Config {
     }
 }
 
+/// Home base for `~/.ankayma/…`. HOME on unix; USERPROFILE on Windows (HOME is
+/// usually unset there); `.` (CWD) only as a last resort so `agent up` and
+/// `agent ssh` resolve the same state dir on every platform. `[T:A.1.3]`
+pub(crate) fn home_root() -> String {
+    std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .unwrap_or_else(|_| ".".into())
+}
+
 fn default_state_path() -> String {
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
-    format!("{home}/.ankayma/agent.json")
+    format!("{}/.ankayma/agent.json", home_root())
 }
 
 /// [F-2 v0.5] Start the embedded SSH server on the overlay. Best-effort: a failure
@@ -641,7 +656,7 @@ async fn start_embedded_ssh(
     use agent_core::ssh_grant::GrantVerifier;
     use agent_core::ssh_server::{serve, SshHostKey, SshServerConfig};
 
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
+    let home = home_root();
     let host_key_path = std::path::Path::new(&home)
         .join(".ankayma")
         .join("ssh-host-ed25519");
@@ -751,12 +766,59 @@ fn advise_firewall(port: u16, iface: &str) {
 #[cfg(not(target_os = "linux"))]
 fn advise_firewall(_port: u16, _iface: &str) {}
 
+/// [port-to-Windows] Inbound allow for the data-plane UDP listen port. Windows Firewall
+/// drops peers' handshake replies by default, so the overlay never establishes (ping /
+/// SSH / Open all time out at the tunnel). Mirrors the Linux `advise_firewall` P.2
+/// stance: PRINT the exact netsh command; only auto-add on the `ANKAYMA_OPEN_FIREWALL=1`
+/// opt-in (the daemon already runs elevated). `[T:P.2 no silent side-effects]`
+#[cfg(target_os = "windows")]
+fn advise_wg_firewall(port: u16) {
+    let rule = format!("Ankayma mesh udp/{port}");
+    let manual = format!(
+        "netsh advfirewall firewall add rule name=\"{rule}\" dir=in action=allow protocol=UDP localport={port}"
+    );
+    let opt_in = std::env::var("ANKAYMA_OPEN_FIREWALL")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+    if !opt_in {
+        eprintln!("[wg] ⚠ Windows Firewall will DROP peer handshake replies until inbound udp/{port} is allowed:");
+        eprintln!("[wg]     {manual}");
+        eprintln!(
+            "[wg]   (or set ANKAYMA_OPEN_FIREWALL=1 so the elevated daemon adds it on start)"
+        );
+        return;
+    }
+    let ok = std::process::Command::new("netsh")
+        .args([
+            "advfirewall",
+            "firewall",
+            "add",
+            "rule",
+            &format!("name={rule}"),
+            "dir=in",
+            "action=allow",
+            "protocol=UDP",
+            &format!("localport={port}"),
+        ])
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if ok {
+        println!("[wg] firewall: allowed inbound udp/{port} (ANKAYMA_OPEN_FIREWALL=1)");
+    } else {
+        eprintln!("[wg] firewall: could not add the rule — run elevated: {manual}");
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn advise_wg_firewall(_port: u16) {}
+
 // [slice 2] Live data-plane status, published for the GUI to read. The GUI runs
 // unprivileged and never opens the tunnel itself, so this file is how it learns
 // the daemon is actually up (not just enrolled) + the current peer roster.
 // Connection-level only (hostname/overlay/endpoint) — never payload [T:A.1.1].
 fn status_path() -> String {
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
+    let home = home_root();
     format!("{home}/.ankayma/agent-status.json")
 }
 
