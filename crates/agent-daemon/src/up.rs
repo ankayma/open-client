@@ -200,10 +200,10 @@ pub(crate) async fn serve_dataplane(
     );
 
     // utun up + addressing.
-    let dev = crate::tun::open().context("open utun device (needs root)")?;
+    let dev = crate::tun::open().context("open tunnel device (needs root/admin)")?;
     let dev_name = dev.name().to_string();
-    let fd = dev.raw_fd();
-    configure_interface(&dev_name, self_overlay).context("configure utun interface")?;
+    let tun_handle = dev.handle();
+    configure_interface(&dev_name, self_overlay).context("configure tunnel interface")?;
     println!("interface {dev_name} up, overlay {self_overlay} (per-peer host routes)");
 
     // UDP socket the whole mesh shares.
@@ -236,7 +236,7 @@ pub(crate) async fn serve_dataplane(
     // DNS answers via the loopback resolver below (fed by /etc/resolver/<zone>),
     // never on the tun fd itself — no DnsResponder needed here (iOS-only, no
     // split-DNS hook to piggyback on).
-    let tun = agent_core::tundev::TunHandle::Fd(fd);
+    let tun = tun_handle;
     pump::spawn_tx(tun.clone(), udp.clone(), peers.clone(), None);
     pump::spawn_rx(tun, udp.clone(), peers.clone());
     pump::spawn_timers(
@@ -1156,10 +1156,54 @@ fn configure_interface(name: &str, overlay: IpAddr) -> Result<()> {
     Ok(())
 }
 
-#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+// Windows: set the overlay host address + MTU on the Wintun adapter via netsh (found
+// by the adapter name "Ankayma"). Same host-address + MTU-clamp model as macOS/Linux.
+// [T:§H.6; netsh interface]
+#[cfg(target_os = "windows")]
+fn configure_interface(name: &str, overlay: IpAddr) -> Result<()> {
+    let ip = overlay.to_string();
+    match overlay {
+        IpAddr::V4(_) => {
+            run_cmd(Command::new("netsh").args([
+                "interface",
+                "ipv4",
+                "set",
+                "address",
+                &format!("name={name}"),
+                "static",
+                &ip,
+                "255.255.255.255",
+            ]))?;
+        }
+        IpAddr::V6(_) => {
+            run_cmd(Command::new("netsh").args([
+                "interface",
+                "ipv6",
+                "add",
+                "address",
+                &format!("interface={name}"),
+                &format!("address={ip}/128"),
+            ]))?;
+        }
+    }
+    // Same MTU clamp as macOS/Linux — never read a tun packet bigger than one
+    // encrypted UDP datagram can carry. `[T:WireGuard MTU 1420]`
+    run_cmd(Command::new("netsh").args([
+        "interface",
+        "ipv6",
+        "set",
+        "subinterface",
+        name,
+        &format!("mtu={}", agent_core::pump::MTU),
+        "store=persistent",
+    ]))?;
+    Ok(())
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
 fn configure_interface(_name: &str, _overlay: IpAddr) -> Result<()> {
     Err(anyhow!(
-        "interface configuration is implemented for macOS + Linux [T:A.1.9]"
+        "interface configuration is implemented for macOS + Linux + Windows [T:A.1.9]"
     ))
 }
 
@@ -1202,12 +1246,42 @@ fn add_peer_route(name: &str, overlay: IpAddr) {
     }
 }
 
-#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+/// Windows: route this peer's overlay host into the Wintun interface via netsh.
+/// Delete-first for idempotency (best-effort — the route may not exist yet).
+#[cfg(target_os = "windows")]
+fn add_peer_route(name: &str, overlay: IpAddr) {
+    let (fam, dst) = match overlay {
+        IpAddr::V4(a) => ("ipv4", format!("{a}/32")),
+        IpAddr::V6(a) => ("ipv6", format!("{a}/128")),
+    };
+    let _ = Command::new("netsh")
+        .args([
+            "interface",
+            fam,
+            "delete",
+            "route",
+            &format!("prefix={dst}"),
+            &format!("interface={name}"),
+        ])
+        .output();
+    if let Err(e) = run_cmd(Command::new("netsh").args([
+        "interface",
+        fam,
+        "add",
+        "route",
+        &format!("prefix={dst}"),
+        &format!("interface={name}"),
+    ])) {
+        eprintln!("warning: could not route {dst} via {name}: {e}");
+    }
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
 fn add_peer_route(_name: &str, _overlay: IpAddr) {}
 
 // Only the macOS/Linux interface/route helpers above call this; gate it to match
 // so a build without those helpers doesn't flag it as dead code. [T:A.1.9]
-#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 fn run_cmd(cmd: &mut Command) -> Result<()> {
     let out = cmd.output().with_context(|| format!("run {cmd:?}"))?;
     if !out.status.success() {

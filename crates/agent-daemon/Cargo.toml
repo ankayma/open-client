@@ -56,6 +56,11 @@ libc = "0.2"
 [target.'cfg(target_os = "linux")'.dependencies]
 libc = "0.2"
 
+# [T:§H.6, gate A.0-a] Windows L3 data plane via the official signed Wintun driver
+# (loaded from wintun.dll at runtime). Adapter create/session lives in tun.rs::imp.
+[target.'cfg(target_os = "windows")'.dependencies]
+wintun = "0.5"
+
 [features]
 default = []
 # Gate A.1.4 NC: client escrows session key onto NATS data subject as a separate

@@ -256,23 +256,39 @@ mod imp {
     }
 }
 
-// Windows: Wintun session I/O (ring buffer, not a POSIX fd). The real
-// receive/allocate-send lands with the Wintun TUN device (task 12); this stub keeps
-// the `TunHandle::Wintun` abstraction compiling. [T:gate A.0-a; §H.8.1]
+// Windows: Wintun session I/O. Wintun is an NDIS L3 adapter with a ring buffer;
+// packets are BARE IP (no framing, like Linux IFF_NO_PI). receive_blocking() /
+// allocate_send_packet() take `&Arc<Session>`, which is exactly what TunHandle::Wintun
+// holds — so the pump's read/write map straight onto them. [T:wintun@0.5; §H.6]
 #[cfg(target_os = "windows")]
 mod win {
     use std::io;
+    use std::sync::Arc;
 
-    pub fn read_packet(_sess: &wintun::Session, _buf: &mut [u8]) -> io::Result<usize> {
-        Err(io::Error::new(
-            io::ErrorKind::Unsupported,
-            "Wintun read not implemented yet",
-        ))
+    /// Block until Wintun has a packet, copy the bare IP bytes out. Mirrors the utun
+    /// poll-and-return contract the pump expects.
+    pub fn read_packet(sess: &Arc<wintun::Session>, buf: &mut [u8]) -> io::Result<usize> {
+        match sess.receive_blocking() {
+            Ok(packet) => {
+                let bytes = packet.bytes();
+                let n = bytes.len().min(buf.len());
+                buf[..n].copy_from_slice(&bytes[..n]);
+                Ok(n)
+            }
+            Err(e) => Err(io::Error::other(format!("wintun receive: {e}"))),
+        }
     }
-    pub fn write_packet(_sess: &wintun::Session, _packet: &[u8]) -> io::Result<usize> {
-        Err(io::Error::new(
-            io::ErrorKind::Unsupported,
-            "Wintun write not implemented yet",
-        ))
+
+    /// Allocate a send packet from the ring, copy the bare IP bytes in, send it.
+    pub fn write_packet(sess: &Arc<wintun::Session>, packet: &[u8]) -> io::Result<usize> {
+        let len = packet.len();
+        match sess.allocate_send_packet(len as u16) {
+            Ok(mut send) => {
+                send.bytes_mut().copy_from_slice(packet);
+                sess.send_packet(send);
+                Ok(len)
+            }
+            Err(e) => Err(io::Error::other(format!("wintun allocate_send: {e}"))),
+        }
     }
 }

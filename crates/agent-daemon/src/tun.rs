@@ -10,20 +10,21 @@ use std::io;
 /// A point-to-point layer-3 tunnel device. Read/write carry **bare IP packets**
 /// (the platform 4-byte framing is added/stripped inside this module).
 pub struct TunDevice {
-    fd: i32,
+    handle: agent_core::tundev::TunHandle,
     name: String,
 }
 
 impl TunDevice {
-    /// Interface name, e.g. `utun4`.
+    /// Interface name, e.g. `utun4` (macOS), `ank0` (Linux), or `Ankayma` (the
+    /// Windows Wintun adapter) — used by `configure_interface`.
     pub fn name(&self) -> &str {
         &self.name
     }
 
-    /// Raw fd — read/write happen from separate threads (one reads, one writes),
-    /// which is safe on a single utun fd.
-    pub fn raw_fd(&self) -> i32 {
-        self.fd
+    /// The pump-side handle: a POSIX fd (macOS/Linux, read/write from separate
+    /// threads on the one fd) or a Wintun session (Windows). Cheap to clone.
+    pub fn handle(&self) -> agent_core::tundev::TunHandle {
+        self.handle.clone()
     }
 }
 
@@ -96,7 +97,10 @@ mod imp {
             let name = String::from_utf8_lossy(&name_buf[..name_len.saturating_sub(1) as usize])
                 .into_owned();
 
-            Ok(TunDevice { fd, name })
+            Ok(TunDevice {
+                handle: agent_core::tundev::TunHandle::Fd(fd),
+                name,
+            })
         }
     }
 
@@ -156,7 +160,10 @@ mod imp {
             let name = CStr::from_ptr(req.ifr_name.as_ptr())
                 .to_string_lossy()
                 .into_owned();
-            Ok(TunDevice { fd, name })
+            Ok(TunDevice {
+                handle: agent_core::tundev::TunHandle::Fd(fd),
+                name,
+            })
         }
     }
 
@@ -164,7 +171,38 @@ mod imp {
     // pump + the iOS Packet Tunnel extension). `[T:A.1.9]`
 }
 
-#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+// Windows: create a Wintun L3 adapter (official signed driver, loaded from wintun.dll
+// next to the exe) and start a ring session. Requires admin. Wintun gives bare IP
+// packets — no fd, so this returns a `TunHandle::Wintun`. [T:wintun@0.5; §H.6, gate A.0-a]
+#[cfg(target_os = "windows")]
+mod imp {
+    use super::TunDevice;
+    use std::io;
+    use std::sync::Arc;
+
+    /// Fixed adapter name so `configure_interface` (netsh) can find it by name, and a
+    /// stable GUID so the same interface is reused across reconnects.
+    pub fn open() -> io::Result<TunDevice> {
+        // SAFETY: `load` dlopens wintun.dll; the crate owns the unsafe FFI surface.
+        let wintun = unsafe { wintun::load() }.map_err(|e| {
+            io::Error::other(format!(
+                "load wintun.dll (must sit next to agent.exe or on PATH): {e}"
+            ))
+        })?;
+        let name = "Ankayma";
+        let adapter = wintun::Adapter::create(&wintun, name, "Ankayma Mesh", None)
+            .map_err(|e| io::Error::other(format!("create Wintun adapter (needs admin): {e}")))?;
+        let session = adapter
+            .start_session(wintun::MAX_RING_CAPACITY)
+            .map_err(|e| io::Error::other(format!("start Wintun session: {e}")))?;
+        Ok(TunDevice {
+            handle: agent_core::tundev::TunHandle::Wintun(Arc::new(session)),
+            name: name.to_string(),
+        })
+    }
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
 mod imp {
     use super::TunDevice;
     use std::io;
@@ -172,7 +210,7 @@ mod imp {
     pub fn open() -> io::Result<TunDevice> {
         Err(io::Error::new(
             io::ErrorKind::Unsupported,
-            "kernel tun data plane is implemented for macOS + Linux [T:A.1.9]",
+            "kernel tun data plane is implemented for macOS + Linux + Windows [T:A.1.9]",
         ))
     }
 }
