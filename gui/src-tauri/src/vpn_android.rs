@@ -25,6 +25,8 @@ static APP_CONTEXT: OnceLock<GlobalRef> = OnceLock::new();
 // Updated each time nativeStart is called — stores the VpnService instance so
 // background threads can call protect() on new DNS-forwarding sockets. [T:F-3]
 static VPN_SERVICE_REF: std::sync::Mutex<Option<GlobalRef>> = std::sync::Mutex::new(None);
+// Upstream (non-VPN) DNS server for the forward hook — a bare `fn` can't capture it.
+static UPSTREAM_DNS: Mutex<Option<String>> = Mutex::new(None);
 
 pub static VPN_RUNNING: AtomicBool = AtomicBool::new(false);
 
@@ -48,13 +50,13 @@ struct Config {
     listen_port: u16,
     #[serde(default)]
     peers: Vec<PeerInfo>,
-    /// F-3 DNS records: fqdn → overlay IP. Populated by vpn_connect from my_access.
+    /// F-3 private-name table: fqdn → overlay IP. `build_config`'s `resolve` field.
     #[serde(default)]
-    dns_records: Vec<DnsRecord>,
-    /// Upstream WiFi DNS server (e.g. "192.168.1.1") captured before VPN establishes.
-    /// Used for forwarding non-Ankayma DNS queries via a protect()ed socket. [T:F-3]
+    resolve: Vec<DnsRecord>,
+    /// Upstream public resolvers for non-private names (`build_config` sends an array;
+    /// the Android forward hook uses the first). [T:F-3]
     #[serde(default)]
-    upstream_dns: Option<String>,
+    upstream_dns: Vec<String>,
 }
 
 /// Forward a raw DNS query via Kotlin AnkaymaVpnService.forwardDns().
@@ -81,11 +83,163 @@ fn forward_dns_via_kotlin(payload: Vec<u8>, upstream_ip: &str) -> Option<Vec<u8>
     }
     let jarr: jni::objects::JByteArray = obj.into();
     let bytes = env.convert_byte_array(&jarr).ok()?;
-    if bytes.is_empty() { None } else { Some(bytes) }
+    if bytes.is_empty() {
+        None
+    } else {
+        Some(bytes)
+    }
 }
 
 fn default_port() -> u16 {
     51820
+}
+
+/// Platform DNS-forward hook (fits `pump::set_dns_forward_hook`). The pump parks the
+/// original query under `token` and hands us the bare DNS bytes; we forward to the
+/// device's real resolver via Kotlin `forwardDns()` on a spawned thread (the pump tx
+/// loop must never block) and return the answer through `pump::dns_reply` — or
+/// `pump::dns_fail` (→ SERVFAIL) so a public name is never silently dropped. [T:F-3]
+fn android_dns_forward(token: u64, query: &[u8]) {
+    let query = query.to_vec();
+    std::thread::spawn(move || {
+        let upstream = UPSTREAM_DNS
+            .lock()
+            .ok()
+            .and_then(|g| g.clone())
+            .unwrap_or_default();
+        if upstream.is_empty() {
+            pump::dns_fail(token);
+            return;
+        }
+        match forward_dns_via_kotlin(query, &upstream) {
+            Some(resp) => pump::dns_reply(token, &resp),
+            None => pump::dns_fail(token),
+        }
+    });
+}
+
+/// Bind a socket fd to the underlying non-VPN network so its traffic bypasses the TUN,
+/// via `AnkaymaVpnService.bindSocketToUnderlyingNetwork` (Kotlin `Network.bindSocket()`).
+/// This is the reliable mechanism the DNS path already uses — `protect()` is silently
+/// ignored on some OEM firmware, which black-holes large packets (PMTU stall). Must be
+/// called BEFORE connect(). No-op (returns false) when the VPN isn't up, which is fine:
+/// the socket then uses the normal default network. [T:F-3 bindSocket pattern]
+fn bind_fd_to_underlying(fd: std::os::unix::io::RawFd) -> bool {
+    let Some(vm) = JAVA_VM.get() else {
+        return false;
+    };
+    let Ok(mut env) = vm.attach_current_thread() else {
+        return false;
+    };
+    let guard = match VPN_SERVICE_REF.lock() {
+        Ok(g) => g,
+        Err(_) => return false,
+    };
+    let Some(service) = guard.as_ref() else {
+        return false;
+    };
+    env.call_method(
+        service.as_obj(),
+        "bindSocketToUnderlyingNetwork",
+        "(I)Z",
+        &[JValue::Int(fd)],
+    )
+    .and_then(|v| v.z())
+    .unwrap_or(false)
+}
+
+/// Local HTTP CONNECT proxy so the app's HTTPS to the (public) control plane bypasses
+/// the full-tunnel VPN (0.0.0.0/0 + ::/0 would otherwise black-hole it). reqwest is
+/// configured with `.proxy("http://127.0.0.1:<returned port>")`; for HTTPS it sends
+/// `CONNECT host:443`, we dial that host on a protect()ed socket and splice bytes. TLS
+/// is negotiated by reqwest end-to-end (SNI/cert = control-plane host) — the proxy never
+/// sees plaintext — and loopback is never routed through the TUN, so this works whether
+/// the VPN is up or down. A CONNECT proxy (not `.resolve()`) is required because reqwest
+/// ignores the port of a `.resolve()` override and always dials the scheme default (443).
+/// [T:protect-socket]
+pub fn start_control_plane_proxy() -> std::io::Result<u16> {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
+    let local_port = listener.local_addr()?.port();
+    std::thread::Builder::new()
+        .name("cp-proxy".into())
+        .spawn(move || {
+            for conn in listener.incoming() {
+                let Ok(client) = conn else { continue };
+                std::thread::spawn(move || {
+                    if let Err(e) = handle_connect(client) {
+                        log::warn!("cp-proxy: {e}");
+                    }
+                });
+            }
+        })?;
+    Ok(local_port)
+}
+
+/// Handle one `CONNECT host:port` request: dial the target on a protect()ed socket,
+/// reply 200, then splice bytes both ways.
+fn handle_connect(client: std::net::TcpStream) -> std::io::Result<()> {
+    use std::io::{BufRead, BufReader, Write};
+    let inv = |m: &str| std::io::Error::new(std::io::ErrorKind::InvalidData, m.to_string());
+
+    // reqwest waits for our 200 before sending any TLS, so the BufReader can't over-read
+    // into the tunnelled stream; we still splice via `reader` to drain any buffered bytes.
+    let mut reader = BufReader::new(client.try_clone()?);
+    let mut line = String::new();
+    reader.read_line(&mut line)?;
+    let target = line
+        .split_whitespace()
+        .nth(1)
+        .ok_or_else(|| inv("bad CONNECT line"))?;
+    let (host, port) = target
+        .rsplit_once(':')
+        .ok_or_else(|| inv("no port in CONNECT"))?;
+    let port: u16 = port.trim().parse().map_err(|_| inv("bad CONNECT port"))?;
+    let host = host.to_string();
+    // Drain remaining request headers up to the blank line.
+    loop {
+        line.clear();
+        let n = reader.read_line(&mut line)?;
+        if n == 0 || line == "\r\n" || line == "\n" {
+            break;
+        }
+    }
+
+    let upstream = protected_connect(&host, port)?;
+    let mut client_w = client;
+    client_w.write_all(b"HTTP/1.1 200 Connection established\r\n\r\n")?;
+    client_w.flush()?;
+
+    // Splice both directions. Read via `reader` (not a fresh clone) so any bytes the
+    // BufReader read ahead of the blank line are drained first.
+    let mut u_write = upstream.try_clone()?;
+    let up = std::thread::spawn(move || {
+        let _ = std::io::copy(&mut reader, &mut u_write);
+        let _ = u_write.shutdown(std::net::Shutdown::Write);
+    });
+    let mut u_read = upstream;
+    let _ = std::io::copy(&mut u_read, &mut client_w);
+    let _ = client_w.shutdown(std::net::Shutdown::Write);
+    let _ = up.join();
+    Ok(())
+}
+
+/// Resolve + dial `host:port` on a protect()ed socket (bypasses the VPN while up).
+fn protected_connect(host: &str, port: u16) -> std::io::Result<std::net::TcpStream> {
+    use std::net::ToSocketAddrs;
+    // Resolves via the system resolver; while the VPN is up the query still reaches
+    // the in-process DNS intercept, which forwards non-Ankayma names upstream.
+    let addr = (host, port)
+        .to_socket_addrs()?
+        .next()
+        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "resolve failed"))?;
+    let sock = socket2::Socket::new(
+        socket2::Domain::for_address(addr),
+        socket2::Type::STREAM,
+        Some(socket2::Protocol::TCP),
+    )?;
+    let _ = bind_fd_to_underlying(sock.as_raw_fd());
+    sock.connect_timeout(&addr.into(), std::time::Duration::from_secs(10))?;
+    Ok(sock.into())
 }
 
 fn start_tunnel(
@@ -97,12 +251,13 @@ fn start_tunnel(
     // Store VpnService as a GlobalRef so background DNS-forwarding threads can
     // call protect() via JNI without holding the nativeStart JNI frame. [T:F-3]
     match env.new_global_ref(service) {
-        Ok(g) => { *VPN_SERVICE_REF.lock().expect("vpn service lock") = Some(g); }
+        Ok(g) => {
+            *VPN_SERVICE_REF.lock().expect("vpn service lock") = Some(g);
+        }
         Err(e) => log::error!("start_tunnel: new_global_ref for service: {e}"),
     }
 
-    let cfg: Config =
-        serde_json::from_str(config_json).map_err(|e| format!("config JSON: {e}"))?;
+    let cfg: Config = serde_json::from_str(config_json).map_err(|e| format!("config JSON: {e}"))?;
 
     let self_overlay: std::net::IpAddr = cfg
         .overlay_ip
@@ -138,7 +293,8 @@ fn start_tunnel(
             fd,
             &sin as *const _ as *const libc::sockaddr,
             std::mem::size_of::<libc::sockaddr_in>() as libc::socklen_t,
-        ) < 0 {
+        ) < 0
+        {
             libc::close(fd);
             return Err(format!(
                 "bind UDP 0.0.0.0:{}: {}",
@@ -157,59 +313,63 @@ fn start_tunnel(
     let peers: pump::Peers = Arc::new(Mutex::new(Vec::new()));
     let index = Arc::new(Mutex::new(0u32));
 
-    pump::add_tunn_peers(&peers, &index, &static_private, self_overlay, &cfg.peers, &udp);
+    pump::add_tunn_peers(
+        &peers,
+        &index,
+        &static_private,
+        self_overlay,
+        &cfg.peers,
+        &udp,
+        Some(25),
+    );
 
-    // F-3: DNS intercept — Ankayma domains answered in-process; non-Ankayma
-    // forwarded via Kotlin forwardDns() which calls network.bindSocket() to bypass
-    // TUN reliably on all OEM firmware. [T:F-3]
-    let dns_interceptor = {
+    // F-3 DNS: private mesh names answered in-process from `table`; every other name
+    // forwarded to the device's real resolver via the platform hook (pump::DnsResponder
+    // + set_dns_forward_hook), exactly like iOS — never NXDOMAIN a public name or the
+    // OS drops our resolver. On Android the hook calls Kotlin `forwardDns()`
+    // (ConnectivityManager.bindSocket → non-VPN network, reliable where protect() is
+    // ignored) on a spawned thread, then pump::dns_reply / dns_fail (non-blocking).
+    // Queries are addressed to the magic overlay IP fd00:a11a::53, which
+    // AnkaymaVpnService adds as the VPN DNS server + routes into the TUN. [T:F-3]
+    let dns = {
         use std::collections::HashMap;
         use std::net::IpAddr;
         let table: HashMap<String, IpAddr> = cfg
-            .dns_records
+            .resolve
             .iter()
-            .filter_map(|r| {
-                let ip: IpAddr = r.overlay_ip.parse().ok()?;
-                Some((r.fqdn.to_ascii_lowercase(), ip))
-            })
+            .filter_map(|r| Some((r.fqdn.to_ascii_lowercase(), r.overlay_ip.parse().ok()?)))
             .collect();
         if table.is_empty() {
             None
         } else {
-            let magic: std::net::Ipv6Addr = "fd00:a11a::53".parse().unwrap();
-            let upstream_ip = cfg.upstream_dns.clone().unwrap_or_default();
+            // The forward hook is a bare `fn` (no captures) — stash the upstream DNS
+            // (port stripped; forwardDns dials :53) in a static for it to read.
+            if let Some(up) = cfg.upstream_dns.first() {
+                let ip_only = up.split(':').next().unwrap_or(up.as_str()).to_string();
+                *UPSTREAM_DNS.lock().expect("upstream dns lock") = Some(ip_only);
+            }
+            pump::set_dns_forward_hook(android_dns_forward);
+            let magic: IpAddr = "fd00:a11a::53".parse().expect("magic dns ip");
             log::info!(
-                "DNS intercept: {} private records, magic IP {magic}, upstream DNS {upstream_ip:?}"
-                , table.len()
+                "DNS responder: {} private records, self_ip {magic}",
+                table.len()
             );
-            let dns_forward_fn: Option<
-                std::sync::Arc<dyn Fn(Vec<u8>) -> Option<Vec<u8>> + Send + Sync>,
-            > = if !upstream_ip.is_empty() {
-                // Strip port if present — forwardDns uses port 53 on the Kotlin side.
-                let ip_only = upstream_ip
-                    .split(':')
-                    .next()
-                    .unwrap_or(&upstream_ip)
-                    .to_string();
-                Some(std::sync::Arc::new(move |payload| {
-                    forward_dns_via_kotlin(payload, &ip_only)
-                }))
-            } else {
-                None
-            };
-            Some(pump::DnsInterceptor {
-                magic_ip: magic,
-                table,
-                upstream_dns: None,
-                protect_fn: None,
-                dns_forward_fn,
+            Some(pump::DnsResponder {
+                self_ip: magic,
+                table: Arc::new(Mutex::new(table)),
+                forward: true,
             })
         }
     };
 
-    pump::spawn_tx_with_dns(tun_fd, udp.clone(), peers.clone(), dns_interceptor);
+    pump::spawn_tx(tun_fd, udp.clone(), peers.clone(), dns);
     pump::spawn_rx(tun_fd, udp.clone(), peers.clone());
-    pump::spawn_timers(udp.clone(), peers.clone());
+    pump::spawn_timers(
+        udp.clone(),
+        peers.clone(),
+        static_private.clone(),
+        index.clone(),
+    );
 
     Ok(Box::new(VpnHandle {
         _udp: udp,
@@ -287,9 +447,7 @@ where
     let vm = JAVA_VM
         .get()
         .ok_or("JVM not initialized — ensure app fully started before vpn_connect")?;
-    let ctx = APP_CONTEXT
-        .get()
-        .ok_or("Android context not initialized")?;
+    let ctx = APP_CONTEXT.get().ok_or("Android context not initialized")?;
     let mut env = vm
         .attach_current_thread()
         .map_err(|e| format!("attach JVM: {e}"))?;

@@ -40,6 +40,12 @@ pub fn open_external_url(url: &str) -> Result<(), String> {
     }
 }
 
+/// Android: open a URL via an ACTION_VIEW intent (the `open` crate no-ops here too).
+#[cfg(target_os = "android")]
+pub fn open_external_url(url: &str) -> Result<(), String> {
+    crate::vpn_android::open_url(url)
+}
+
 /// NEVPNStatus rawValue → a stable string for the UI.
 #[cfg(target_os = "ios")]
 fn status_string(code: i32) -> &'static str {
@@ -71,7 +77,7 @@ pub struct VpnStatus {
 /// documented model is "reconnect to see new devices/services", matching how a
 /// user must toggle the tunnel to pick up config changes. A fetch failure (e.g.
 /// offline enrollment check) just omits `zone`/`resolve`; it never blocks connect.
-#[cfg(target_os = "ios")]
+#[cfg(any(target_os = "ios", target_os = "android"))]
 async fn build_config(state: &AppState) -> Result<String, String> {
     let (private_b64, overlay_ip, enroll_peers) = {
         let guard = state.node.lock().expect("node lock poisoned");
@@ -157,8 +163,13 @@ async fn build_config(state: &AppState) -> Result<String, String> {
 /// `[T:RFC-6598; Apple-forums NEDNSSettings; avoid Tailscale 100.100.100.100]`
 #[cfg(target_os = "ios")]
 const MAGIC_DNS_IP: &str = "100.100.100.53";
+// Android — unlike iOS — reliably routes DNS to an IPv6 server inside the TUN, so it
+// self-addresses the responder on the IPv6 overlay magic-DNS the VpnService adds as
+// its DNS server + /128 route. [T:F-3 android — verified Chrome loads PrivDomain]
+#[cfg(target_os = "android")]
+const MAGIC_DNS_IP: &str = "fd00:a11a::53";
 
-#[cfg(target_os = "ios")]
+#[cfg(any(target_os = "ios", target_os = "android"))]
 fn magic_dns_ip(_overlay_ip: &str) -> Option<String> {
     Some(MAGIC_DNS_IP.to_string())
 }
@@ -179,10 +190,19 @@ pub async fn vpn_connect(state: State<'_, AppState>) -> Result<(), String> {
         }
         Ok(())
     }
-    #[cfg(not(target_os = "ios"))]
+    #[cfg(target_os = "android")]
+    {
+        // Same flow as iOS: enroll on the control plane, build the resolved config,
+        // then hand it to AnkaymaVpnService (which owns the TUN fd + runs the pump).
+        crate::connect_inner(&state).await?;
+        let config = build_config(&state).await?;
+        crate::vpn_android::start_service(&config)?;
+        Ok(())
+    }
+    #[cfg(not(any(target_os = "ios", target_os = "android")))]
     {
         let _ = &state;
-        Err("vpn_connect is iOS-only; desktop uses the agent daemon".into())
+        Err("vpn_connect is mobile-only; desktop uses the agent daemon".into())
     }
 }
 
@@ -195,9 +215,13 @@ pub fn vpn_disconnect() -> Result<(), String> {
         unsafe { ffi::ankayma_vpn_disconnect() };
         Ok(())
     }
-    #[cfg(not(target_os = "ios"))]
+    #[cfg(target_os = "android")]
     {
-        Err("vpn_disconnect is iOS-only".into())
+        crate::vpn_android::stop_service()
+    }
+    #[cfg(not(any(target_os = "ios", target_os = "android")))]
+    {
+        Err("vpn_disconnect is mobile-only".into())
     }
 }
 
@@ -221,7 +245,19 @@ pub fn vpn_status(state: State<'_, AppState>) -> VpnStatus {
             peer_count,
         }
     }
-    #[cfg(not(target_os = "ios"))]
+    #[cfg(target_os = "android")]
+    {
+        let status = if crate::vpn_android::VPN_RUNNING.load(std::sync::atomic::Ordering::Relaxed) {
+            "connected"
+        } else {
+            "disconnected"
+        };
+        VpnStatus {
+            status: status.to_string(),
+            peer_count,
+        }
+    }
+    #[cfg(not(any(target_os = "ios", target_os = "android")))]
     {
         VpnStatus {
             status: "unsupported".to_string(),

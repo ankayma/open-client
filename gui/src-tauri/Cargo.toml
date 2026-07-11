@@ -70,3 +70,11 @@ smappservice-rs = "0.1.3"
 # promote it to a direct dep rather than pull a third-party inset plugin. [A.1.21]
 [target.'cfg(target_os = "ios")'.dependencies]
 objc2 = "0.6"
+
+# Android-only: JNI bridge to AnkaymaVpnService (VpnService owns the TUN fd + calls
+# nativeStart/Stop; Rust calls protect/bindSocket/forwardDns back). socket2 lets the
+# control-plane loopback proxy create-then-bind-then-connect (std TcpStream connects
+# on creation, too late to bind the fd to the non-VPN network). [A.1.21]
+[target.'cfg(target_os = "android")'.dependencies]
+jni = { version = "0.21", default-features = false }
+socket2 = "0.6"

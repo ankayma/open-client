@@ -23,11 +23,11 @@
 	let hostname = $state<string | null>(null);
 	// iOS runs the data plane in-app (Packet Tunnel extension); desktop hands off to
 	// the privileged daemon. The connect toggle picks the path from this. [T:A.1.9]
-	let isIos = $state(false);
+	let isMobile = $state(false);
 
 	async function refreshDataplane() {
 		try {
-			if (isIos) {
+			if (isMobile) {
 				const s = await vpnStatus();
 				const running = s.status === 'connected' || s.status === 'reasserting';
 				// Show the REAL peer count (was hard-coded to 0). `peers` is only used
@@ -55,8 +55,8 @@
 	let dpTimer: ReturnType<typeof setInterval> | undefined;
 	onMount(() => {
 		getPlatform()
-			.then((os) => { isIos = os === 'ios'; refreshDataplane(); })
-			.catch(() => (isIos = false));
+			.then((os) => { isMobile = os === 'ios' || os === 'android'; refreshDataplane(); })
+			.catch(() => (isMobile = false));
 		refreshDataplane();
 		dpTimer = setInterval(refreshDataplane, 4000);
 		getNodeInfo().then((n) => (hostname = n.hostname)).catch(() => {});
@@ -94,7 +94,7 @@
 		try {
 			const conn = $connection;
 			if (conn.status === 'connected') {
-				if (isIos) {
+				if (isMobile) {
 					await vpnDisconnect();
 				} else {
 					try { await stopDataplane(); } catch { /* ignore — daemon may not be running */ }
@@ -103,7 +103,7 @@
 				connection.set({ status: 'disconnected' });
 			} else {
 				connection.set({ status: 'connecting' });
-				if (isIos) {
+				if (isMobile) {
 					await vpnConnect();
 				} else {
 					await connect();
@@ -183,7 +183,7 @@
 	     the button is gone). Its presence doubles as the "tunnel really up" signal:
 	     it renders only while the data plane reports running. -->
 
-	{#if isIos && $connection.status === 'connected'}
+	{#if isMobile && $connection.status === 'connected'}
 		<!-- Honest about the "reconnect to see new devices/services" model (Phase 1,
 		     f3-privdomain-ios-plan.md): the extension only reads peers/resolve once,
 		     at tunnel start — no live refresh while connected. -->

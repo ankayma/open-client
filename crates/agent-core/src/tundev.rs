@@ -124,8 +124,10 @@ mod imp {
     }
 }
 
-// Linux: IFF_NO_PI → read/write carry bare IP packets, no framing.
-#[cfg(target_os = "linux")]
+// Linux/Android: IFF_NO_PI → read/write carry bare IP packets, no framing. Android
+// runs the Linux kernel and VpnService.establish() returns a real POSIX fd, so the
+// Linux impl is reused verbatim (Rust treats "android" as a distinct target_os).
+#[cfg(any(target_os = "linux", target_os = "android"))]
 mod imp {
     use std::io;
     use std::os::raw::c_void;
@@ -201,7 +203,12 @@ mod tests {
 
 // Windows/Android et al.: no tun fd plumbing yet — error at runtime, still compile
 // (A.1.9). `[T:A.1.9]`
-#[cfg(not(any(target_os = "macos", target_os = "ios", target_os = "linux")))]
+#[cfg(not(any(
+    target_os = "macos",
+    target_os = "ios",
+    target_os = "linux",
+    target_os = "android"
+)))]
 mod imp {
     use std::io;
 

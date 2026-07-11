@@ -44,11 +44,15 @@ class AnkaymaVpnService : VpnService() {
             android.util.Log.i("AnkaymaVPN", "upstream DNS: $upstreamDns")
 
             val obj = JSONObject(configJson)
-            // Inject upstream_dns so Rust can forward non-Ankayma DNS queries to it
-            // via a VpnService.protect()ed socket, keeping internet DNS working.
-            // Fall back to 8.8.8.8 if the WiFi DNS is not detected — it will be
-            // reachable via the protect()ed forwarding socket (bypasses TUN).
-            obj.put("upstream_dns", upstreamDns ?: "8.8.8.8")
+            // Inject upstream_dns (as a JSON array — matches build_config's shape) so
+            // Rust forwards non-Ankayma DNS queries to it via a bindSocket()'d socket
+            // (bypasses the TUN). The device's own WiFi DNS is preferred (handles local
+            // names); public resolvers follow as fallbacks. [T:F-3]
+            val upstreams = org.json.JSONArray()
+            if (upstreamDns != null) upstreams.put(upstreamDns)
+            upstreams.put("1.1.1.1")
+            upstreams.put("8.8.8.8")
+            obj.put("upstream_dns", upstreams)
 
             val overlayIp = obj.getString("overlay_ip")
             val isV6 = overlayIp.contains(":")
@@ -83,6 +87,12 @@ class AnkaymaVpnService : VpnService() {
                 // traffic entering TUN is silently dropped in the pump (no matching peer).
                 builder.addAddress("10.0.0.1", 32)
                 builder.addRoute("0.0.0.0", 0)
+                // IPv6 default route: without this Android assumes no IPv6 internet and
+                // the stub resolver only sends A (qtype=1) queries, never AAAA (qtype=28).
+                // We need AAAA queries to answer with the peer overlay IPv6 address.
+                // Non-Ankayma IPv6 traffic entering TUN is silently dropped (same as IPv4).
+                // [T:4a597ca — re-applied; dropped during c8a5c97 re-implementation]
+                builder.addRoute("::", 0)
             } else {
                 // IPv4 overlay (legacy; current control plane issues IPv6).
                 builder.addAddress(overlayIp, 32)
@@ -208,6 +218,31 @@ class AnkaymaVpnService : VpnService() {
         } catch (e: Exception) {
             android.util.Log.w("AnkaymaVPN", "forwardDns failed: ${e.message}")
             null
+        }
+    }
+
+    /// Bind an existing socket fd (created in Rust) to the non-VPN network so its
+    /// traffic bypasses the TUN — same mechanism as forwardDns(), reliable on OEM
+    /// firmware where protect() is silently ignored. Used by the control-plane HTTP
+    /// proxy so the app can reach cp.ankayma.com while the full-tunnel VPN is up.
+    /// Must be called BEFORE connect(). Returns true if bound. [T:F-3 bindSocket pattern]
+    fun bindSocketToUnderlyingNetwork(fd: Int): Boolean {
+        return try {
+            val cm = getSystemService(ConnectivityManager::class.java) ?: return false
+            val net = cm.allNetworks.firstOrNull { net ->
+                val caps = cm.getNetworkCapabilities(net) ?: return@firstOrNull false
+                caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) &&
+                        caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN)
+            } ?: return false
+            // fromFd dups the fd; binding the dup marks the shared underlying socket,
+            // then we close the dup — the original Rust fd stays open and bound.
+            val pfd = android.os.ParcelFileDescriptor.fromFd(fd)
+            net.bindSocket(pfd.fileDescriptor)
+            pfd.close()
+            true
+        } catch (e: Exception) {
+            android.util.Log.w("AnkaymaVPN", "bindSocket failed: ${e.message}")
+            false
         }
     }
 
