@@ -21,3 +21,8 @@ cosign.key
 # closed control-plane structure). Untracked so internal data is not added to this
 # public repo. Claude still reads it locally; absent from the public tip.
 /CLAUDE.md
+
+# Wintun driver DLL — Microsoft-signed, fetched from wintun.net at build time by
+# packaging/windows/build-ankayma-windows.bat (not vendored, to avoid shipping a
+# third-party binary blob in this repo). [T:part-d-infrastructure §5]
+/gui/src-tauri/wintun.dll
