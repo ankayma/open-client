@@ -27,3 +27,16 @@ pub use crypto::cert;
 // Re-export the HTTP client type so GUI/daemon share one client and never talk
 // to the control plane except through this crate's adapters. [T:A.1.1]
 pub use reqwest;
+
+/// Home base for `~/.ankayma/…` — the single resolver every entrypoint (cli, daemon,
+/// GUI) must use so they agree on one state dir per platform. HOME on unix;
+/// USERPROFILE on Windows (HOME is usually unset there); `.` (CWD) only as a last
+/// resort. Duplicating this per crate is what let the daemon get the USERPROFILE
+/// fallback while the GUI kept reading an empty HOME and persisting identity to a
+/// relative `.ankayma` under an unwritable CWD. Keep it here, call it everywhere.
+/// [T:A.1.3; part-d-node-identity-device-binding.md §H.7 1.5]
+pub fn home_root() -> String {
+    std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .unwrap_or_else(|_| ".".into())
+}

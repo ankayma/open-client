@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { goto } from "$app/navigation";
-  import { myAccess, openSubdomain, getNodeInfo, listNodes, listCiPolicies, ciHistory, getPathProof } from "$lib/tauri";
+  import { myAccess, openSubdomain, getNodeInfo, listNodes, listCiPolicies, ciHistory, getPathProof, probeReachable } from "$lib/tauri";
   import type { MyAccess, AccessService, PeerBrief, CiPolicy, CiRun, PathProof, PathPeer } from "$lib/types";
   import { connection } from "$lib/stores";
   import ConnectionCard from "$lib/components/ConnectionCard.svelte";
@@ -20,6 +20,8 @@
   let myNodeId = $state<string | null>(null);
   let peers = $state<PeerBrief[]>([]);
   let proof = $state<PathProof | null>(null);
+  // hostname → reachable, from the active TCP probe (authoritative "reachable NOW").
+  let reachMap = $state<Map<string, boolean>>(new Map());
 
   onMount(() => {
     load();
@@ -36,7 +38,86 @@
     // shows the chip; clicking opens its CI run history. Owner/admin sees by
     // default; a member the server doesn't authorize simply gets no chips.
     listCiPolicies().then((p) => (ciPolicies = p)).catch(() => {});
+    // Live reachability: poll the WireGuard handshake age so each node shows whether
+    // it's actually on the mesh (SSH/Open only work if a handshake is fresh). A node
+    // can be powered on yet unreachable — its agent may not be connected. [T:F-5]
+    loadProof();
+    probeReach();
+    const iv = setInterval(loadProof, 8000);
+    // Active probe is heavier (one TCP connect per peer) — run it less often.
+    const pv = setInterval(probeReach, 25000);
+    return () => {
+      clearInterval(iv);
+      clearInterval(pv);
+    };
   });
+
+  async function loadProof() {
+    try {
+      proof = await getPathProof();
+    } catch {
+      /* keep the last snapshot rather than blanking the badges */
+    }
+  }
+
+  // Active reachability: TCP-probe every peer's overlay (which also wakes its WG
+  // handshake), then reduce to hostname → reachable (a node is reachable if ANY of
+  // its overlay IPs responds). This is authoritative "reachable NOW", unlike the
+  // lagging handshake age. Skips when disconnected. [T:A.1.1]
+  async function probeReach() {
+    if (!connected) {
+      reachMap = new Map();
+      return;
+    }
+    const pr = proof ?? (await getPathProof().catch(() => null));
+    if (!pr || pr.peers.length === 0) return;
+    try {
+      const ips = pr.peers.map((p) => p.overlay_ip);
+      const results = await probeReachable(ips);
+      const m = new Map<string, boolean>();
+      pr.peers.forEach((p, i) => {
+        m.set(p.hostname, (m.get(p.hostname) ?? false) || !!results[i]);
+      });
+      reachMap = m;
+    } catch {
+      /* keep last */
+    }
+  }
+
+  // Reachability of a node over the mesh, from the live WireGuard handshake age
+  // (types.ts: the real "is this reachable" signal — NOT the CP `active` flag).
+  // Honest per P.3: a null/stale handshake means "not handshaking now" (agent down,
+  // asleep, or NAT with no relay yet) — we say "no handshake", not "offline".
+  type Reach = "online" | "stale" | "unknown";
+  function reachOf(node: string): Reach {
+    if (!connected) return "unknown";
+    // Prefer the active probe (authoritative NOW); fall back to handshake age until
+    // the first probe lands.
+    if (reachMap.has(node)) return reachMap.get(node) ? "online" : "stale";
+    if (!proof) return "unknown";
+    const matches = proof.peers.filter((p) => p.hostname === node);
+    if (matches.length === 0) return "unknown";
+    const best = matches.reduce((a, b) => {
+      const av = a.last_handshake_secs ?? Infinity;
+      const bv = b.last_handshake_secs ?? Infinity;
+      return bv < av ? b : a;
+    });
+    const hs = best.last_handshake_secs;
+    if (hs === null || hs === undefined) return "stale";
+    return hs <= 180 ? "online" : "stale";
+  }
+  // Probe-CONFIRMED unreachable — only true after a probe returned false (not merely
+  // "no handshake yet"). Actions are disabled only on this, so a not-yet-probed node
+  // stays clickable (no deadlock while the first probe is in flight).
+  function probedDown(node: string): boolean {
+    return reachMap.get(node) === false;
+  }
+  const REACH_LABEL = { online: "reachable", stale: "unreachable", unknown: "" } as const;
+  const REACH_TITLE = {
+    online: "Responds over the mesh — reachable",
+    stale: "No response over the mesh — SSH/Open will time out (agent not connected, asleep, or NAT without a relay)",
+    unknown: "Connect the tunnel to see reachability",
+  } as const;
 
   async function load() {
     loading = true;
@@ -95,7 +176,9 @@
     return p && p.node_id !== myNodeId ? p : null;
   }
   function sshTo(p: PeerBrief) {
-    goto(`/terminal?node=${encodeURIComponent(p.node_id)}&host=${encodeURIComponent(p.hostname)}`);
+    goto(
+      `/terminal?node=${encodeURIComponent(p.node_id)}&host=${encodeURIComponent(p.hostname)}&from=${encodeURIComponent("/services")}`
+    );
   }
 
   // [F-1 viewer] CI/CD chip + history modal state.
@@ -115,14 +198,8 @@
       .catch((e) => (ciErr = String(e)));
   }
 
-  // Load live path proof when opening path chain for a service.
-  $effect(() => {
-    if (pathChainSvc) {
-      getPathProof().then((p) => (proof = p)).catch(() => {});
-    } else {
-      proof = null;
-    }
-  });
+  // `proof` is polled on mount (loadProof) for the reachability badges; the path
+  // chain modal reuses that same live snapshot — no separate load/null needed.
 
   // Find the WireGuard peer that backs the selected service node.
   const pathChainPeer: PathPeer | null = $derived(
@@ -227,24 +304,33 @@
         {svc.label}
         <span class="tag" title="why you can reach this">{svc.rule_ref}</span>
         {#if owned}<span class="owned-badge">● owned</span>{/if}
+        {#if !owned && reachOf(svc.node) !== "unknown"}
+          <span class="reach {reachOf(svc.node)}" title={REACH_TITLE[reachOf(svc.node)]}>
+            {reachOf(svc.node) === "online" ? "●" : "○"} {REACH_LABEL[reachOf(svc.node)]}
+          </span>
+        {/if}
       </span>
       {#if svc.status !== "denied"}
         <div class="head-actions">
           {#if ciRules(svc.node).length > 0}
             <button class="btn-secondary ci-chip" title="CI deploy history for {svc.node}" onclick={() => openCiHistory(svc.node)}>🧾 CI/CD</button>
           {/if}
-          {#if sshPeer(svc.node)}
+          <!-- self device (this machine): Open/SSH/path chain to yourself are no-ops;
+               keep only CI/CD history. `owned` == the current device (hostname match). -->
+          {#if !owned && sshPeer(svc.node)}
             <button
               class="btn-secondary ssh-btn"
-              disabled={!connected}
-              title="SSH into {svc.node}"
+              disabled={!connected || probedDown(svc.node)}
+              title={probedDown(svc.node) ? "Unreachable — no response over the mesh" : "SSH into " + svc.node}
               onclick={() => sshTo(sshPeer(svc.node)!)}
             >
               <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 17l6-6-6-6M12 19h8"/></svg>
               SSH
             </button>
           {/if}
-          <button class="btn-primary" disabled={!connected} onclick={() => openSubdomain(svc.fqdn)}>Open ↗</button>
+          {#if !owned}
+            <button class="btn-primary" disabled={!connected || probedDown(svc.node)} title={probedDown(svc.node) ? "Unreachable — no response over the mesh" : ""} onclick={() => openSubdomain(svc.fqdn)}>Open ↗</button>
+          {/if}
         </div>
       {/if}
     </div>
@@ -259,7 +345,14 @@
         <span class="denied-text">access denied (no policy)</span>
       {:else}
         <span>→ {svc.node}</span>
-        <button class="btn-secondary chain-btn" onclick={() => (pathChainSvc = svc)}>◈ path chain</button>
+        {#if !owned}
+          <button
+            class="btn-secondary chain-btn"
+            disabled={probedDown(svc.node)}
+            title={probedDown(svc.node) ? "Unreachable — no live path to show" : ""}
+            onclick={() => (pathChainSvc = svc)}
+          >◈ path chain</button>
+        {/if}
       {/if}
     </div>
   </div>
@@ -271,16 +364,21 @@
       <span class="label">
         {group.node}
         {#if group.owned}<span class="owned-badge">● owned</span>{/if}
+        {#if !group.owned && reachOf(group.node) !== "unknown"}
+          <span class="reach {reachOf(group.node)}" title={REACH_TITLE[reachOf(group.node)]}>
+            {reachOf(group.node) === "online" ? "●" : "○"} {REACH_LABEL[reachOf(group.node)]}
+          </span>
+        {/if}
       </span>
       <div class="head-actions">
         {#if ciRules(group.node).length > 0}
           <button class="btn-secondary ci-chip" title="CI deploy history for {group.node}" onclick={() => openCiHistory(group.node)}>🧾 CI/CD</button>
         {/if}
-        {#if sshPeer(group.node)}
+        {#if !group.owned && sshPeer(group.node)}
           <button
             class="btn-secondary ssh-btn"
-            disabled={!connected}
-            title="SSH into {group.node}"
+            disabled={!connected || probedDown(group.node)}
+            title={probedDown(group.node) ? "Unreachable — no response over the mesh" : "SSH into " + group.node}
             onclick={() => sshTo(sshPeer(group.node)!)}
           >
             <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 17l6-6-6-6M12 19h8"/></svg>
@@ -306,10 +404,16 @@
           </div>
           {#if svc.status === "denied"}
             <span class="denied-text">access denied</span>
-          {:else}
+          {:else if !group.owned}
+            <!-- self device: no Open/path chain to yourself (see head CI/CD only). -->
             <div class="child-actions">
-              <button class="btn-primary sm" disabled={!connected} onclick={() => openSubdomain(svc.fqdn)}>Open ↗</button>
-              <button class="btn-secondary sm" onclick={() => (pathChainSvc = svc)}>◈ path chain</button>
+              <button class="btn-primary sm" disabled={!connected || probedDown(svc.node)} title={probedDown(svc.node) ? "Unreachable — no response over the mesh" : ""} onclick={() => openSubdomain(svc.fqdn)}>Open ↗</button>
+              <button
+                class="btn-secondary sm"
+                disabled={probedDown(svc.node)}
+                title={probedDown(svc.node) ? "Unreachable — no live path to show" : ""}
+                onclick={() => (pathChainSvc = svc)}
+              >◈ path chain</button>
             </div>
           {/if}
         </div>
@@ -592,6 +696,24 @@
     padding: 1px 7px;
     white-space: nowrap;
   }
+  .reach {
+    font-size: 11px;
+    font-weight: 500;
+    border-radius: 99px;
+    padding: 1px 7px;
+    white-space: nowrap;
+    cursor: help;
+  }
+  .reach.online {
+    color: #34c759;
+    background: color-mix(in srgb, #34c759 12%, transparent);
+    border: 1px solid color-mix(in srgb, #34c759 26%, transparent);
+  }
+  .reach.stale {
+    color: var(--c-text-dim);
+    background: color-mix(in srgb, var(--c-text-dim) 10%, transparent);
+    border: 1px solid color-mix(in srgb, var(--c-text-dim) 22%, transparent);
+  }
   .fqdn {
     font-family: "SF Mono", "Fira Code", monospace;
     font-size: 12px;
@@ -753,7 +875,8 @@
   .ci-note.err {
     color: var(--c-danger);
   }
-  :global(.btn-primary:disabled) {
+  :global(.btn-primary:disabled),
+  :global(.btn-secondary:disabled) {
     opacity: 0.4;
     cursor: not-allowed;
   }

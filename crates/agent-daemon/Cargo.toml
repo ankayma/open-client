@@ -60,6 +60,10 @@ libc = "0.2"
 # (loaded from wintun.dll at runtime). Adapter create/session lives in tun.rs::imp.
 [target.'cfg(target_os = "windows")'.dependencies]
 wintun = "0.5"
+# Console VT + raw-mode for the `agent ssh` client: without ENABLE_VIRTUAL_TERMINAL_
+# PROCESSING the remote PTY's ANSI escapes print literally (^[[01;32m…) and input
+# stays line-buffered. Mirrors the unix termios RawMode. [T:console VT]
+windows-sys = { version = "0.59", features = ["Win32_System_Console", "Win32_Foundation"] }
 
 [features]
 default = []

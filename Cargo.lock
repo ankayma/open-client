@@ -99,6 +99,7 @@ dependencies = [
  "smoltcp",
  "tokio",
  "tokio-rustls",
+ "wintun",
 ]
 
 [[package]]

@@ -302,11 +302,27 @@ impl ConnHandler {
                     c.arg(user);
                     c
                 } else {
-                    // Already this user (dev/dogfood) → login shell directly.
-                    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
-                    let mut c = CommandBuilder::new(shell);
-                    c.arg("-l");
-                    c
+                    // Already this user (dev/dogfood) → login shell directly. On
+                    // Windows there is no `su`/login-shell here; land the current
+                    // user's shell (ComSpec/cmd.exe) over ConPTY — `-l` is POSIX-only
+                    // and `/bin/sh` does not exist. [T:gate A.0-a windows-compat]
+                    #[cfg(windows)]
+                    {
+                        // PowerShell by default (richer UX than cmd.exe); override via
+                        // ANKAYMA_SHELL. PowerShell ships on every Win10/11.
+                        // [T:gate A.0-a windows-compat]
+                        let shell = std::env::var("ANKAYMA_SHELL")
+                            .unwrap_or_else(|_| "powershell.exe".to_string());
+                        CommandBuilder::new(shell)
+                    }
+                    #[cfg(not(windows))]
+                    {
+                        let shell =
+                            std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
+                        let mut c = CommandBuilder::new(shell);
+                        c.arg("-l");
+                        c
+                    }
                 };
                 c.env("TERM", &self.term);
                 Ok(c)

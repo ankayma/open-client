@@ -284,11 +284,12 @@ pub(crate) async fn serve_dataplane(
             Err(_) => None,
         };
 
-    // [F-2 v0.5] Embedded SSH server: identity-bound NoKeySSH lands the shared
-    // user `ankayma` over the overlay only (never a public port). Runs on the
-    // target node (unix). Clients pin the host key the control plane distributes;
-    // root elevation (§H.4) is enabled if the CP publishes an elevation key.
-    #[cfg(unix)]
+    // [F-2 v0.5] Embedded SSH server: identity-bound NoKeySSH over the overlay only
+    // (never a public port). Unix lands the shared user `ankayma`; Windows lands the
+    // current user's ConPTY shell (§H.5 provisioning is unix-only for now). Clients
+    // pin the host key the control plane distributes; root elevation (§H.4) is
+    // enabled if the CP publishes an elevation key.
+    #[cfg(any(unix, windows))]
     start_embedded_ssh(
         self_overlay,
         &ctx.control_plane,
@@ -627,13 +628,10 @@ impl Config {
     }
 }
 
-/// Home base for `~/.ankayma/…`. HOME on unix; USERPROFILE on Windows (HOME is
-/// usually unset there); `.` (CWD) only as a last resort so `agent up` and
-/// `agent ssh` resolve the same state dir on every platform. `[T:A.1.3]`
+/// Home base for `~/.ankayma/…` — thin alias for the shared resolver so `agent up`
+/// and `agent ssh` share one state dir with the GUI on every platform. `[T:A.1.3]`
 pub(crate) fn home_root() -> String {
-    std::env::var("HOME")
-        .or_else(|_| std::env::var("USERPROFILE"))
-        .unwrap_or_else(|_| ".".into())
+    agent_core::home_root()
 }
 
 fn default_state_path() -> String {
@@ -645,7 +643,7 @@ fn default_state_path() -> String {
 /// The host key persists at `~/.ankayma/ssh-host-ed25519`; its public form is what
 /// the control plane distributes for clients to PIN (A.1.3). Port default 22022,
 /// override via `ANKAYMA_SSH_PORT` (shared-host knob, mirrors the relay-port env).
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 async fn start_embedded_ssh(
     self_overlay: std::net::IpAddr,
     control_plane: &str,
@@ -763,7 +761,49 @@ fn advise_firewall(port: u16, iface: &str) {
     }
 }
 
-#[cfg(not(target_os = "linux"))]
+/// [F-2 port-to-Windows] Windows Firewall drops inbound tcp/22022 by default, so a
+/// mesh SSH client times out reaching a Windows node as a *target*. Mirrors the WG
+/// advisory (`advise_wg_firewall`) and the Linux P.2 stance: PRINT the exact netsh
+/// command; only auto-add on the `ANKAYMA_OPEN_FIREWALL=1` opt-in (the daemon runs
+/// elevated). `[T:P.2 no silent side-effects]`
+#[cfg(target_os = "windows")]
+fn advise_firewall(port: u16, _iface: &str) {
+    let rule = format!("Ankayma mesh ssh tcp/{port}");
+    let manual = format!(
+        "netsh advfirewall firewall add rule name=\"{rule}\" dir=in action=allow protocol=TCP localport={port}"
+    );
+    let opt_in = std::env::var("ANKAYMA_OPEN_FIREWALL")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+    if !opt_in {
+        eprintln!("[F-2] ⚠ Windows Firewall drops inbound tcp/{port} — mesh SSH clients time out until allowed:");
+        eprintln!("[F-2]     {manual}");
+        eprintln!("[F-2]   (or set ANKAYMA_OPEN_FIREWALL=1 so the elevated daemon adds it on start)");
+        return;
+    }
+    let ok = std::process::Command::new("netsh")
+        .args([
+            "advfirewall",
+            "firewall",
+            "add",
+            "rule",
+            &format!("name={rule}"),
+            "dir=in",
+            "action=allow",
+            "protocol=TCP",
+            &format!("localport={port}"),
+        ])
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if ok {
+        println!("[F-2] firewall: allowed inbound tcp/{port} (ANKAYMA_OPEN_FIREWALL=1)");
+    } else {
+        eprintln!("[F-2] firewall: could not add the rule — run elevated: {manual}");
+    }
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "windows")))]
 fn advise_firewall(_port: u16, _iface: &str) {}
 
 /// [port-to-Windows] Inbound allow for the data-plane UDP listen port. Windows Firewall
