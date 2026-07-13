@@ -78,7 +78,8 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: cargo tauri build --config src-tauri/tauri.windows.conf.json --config '{"bundle":{"createUpdaterArtifacts":true},"plugins":{"updater":{"endpoints":["https://get.ankayma.com/windows/latest.json"]}}}'
 
-      # TODO[cert] — Azure Trusted Signing. Wire once the Trusted Signing account +
+      # TODO[cert] — Azure Trusted Signing. Full step-by-step in
+      # docs/windows-signing-setup.md. Wire once the Trusted Signing account +
       # certificate profile exist. The correct integration is via Tauri's Windows
       # `signCommand` so Tauri signs the installer BEFORE generating the updater .sig
       # (signing afterwards would invalidate the minisign signature). Add to the
