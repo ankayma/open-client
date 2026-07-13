@@ -76,6 +76,20 @@ impl MeshSshKey {
     pub fn private(&self) -> &PrivateKey {
         &self.0
     }
+
+    /// [T:ci-deploy exec] A fresh ed25519 identity that is never written to disk —
+    /// for a CI run's one-shot exec, matching `ci_deploy`'s ephemeral WireGuard
+    /// keypair (never persisted). The target's F0 `Authorizer::TrustOverlay`
+    /// accepts any offered key (reaching the overlay already proved enrollment),
+    /// so an identity nobody has seen before is expected here, not a gap.
+    pub fn generate_ephemeral() -> Result<Self> {
+        use rand::RngCore;
+        let mut seed = [0u8; 32];
+        rand::rng().fill_bytes(&mut seed);
+        let keypair = russh::keys::ssh_key::private::Ed25519Keypair::from_seed(&seed);
+        seed.fill(0);
+        Ok(Self(PrivateKey::from(keypair)))
+    }
 }
 
 /// Write `bytes` to `path` with owner-only permissions (0600). The mesh-SSH
@@ -255,6 +269,102 @@ impl SshSession {
             )));
         }
         Ok(handle)
+    }
+
+    /// [T:ci-deploy exec] One-shot non-interactive exec over an already-connected
+    /// stream — e.g. a SOCKS5-`CONNECT`ed `TcpStream` through `netstack`'s
+    /// userspace tunnel (`agent ci-deploy`), where there is no routable kernel
+    /// path to the target's overlay IP for a plain `client::connect(host, port)`.
+    /// No PTY (a batch command has no terminal), no retry loop (the caller
+    /// already waited for the WireGuard handshake to settle before dialing).
+    /// Same auth + host-key-pinning + elevation-grant rules as [`Self::connect`]
+    /// — just a single command instead of an interactive shell, and the network
+    /// transport is supplied by the caller instead of resolved from `opts.host`.
+    pub async fn exec_over_stream<S>(
+        stream: S,
+        opts: &SshConnectOptions,
+        key: &MeshSshKey,
+        command: &str,
+    ) -> Result<(u32, Vec<u8>)>
+    where
+        S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+    {
+        let expected = match &opts.expected_host_key {
+            Some(s) => Some(
+                PublicKey::from_openssh(s.trim())
+                    .map_err(|e| anyhow!("parse pinned host key: {e}"))?,
+            ),
+            None => None,
+        };
+        if expected.is_none() && !opts.allow_unpinned {
+            bail!(
+                "no pinned host key for {} and TOFU not allowed — refusing (A.1.3 fail-closed)",
+                opts.host
+            );
+        }
+
+        let config = Arc::new(Config {
+            inactivity_timeout: Some(Duration::from_secs(60)),
+            keepalive_interval: Some(Duration::from_secs(5)),
+            ..Default::default()
+        });
+        let handler = ClientHandler {
+            expected_host_key: expected,
+            allow_unpinned: opts.allow_unpinned,
+        };
+
+        let mut handle = client::connect_stream(config, stream, handler)
+            .await
+            .map_err(|e| anyhow!("connect over stream: {e}"))?;
+
+        // ed25519 needs no RSA hash negotiation → hash alg None. `[T:russh@0.62]`
+        let auth = handle
+            .authenticate_publickey(
+                opts.username.clone(),
+                PrivateKeyWithHashAlg::new(Arc::new(key.private().clone()), None),
+            )
+            .await
+            .map_err(|e| anyhow!("authenticate: {e}"))?;
+        if !auth.success() {
+            bail!(
+                "identity-bound auth rejected as {} — device not authorized on this node",
+                opts.username
+            );
+        }
+
+        let mut channel = handle
+            .channel_open_session()
+            .await
+            .map_err(|e| anyhow!("open session channel: {e}"))?;
+        // [F-2 §H.4] Present the elevation grant BEFORE exec, same as the
+        // interactive path — the server decides root-vs-unprivileged from it.
+        if let Some(grant) = &opts.elevate_grant {
+            channel
+                .set_env(false, crate::ssh_server::ELEVATE_GRANT_ENV, grant.clone())
+                .await
+                .map_err(|e| anyhow!("present elevation grant: {e}"))?;
+        }
+        channel
+            .exec(true, command.as_bytes())
+            .await
+            .map_err(|e| anyhow!("exec: {e}"))?;
+
+        let mut output = Vec::new();
+        let mut code: u32 = 1;
+        loop {
+            match channel.wait().await {
+                Some(ChannelMsg::Data { data }) => output.extend_from_slice(&data),
+                Some(ChannelMsg::ExtendedData { data, .. }) => output.extend_from_slice(&data),
+                Some(ChannelMsg::ExitStatus { exit_status }) => code = exit_status,
+                Some(ChannelMsg::Eof) | Some(ChannelMsg::Close) => {}
+                Some(_) => {}
+                None => break,
+            }
+        }
+        let _ = handle
+            .disconnect(Disconnect::ByApplication, "", "en")
+            .await;
+        Ok((code, output))
     }
 
     /// Connect, authenticate with the device's mesh-SSH key, open a shell PTY, and

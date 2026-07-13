@@ -233,6 +233,7 @@ impl server::Server for Listener {
             master: None,
             child: None,
             authed_key: None,
+            exec_child: None,
         }
     }
     fn handle_session_error(&mut self, error: <ConnHandler as server::Handler>::Error) {
@@ -255,6 +256,12 @@ struct ConnHandler {
     master: Option<Box<dyn MasterPty + Send>>,
     child: Option<Box<dyn Child + Send + Sync>>,
     authed_key: Option<String>,
+    /// [T:ci-deploy exec] A non-interactive `exec_request` child (no PTY — batch
+    /// commands don't need a terminal). Separate from `child` (the PTY-shell case
+    /// above) because `portable_pty::Child` and `std::process::Child` are
+    /// different types; keeping them apart avoids forcing one path to fake the
+    /// other's shape.
+    exec_child: Option<std::process::Child>,
 }
 
 impl ConnHandler {
@@ -329,12 +336,68 @@ impl ConnHandler {
             }
         }
     }
+
+    /// [T:ci-deploy exec] Same elevation/landing-user rules as [`build_command`],
+    /// but for a single non-interactive command instead of a login shell — used
+    /// by `exec_request`. Returns `None` when the server is locked to a forced
+    /// program (`ShellSpec::Program`): overriding a forced command with an
+    /// arbitrary exec string would defeat the point of that mode, so exec is
+    /// refused there rather than silently running the wrong thing.
+    fn resolve_exec_command(&self, elevated: bool, exec_cmd: &str) -> Option<std::process::Command> {
+        if elevated {
+            // Agent's euid is already 0 (§H.4) — run the command directly as root.
+            let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string());
+            let mut c = std::process::Command::new(shell);
+            c.arg("-c").arg(exec_cmd);
+            c.env("HOME", "/root").env("USER", "root").env("LOGNAME", "root");
+            return Some(c);
+        }
+        match &self.shell {
+            ShellSpec::Program(_) => None,
+            ShellSpec::LoginShell(user) => {
+                #[cfg(unix)]
+                let am_root = unsafe { libc::geteuid() } == 0;
+                #[cfg(not(unix))]
+                let am_root = false;
+                let already_user = current_username().as_deref() == Some(user.as_str());
+                let mut c = if am_root && !already_user {
+                    // `su - user -c "<cmd>"` — same landing-user rule as the shell
+                    // case, just non-interactive.
+                    let mut c = std::process::Command::new("su");
+                    c.arg("-").arg(user).arg("-c").arg(exec_cmd);
+                    c
+                } else {
+                    #[cfg(windows)]
+                    {
+                        let shell = std::env::var("ANKAYMA_SHELL")
+                            .unwrap_or_else(|_| "powershell.exe".to_string());
+                        let mut c = std::process::Command::new(shell);
+                        c.arg("-Command").arg(exec_cmd);
+                        c
+                    }
+                    #[cfg(not(windows))]
+                    {
+                        let shell =
+                            std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
+                        let mut c = std::process::Command::new(shell);
+                        c.arg("-c").arg(exec_cmd);
+                        c
+                    }
+                };
+                c.env("TERM", &self.term);
+                Some(c)
+            }
+        }
+    }
 }
 
 impl Drop for ConnHandler {
     fn drop(&mut self) {
         // Don't leave an orphaned shell if the connection drops.
         if let Some(mut child) = self.child.take() {
+            let _ = child.kill();
+        }
+        if let Some(mut child) = self.exec_child.take() {
             let _ = child.kill();
         }
     }
@@ -496,6 +559,135 @@ impl server::Handler for ConnHandler {
             // Shell ended (EOF on the PTY): tell the client and close.
             let _ = handle.eof(channel).await;
             let _ = handle.exit_status_request(channel, 0).await;
+            let _ = handle.close(channel).await;
+        });
+        Ok(())
+    }
+
+    /// [T:ci-deploy exec, F-2 identity-bound] Non-interactive counterpart to
+    /// `shell_request` — a single command, no PTY, real exit code. Reuses the
+    /// same elevation-grant decision as the shell path (§H.4): the deploy runs
+    /// unprivileged unless a valid CP-signed grant rode in via `env_request`.
+    async fn exec_request(
+        &mut self,
+        channel: ChannelId,
+        data: &[u8],
+        session: &mut Session,
+    ) -> Result<(), Self::Error> {
+        let command = String::from_utf8_lossy(data).into_owned();
+
+        let decision = decide_elevation(
+            self.elevate.as_deref(),
+            self.pending_grant.as_deref(),
+            unix_now(),
+        );
+        let mut elevate_deadline: Option<i64> = None;
+        let elevated = match &decision {
+            ElevationDecision::Granted(g) => {
+                audit_elevation(g, self.authed_key.as_deref());
+                elevate_deadline = Some(g.expires_at);
+                true
+            }
+            ElevationDecision::Denied(reason) => {
+                eprintln!("[F-2] elevation denied, running unprivileged: {reason}");
+                false
+            }
+            ElevationDecision::None => false,
+        };
+
+        let Some(mut cmd) = self.resolve_exec_command(elevated, &command) else {
+            eprintln!("[F-2] exec refused — server is locked to a forced program");
+            let _ = session.channel_failure(channel);
+            return Ok(());
+        };
+
+        let child = cmd
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn();
+        let mut child = match child {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("[F-2] exec spawn failed: {e}");
+                let _ = session.channel_failure(channel);
+                return Ok(());
+            }
+        };
+        let _ = session.channel_success(channel);
+
+        // [F-2 §H.4] Same auto-drop as the shell path: an elevated exec is killed
+        // at the grant's TTL rather than allowed to outlive it.
+        if let Some(deadline) = elevate_deadline {
+            let secs = deadline.saturating_sub(unix_now()).max(0) as u64;
+            let pid = child.id();
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_secs(secs)).await;
+                #[cfg(unix)]
+                unsafe {
+                    libc::kill(pid as i32, libc::SIGKILL);
+                }
+            });
+        }
+
+        self.writer = child.stdin.take().map(|s| Box::new(s) as Box<dyn Write + Send>);
+        let stdout = child.stdout.take();
+        let stderr = child.stderr.take();
+        self.exec_child = Some(child);
+
+        // Bridge stdout+stderr → SSH channel (merged, matching how a PTY shell's
+        // combined output already works for interactive users). One reader thread
+        // per stream (both blocking `Read`s), one tokio task forwards to the
+        // channel and waits for the process exit to report the REAL exit code —
+        // unlike the shell path (always reports 0; a login shell's own exit code
+        // isn't the thing being proven there).
+        let handle = session.handle();
+        let (tx, mut rx) = mpsc::channel::<Vec<u8>>(64);
+        for mut stream in [
+            stdout.map(|s| Box::new(s) as Box<dyn Read + Send>),
+            stderr.map(|s| Box::new(s) as Box<dyn Read + Send>),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            let tx = tx.clone();
+            std::thread::spawn(move || {
+                let mut buf = [0u8; 8192];
+                loop {
+                    match stream.read(&mut buf) {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => {
+                            if tx.blocking_send(buf[..n].to_vec()).is_err() {
+                                break;
+                            }
+                        }
+                    }
+                }
+            });
+        }
+        drop(tx);
+
+        let mut exec_child = self.exec_child.take();
+        tokio::spawn(async move {
+            while let Some(chunk) = rx.recv().await {
+                if handle.data(channel, chunk).await.is_err() {
+                    break;
+                }
+            }
+            // Both stdout+stderr are EOF (both reader threads exited) — the
+            // process is done or about to be; wait() to reap it and get the
+            // real exit code (blocking `wait()` off the async runtime).
+            let code = tokio::task::spawn_blocking(move || {
+                exec_child
+                    .as_mut()
+                    .and_then(|c| c.wait().ok())
+                    .and_then(|s| s.code())
+                    .unwrap_or(1)
+            })
+            .await
+            .unwrap_or(1);
+            let _ = handle.eof(channel).await;
+            let _ = handle.exit_status_request(channel, code as u32).await;
             let _ = handle.close(channel).await;
         });
         Ok(())
@@ -766,5 +958,47 @@ mod tests {
         }
         assert!(echoed, "PTY should echo the input back through the channel");
         sess.close().await.unwrap();
+    }
+
+    // End-to-end: `exec_request` (no PTY) runs a single command and reports its
+    // real exit code — the ci-deploy path this exists for cares about both the
+    // captured stdout and whether the deploy actually succeeded.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn client_exec_runs_command_and_reports_exit_code() {
+        let dir = tempdir().unwrap();
+        let host_key = gen_host_key(dir.path());
+        let client_key = MeshSshKey::load_or_generate(&dir.path().join("client")).unwrap();
+
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let cfg = SshServerConfig {
+            bind_ip: "127.0.0.1".to_string(),
+            port: addr.port(),
+            authorizer: Authorizer::TrustOverlay,
+            // am_root() is false in test — lands in the "already this user" branch
+            // (plain `sh -c`), so the exact username here doesn't matter.
+            shell: ShellSpec::LoginShell("whoever-is-running-this-test".to_string()),
+            elevate: None,
+        };
+        tokio::spawn(async move {
+            let _ = serve_on(listener, cfg, host_key).await;
+        });
+
+        let mut opts = SshConnectOptions::new("127.0.0.1", "ankayma");
+        opts.port = addr.port();
+        opts.allow_unpinned = true; // exercising TOFU, same as the real ci-deploy path
+
+        let stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let (code, output) =
+            SshSession::exec_over_stream(stream, &opts, &client_key, "echo hi-from-exec; exit 7")
+                .await
+                .expect("exec should complete");
+
+        assert_eq!(code, 7, "exit code must be the command's real exit code");
+        assert!(
+            String::from_utf8_lossy(&output).contains("hi-from-exec"),
+            "stdout should be captured: {:?}",
+            String::from_utf8_lossy(&output)
+        );
     }
 }

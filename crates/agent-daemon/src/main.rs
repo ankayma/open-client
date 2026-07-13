@@ -21,6 +21,7 @@ mod netstack;
 mod resolve;
 mod resolver;
 mod ssh;
+mod ssh_exec;
 mod tls_relay;
 mod tun;
 mod up;
@@ -43,6 +44,7 @@ async fn main() -> Result<()> {
         Some("up") => up::run(&args[1..]).await,
         Some("ci-deploy") => ci_deploy::run(&args[1..]).await,
         Some("ssh") => ssh::run(&args[1..]).await,
+        Some("ssh-exec") => ssh_exec::run(&args[1..]).await,
         Some("resolve") => resolve::run(&args[1..]).await,
         Some("ci-policy") => ci_policy::run(&args[1..]).await,
         Some("agent-token") => agent_token::run(&args[1..]).await,
