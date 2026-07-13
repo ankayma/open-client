@@ -20,7 +20,7 @@ use std::io::Write as _;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket};
 use std::path::Path;
 use std::process::Command;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
 use agent_core::domain::EnrollRequest;
@@ -120,12 +120,10 @@ pub async fn run(args: &[String]) -> Result<()> {
     // fall back to --token for nodes enrolled before migration 015.
     let service_token = match state.service_token.clone() {
         Some(t) => {
-            // Warn if expiry is known (Phase 1: display only, no auto-renew).
+            // Auto-renewal (spawn_token_renewal below) keeps this fresh in the
+            // background via proof-of-possession; this line is informational only.
             if let Some(ref exp) = state.token_expires_at {
-                eprintln!(
-                    "node service token expires at {exp} — renew before that date with: \
-                     agent renew-token"
-                );
+                println!("node service token expires at {exp} — background auto-renewal active");
             }
             t
         }
@@ -136,10 +134,29 @@ pub async fn run(args: &[String]) -> Result<()> {
         })?,
     };
 
+    // Shared token cell: the background renewer rotates it, the refresh loop reads it.
+    let token_cell = Arc::new(RwLock::new(service_token));
+
+    // Keep the node service token fresh in the background so a long-running headless
+    // node never dies when the token expires — the fix for the "control-plane rejects
+    // our credential" roster freeze. Renewal is proof-of-possession (present the
+    // current token), so no login credential is needed on a headless box.
+    // `[T:Part D §D.11 node service token]`
+    spawn_token_renewal(
+        http.clone(),
+        cfg.control_plane.clone(),
+        state.node_id.clone(),
+        cfg.state_path.clone(),
+        token_cell.clone(),
+    );
+
     // 2. Initial roster via GET /api/v1/peers.
-    let initial = adapters::peers(&http, &cfg.control_plane, &service_token)
-        .await
-        .map_err(|e| anyhow!("fetch peers: {e}"))?;
+    let initial = {
+        let tok = token_cell.read().unwrap().clone();
+        adapters::peers(&http, &cfg.control_plane, &tok)
+            .await
+            .map_err(|e| anyhow!("fetch peers: {e}"))?
+    };
 
     serve_dataplane(
         &state,
@@ -147,7 +164,7 @@ pub async fn run(args: &[String]) -> Result<()> {
         RefreshCtx {
             http,
             control_plane: cfg.control_plane.clone(),
-            service_token,
+            service_token: token_cell,
         },
     )
     .await
@@ -160,7 +177,11 @@ pub(crate) struct RefreshCtx {
     pub http: reqwest::Client,
     pub control_plane: String,
     /// Node service token for GET /api/v1/peers/events. [T:Part D §D.11]
-    pub service_token: String,
+    /// Shared cell: `spawn_token_renewal` rotates it in the background (the old token
+    /// is invalidated server-side on renewal), and the refresh loop re-reads it each
+    /// cycle so a renewed token is picked up within one cycle.
+    /// `[T:Part D §D.11 node service token]`
+    pub service_token: Arc<RwLock<String>>,
 }
 
 /// Bring the WireGuard overlay online for `state` and move packets. Shared by
@@ -264,16 +285,16 @@ pub(crate) async fn serve_dataplane(
     // TLS-terminating relay running once a cert lands — peer-to-peer, no
     // vendor edge in the data path (A.1.1).
     let relay = crate::tls_relay::Relay::new();
+    let startup_token = ctx.service_token.read().unwrap().clone();
     let resolver_zone =
-        match adapters::resolve_subdomains(&ctx.http, &ctx.control_plane, &ctx.service_token).await
-        {
+        match adapters::resolve_subdomains(&ctx.http, &ctx.control_plane, &startup_token).await {
             Ok(t) => {
                 resolver.set(resolve_entries(&t));
                 spawn_owned_subdomain_tasks(
                     &relay,
                     &ctx.http,
                     &ctx.control_plane,
-                    &ctx.service_token,
+                    &startup_token,
                     &t,
                     &state.node_id,
                     self_overlay,
@@ -303,7 +324,7 @@ pub(crate) async fn serve_dataplane(
     // CP pushes peer_added when a CI runner enrolls; we add the peer immediately.
     // On disconnect: exponential backoff + full resync before reconnect.
     let refresh = {
-        let (http, cp, svc_token) = (ctx.http, ctx.control_plane, ctx.service_token);
+        let (http, cp, svc_token_cell) = (ctx.http, ctx.control_plane, ctx.service_token);
         let (peers, index, udp) = (peers.clone(), index.clone(), udp.clone());
         let dev_name = dev_name.clone();
         let resolver = resolver.clone();
@@ -317,6 +338,11 @@ pub(crate) async fn serve_dataplane(
             let mut backoff_secs: u64 = 1;
             let mut consecutive_sync_failures: u32 = 0;
             loop {
+                // Re-read the (possibly renewed) service token each cycle: the
+                // background renewer rotates it and the previous token stops working
+                // immediately, so the loop must pick up the new one (a single stale-
+                // token 401 here self-heals on the next cycle).
+                let svc_token = svc_token_cell.read().unwrap().clone();
                 // Full resync before (re)connecting SSE — guarantees no missed events.
                 // NEVER swallow the error silently: an agent whose token is missing/
                 // expired/revoked polls 401 forever and its roster freezes — new peers
@@ -778,7 +804,9 @@ fn advise_firewall(port: u16, _iface: &str) {
     if !opt_in {
         eprintln!("[F-2] ⚠ Windows Firewall drops inbound tcp/{port} — mesh SSH clients time out until allowed:");
         eprintln!("[F-2]     {manual}");
-        eprintln!("[F-2]   (or set ANKAYMA_OPEN_FIREWALL=1 so the elevated daemon adds it on start)");
+        eprintln!(
+            "[F-2]   (or set ANKAYMA_OPEN_FIREWALL=1 so the elevated daemon adds it on start)"
+        );
         return;
     }
     let ok = std::process::Command::new("netsh")
@@ -1096,6 +1124,69 @@ fn persist_state(state_path: &str, state: &AgentState) -> Result<()> {
     f.write_all(&serde_json::to_vec_pretty(state)?)
         .with_context(|| format!("persist identity to {state_path}"))?;
     Ok(())
+}
+
+/// Read-modify-write the renewed service token + expiry into `agent.json` (the daemon
+/// is the only writer after startup; mirror `refresh_crl_once`). Keeps a restarted
+/// daemon on the fresh token. `[T:Part D §D.11]`
+fn persist_service_token(state_path: &str, token: &str, expires_at: Option<&str>) -> Result<()> {
+    let bytes = std::fs::read(state_path).context("read agent.json for token renewal")?;
+    let mut state: AgentState = serde_json::from_slice(&bytes).context("parse agent.json")?;
+    state.service_token = Some(token.to_string());
+    state.token_expires_at = expires_at.map(|s| s.to_string());
+    persist_state(state_path, &state)
+}
+
+/// How often to renew the node service token. Must stay well under the token TTL so a
+/// single failed renewal still has margin before expiry: safe for the 24h+ TTLs
+/// targeted for long-running nodes (renews with >=16h of slack at a 24h TTL). A test
+/// tenant issuing sub-16h tokens should lower this.
+/// `[T:Part D §D.11 node service token]`
+const TOKEN_RENEW_INTERVAL: Duration = Duration::from_secs(8 * 3600);
+
+/// Renew the node service token in the background so a long-running headless node
+/// never dies at token expiry — the fix for the "control-plane rejects our credential"
+/// roster freeze. Renewal is proof-of-possession (present the current token), so no
+/// login credential is needed on a headless box. Mirrors `spawn_crl_refresh`: never
+/// blocks the main loop; on failure the OLD token stays valid (renewal did not rotate)
+/// so we simply retry next tick. The renewed token is published into `token_cell`
+/// (the refresh loop reads it each cycle) and persisted to `agent.json`.
+/// `[T:Part D §D.11 node service token]`
+fn spawn_token_renewal(
+    http: reqwest::Client,
+    control_plane: String,
+    node_id: String,
+    state_path: String,
+    token_cell: Arc<RwLock<String>>,
+) {
+    tokio::spawn(async move {
+        loop {
+            // Sleep first: the token is fresh at startup, so there is nothing to do
+            // until roughly the renewal interval has elapsed.
+            tokio::time::sleep(TOKEN_RENEW_INTERVAL).await;
+            let current = token_cell.read().unwrap().clone();
+            match adapters::renew_service_token(&http, &control_plane, &node_id, &current).await {
+                Ok((new_token, new_expiry)) => {
+                    // Publish for the refresh loop FIRST, then persist for restarts.
+                    if let Ok(mut w) = token_cell.write() {
+                        *w = new_token.clone();
+                    }
+                    if let Err(e) =
+                        persist_service_token(&state_path, &new_token, new_expiry.as_deref())
+                    {
+                        eprintln!("service token renewed but persisting to agent.json failed: {e}");
+                    }
+                    println!("node service token renewed");
+                }
+                Err(e) => {
+                    eprintln!(
+                        "service token renewal failed: {e} — the current token stays valid \
+                         until its expiry; will retry next cycle"
+                    );
+                }
+            }
+        }
+    });
 }
 
 /// Fetch the CRL from the CP and cache it into `agent.json` (read-modify-write:
@@ -1522,6 +1613,57 @@ mod tests {
             let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
             assert_eq!(mode, 0o600, "agent.json must be owner-only");
         }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// persist_service_token rotates the token + expiry and PRESERVES every other
+    /// field (read-modify-write, not a blind overwrite — so a renewal in the
+    /// background never drops the cert/CRL a concurrent path just wrote).
+    /// [T:Part D §D.11]
+    #[test]
+    fn persist_service_token_rotates_and_preserves() {
+        let dir = std::env::temp_dir().join(format!("agent-up-tok-test-{}", std::process::id()));
+        let path = dir.join("agent.json");
+        let path_s = path.to_str().unwrap().to_string();
+        let state = AgentState {
+            private_b64: "priv".into(),
+            public_b64: "pub".into(),
+            node_id: "n1".into(),
+            overlay_ip: "100.64.0.2".into(),
+            listen_port: 51820,
+            service_token: Some("nst_old".into()),
+            token_expires_at: Some("2026-07-14 00:00:00+00".into()),
+            workload_kind: Some("AppServer".into()),
+            node_cert_pem: Some("LEAF".into()),
+            provisioning_ca_pem: Some("CA".into()),
+            crl_pem: Some("CRL".into()),
+            crl_url: Some("https://cp.example/pki/crl.pem".into()),
+            cert_expires_at: Some("2027-07-04T00:00:00Z".into()),
+        };
+        persist_state(&path_s, &state).unwrap();
+
+        // Postgres-text expiry (space, not RFC3339 'T') — same shape the CP returns.
+        persist_service_token(&path_s, "nst_new", Some("2026-10-11 00:00:00+00")).unwrap();
+
+        let loaded: AgentState = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        // rotated:
+        assert_eq!(loaded.service_token.as_deref(), Some("nst_new"));
+        assert_eq!(
+            loaded.token_expires_at.as_deref(),
+            Some("2026-10-11 00:00:00+00")
+        );
+        // preserved:
+        assert_eq!(loaded.node_id, "n1");
+        assert_eq!(loaded.workload_kind.as_deref(), Some("AppServer"));
+        assert_eq!(loaded.node_cert_pem.as_deref(), Some("LEAF"));
+        assert_eq!(
+            loaded.crl_url.as_deref(),
+            Some("https://cp.example/pki/crl.pem")
+        );
+        assert_eq!(
+            loaded.cert_expires_at.as_deref(),
+            Some("2027-07-04T00:00:00Z")
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
