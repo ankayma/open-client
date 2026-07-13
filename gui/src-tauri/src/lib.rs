@@ -303,8 +303,11 @@ fn handoff_state_dir(state: &AppState) -> std::path::PathBuf {
     #[cfg(not(any(target_os = "ios", target_os = "android")))]
     {
         let _ = state;
-        let home = std::env::var("HOME").unwrap_or_default();
-        std::path::PathBuf::from(home).join(".ankayma")
+        // One resolver for every entrypoint (HOME on unix, USERPROFILE on Windows) so
+        // the GUI and the privileged `agent up` daemon read the same ~/.ankayma.
+        // Reading a bare HOME here (unset on Windows) persisted identity to a relative
+        // `.ankayma` under an unwritable CWD. [T:agent_core::home_root]
+        std::path::PathBuf::from(agent_core::home_root()).join(".ankayma")
     }
 }
 
@@ -389,6 +392,8 @@ async fn connect_inner(state: &AppState) -> Result<(), String> {
         &kp.public_b64,
         &resp.node_id,
         &resp.overlay_ip,
+        resp.node_service_token.as_deref(),
+        resp.token_expires_at.as_deref(),
     ) {
         // Best-effort rollback. The server gates DELETE behind a step-up proof —
         // which we do not hold here — for every tier above the free one (see
@@ -721,6 +726,18 @@ fn device_hostname() -> String {
             }
         }
     }
+    // Windows is not `unix`, so gethostname(2) above never runs there and $HOSTNAME
+    // is unset — without this every Windows box enrolled as the "ankayma-desktop"
+    // fallback. COMPUTERNAME is the OS-provided machine name. [T:parity with agent home_root]
+    #[cfg(target_os = "windows")]
+    {
+        if let Ok(h) = std::env::var("COMPUTERNAME") {
+            let h = h.trim().to_string();
+            if !h.is_empty() && h != "localhost" {
+                return h;
+            }
+        }
+    }
     "ankayma-desktop".to_string()
 }
 
@@ -761,6 +778,56 @@ async fn get_node_info(state: State<'_, AppState>) -> Result<NodeInfo, String> {
 
 /// [F-5 "Prove it"] Live data-path proof read from the daemon's heartbeat file.
 /// Returns per-peer WireGuard stats (handshake age, byte counts) so the viewer can
+/// Active reachability probe for a batch of overlay IPs. The WireGuard handshake
+/// age is a *lagging* signal — a reachable-but-idle node reads "no handshake" until
+/// something sends it traffic. This nudges each peer with a short TCP connect (which
+/// itself triggers the handshake through the tunnel) and classifies the result:
+/// connected OR refused (the node sent a RST) → **reachable**; timed out → the WG
+/// path never came up → **unreachable**. Runs the batch concurrently, ~3s worst
+/// case. Honest per P.3 — a filtered port on a live node can still read unreachable,
+/// so this is "best-effort reachable", surfaced as a hint, not a guarantee. `[T:A.1.1]`
+#[tauri::command]
+async fn probe_reachable(targets: Vec<String>) -> Result<Vec<bool>, String> {
+    // Blocking connects on a blocking thread so the async runtime isn't stalled; each
+    // target gets its own thread so the batch runs concurrently (~3s worst case).
+    tauri::async_runtime::spawn_blocking(move || {
+        use std::io::ErrorKind;
+        use std::net::{TcpStream, ToSocketAddrs};
+        use std::time::Duration;
+        // Embedded mesh-SSH port; only RST-vs-timeout matters, so the port need not be
+        // open — a closed port still returns a RST, which proves the host is reachable.
+        const PROBE_PORT: u16 = 22022;
+        const PROBE_TIMEOUT: Duration = Duration::from_secs(3);
+        let threads: Vec<_> = targets
+            .into_iter()
+            .map(|ip| {
+                std::thread::spawn(move || {
+                    // Bracket IPv6 literals (overlay is ULA IPv6; IPv4 passes through).
+                    let hostport = if ip.contains(':') {
+                        format!("[{ip}]:{PROBE_PORT}")
+                    } else {
+                        format!("{ip}:{PROBE_PORT}")
+                    };
+                    let addr = match hostport.to_socket_addrs().ok().and_then(|mut a| a.next()) {
+                        Some(a) => a,
+                        None => return false,
+                    };
+                    match TcpStream::connect_timeout(&addr, PROBE_TIMEOUT) {
+                        Ok(_) => true,
+                        Err(e) => e.kind() == ErrorKind::ConnectionRefused,
+                    }
+                })
+            })
+            .collect();
+        threads
+            .into_iter()
+            .map(|t| t.join().unwrap_or(false))
+            .collect::<Vec<bool>>()
+    })
+    .await
+    .map_err(|e| format!("probe task failed: {e}"))
+}
+
 /// verify the connection is real and peer-to-peer without trusting the GUI alone.
 /// vendor_on_data_path is computed from peer states — honest per P.3, not hardcoded.
 #[tauri::command]
@@ -773,7 +840,10 @@ async fn get_path_proof(state: State<'_, AppState>) -> Result<PathProof, String>
         peers: vec![],
     };
 
-    let home = std::env::var("HOME").map_err(|_| "HOME not set".to_string())?;
+    // HOME on unix, USERPROFILE on Windows — the F-5 path proof reads the same
+    // status file the daemon writes; a bare HOME is unset on Windows, so this
+    // returned "HOME not set" and the panel never showed live evidence.
+    let home = agent_core::home_root();
     let path = std::path::Path::new(&home).join(".ankayma/agent-status.json");
     let Ok(bytes) = std::fs::read(&path) else {
         return Ok(not_connected());
@@ -1071,6 +1141,8 @@ async fn join_enroll_node(
         &kp.public_b64,
         &resp.node_id,
         &resp.overlay_ip,
+        resp.node_service_token.as_deref(),
+        resp.token_expires_at.as_deref(),
     ) {
         log::warn!("handoff state not written ({e}); a reconnect would re-enroll");
     }
@@ -1104,14 +1176,22 @@ fn write_handoff_state_to(
     public_b64: &str,
     node_id: &str,
     overlay_ip: &str,
+    service_token: Option<&str>,
+    token_expires_at: Option<&str>,
 ) -> Result<(), String> {
     std::fs::create_dir_all(dir).map_err(|e| format!("mkdir ~/.ankayma: {e}"))?;
+    // Persist the scoped node service token (D.11) too — agent-daemon reads it from
+    // here, and without it `agent up` reports "no node service token" and cannot
+    // bring the tunnel up from the GUI's enrollment. Mirrors agent-daemon's
+    // AgentState write. [T:agent-daemon/src/up.rs:1015 service_token persist]
     let state = serde_json::json!({
         "private_b64": private_b64,
         "public_b64": public_b64,
         "node_id": node_id,
         "overlay_ip": overlay_ip,
         "listen_port": DATAPLANE_LISTEN_PORT,
+        "service_token": service_token,
+        "token_expires_at": token_expires_at,
     });
     let bytes = serde_json::to_vec_pretty(&state).map_err(|e| e.to_string())?;
     let path = dir.join("agent.json");
@@ -1150,22 +1230,24 @@ fn write_handoff_state_to(
 }
 
 /// Locate the `agent` daemon binary — next to this app (bundled) or a dev build.
+/// On Windows the bundled sidecar is `agent.exe`; joining a bare `agent` missed it.
 fn locate_agent_binary() -> Result<std::path::PathBuf, String> {
+    let exe_name = if cfg!(windows) { "agent.exe" } else { "agent" };
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
-            let sib = dir.join("agent");
+            let sib = dir.join(exe_name);
             if sib.exists() {
                 return Ok(sib);
             }
         }
     }
-    for p in [
-        "target/debug/agent",
-        "target/release/agent",
-        "../../target/debug/agent",
-        "../../target/release/agent",
+    for base in [
+        "target/debug",
+        "target/release",
+        "../../target/debug",
+        "../../target/release",
     ] {
-        let pb = std::path::PathBuf::from(p);
+        let pb = std::path::PathBuf::from(base).join(exe_name);
         if pb.exists() {
             return Ok(pb.canonicalize().unwrap_or(pb));
         }
@@ -1338,7 +1420,42 @@ fn bring_up_dataplane(
     helper_ipc::start(&agent_bin.to_string_lossy(), token, control_plane, &home)
 }
 
-#[cfg(not(target_os = "macos"))]
+/// Windows: the Wintun adapter needs admin and the GUI runs unelevated, so launch
+/// the agent via ShellExecute "runas" (one UAC prompt — the Windows analogue of the
+/// macOS admin prompt). Pass the session token the same way the macOS helper does:
+/// the GUI's `connect` enroll writes identity to agent.json but not the scoped node
+/// service token, so `agent up` needs `--token` to refresh it. The elevated process
+/// is owned by the elevated context, not this one, so the tunnel stays up after we
+/// return; `waitForEstablished` polls the status file the daemon writes. `[T:A.1.3]`
+///
+/// TODO[A]: the token rides the elevated command line (visible to local admins in
+/// the process list). macOS hands it over IPC; a private Windows handoff (env-file
+/// the elevated agent reads, like the VPS `up.env`) is the follow-up. Verify-by:
+/// spawn with no `--token` on the cmdline and the tunnel still comes up.
+#[cfg(target_os = "windows")]
+fn bring_up_dataplane(
+    agent_bin: &std::path::Path,
+    token: &str,
+    control_plane: &str,
+) -> Result<(), String> {
+    let bin = agent_bin.to_string_lossy().replace('\'', "''");
+    let cp = control_plane.replace('\'', "''");
+    let tok = token.replace('\'', "''");
+    let ps = format!(
+        "Start-Process -FilePath '{bin}' -ArgumentList \
+         'up','--token','{tok}','--control-plane','{cp}' -Verb RunAs -WindowStyle Hidden"
+    );
+    let status = std::process::Command::new("powershell")
+        .args(["-NoProfile", "-NonInteractive", "-Command", &ps])
+        .status()
+        .map_err(|e| format!("launch elevated agent: {e}"))?;
+    if !status.success() {
+        return Err("could not start the agent daemon (was the UAC prompt declined?)".into());
+    }
+    Ok(())
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
 fn bring_up_dataplane(_b: &std::path::Path, _t: &str, _c: &str) -> Result<(), String> {
     Err("data plane is macOS-only at milestone 1.2".into())
 }
@@ -1372,7 +1489,22 @@ fn stop_dataplane_inner() -> Result<(), String> {
     helper_ipc::stop(&home)
 }
 
-#[cfg(not(target_os = "macos"))]
+/// Windows: the agent runs elevated, so tearing it down needs elevation too (one
+/// UAC prompt). Best-effort — a missing daemon is not an error.
+#[cfg(target_os = "windows")]
+fn stop_dataplane_inner() -> Result<(), String> {
+    let _ = std::process::Command::new("powershell")
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            "Start-Process taskkill -ArgumentList '/IM','agent.exe','/F' -Verb RunAs -WindowStyle Hidden",
+        ])
+        .status();
+    Ok(())
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
 fn stop_dataplane_inner() -> Result<(), String> {
     Err("data plane is macOS-only".into())
 }
@@ -1454,10 +1586,74 @@ async fn open_ssh_terminal(
         }
         Ok(())
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "windows")]
+    {
+        state.token().ok_or("not signed in")?;
+        // node_id/login are interpolated into a command line — allowlist, don't escape.
+        let ok = |s: &str| {
+            !s.is_empty()
+                && s.chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'))
+        };
+        if !ok(&node_id) {
+            return Err("invalid node id".into());
+        }
+        if let Some(l) = login.as_deref() {
+            if !ok(l) {
+                return Err("invalid login".into());
+            }
+        }
+        let app = terminal_app.unwrap_or_else(|| "cmd".to_string());
+        let bin = locate_agent_binary()?;
+        let session = session_file_path(&state.data_dir);
+        // .bat launcher: read the 0600 token file at run time (never inline the
+        // token), then run the identity-bound mesh SSH — same transport as the
+        // in-app terminal (no static key, no password). `[T:f2 §H.2.2]`
+        let mut inner = format!(
+            "@echo off\r\nset /p ANKAYMA_TOKEN=<\"{}\"\r\n\"{}\" ssh {node_id} --mesh --allow-unpinned --control-plane {}",
+            session.display(),
+            bin.display(),
+            state.base_url
+        );
+        if let Some(l) = login.as_deref() {
+            inner.push_str(&format!(" --login {l}"));
+        }
+        inner.push_str("\r\n");
+        let path = std::env::temp_dir().join(format!("ankayma-ssh-{node_id}.bat"));
+        std::fs::write(&path, inner).map_err(|e| format!("write launcher: {e}"))?;
+        let bat = path.to_string_lossy().to_string();
+        let title = format!("Ankayma SSH - {node_id}");
+        // Open the chosen Windows terminal running the launcher. `cmd /k` keeps the
+        // window after the session ends so errors stay readable.
+        let launch = match app.as_str() {
+            "wt" | "Windows Terminal" => {
+                std::process::Command::new("wt.exe").args(["cmd", "/k", &bat]).status()
+            }
+            "powershell" | "PowerShell" => std::process::Command::new("cmd")
+                .args([
+                    "/c",
+                    "start",
+                    &title,
+                    "powershell",
+                    "-NoExit",
+                    "-Command",
+                    &format!("& '{bat}'"),
+                ])
+                .status(),
+            _ => std::process::Command::new("cmd")
+                .args(["/c", "start", &title, "cmd", "/k", &bat])
+                .status(),
+        };
+        let status = launch.map_err(|e| format!("launch {app}: {e}"))?;
+        if !status.success() {
+            return Err(format!("could not open \"{app}\" — is it installed?"));
+        }
+        Ok(())
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {
         let _ = (node_id, login, terminal_app);
-        Err("external terminal is macOS-only".into())
+        Err("external terminal is desktop-only".into())
     }
 }
 
@@ -1653,7 +1849,9 @@ async fn get_dataplane_status() -> Result<DataplaneStatus, String> {
         age_secs: None,
         peers: vec![],
     };
-    let home = std::env::var("HOME").map_err(|_| "HOME not set".to_string())?;
+    // HOME on unix, USERPROFILE on Windows (unset HOME made this report the tunnel
+    // down on Windows even while the daemon was up). [T:agent_core::home_root]
+    let home = agent_core::home_root();
     let path = std::path::Path::new(&home).join(".ankayma/agent-status.json");
     let Ok(bytes) = std::fs::read(&path) else {
         return Ok(down());
@@ -1987,9 +2185,8 @@ async fn delete_node(
         .is_some_and(|n| n.node_id == node_id);
     if is_self {
         *state.node.lock().expect("node lock poisoned") = None;
-        if let Ok(home) = std::env::var("HOME") {
-            let _ = std::fs::remove_file(format!("{home}/.ankayma/agent.json"));
-        }
+        let home = agent_core::home_root();
+        let _ = std::fs::remove_file(format!("{home}/.ankayma/agent.json"));
     }
     Ok(())
 }
@@ -2251,9 +2448,7 @@ pub fn run() {
             // sandbox container; on macOS to ~/Library/Application Support/<id>.
             // Fallback to $HOME/.ankayma so cargo run / CI still works. [T:A.1.9]
             let data_dir = app.path().app_data_dir().unwrap_or_else(|_| {
-                std::env::var("HOME")
-                    .map(|h| std::path::PathBuf::from(h).join(".ankayma"))
-                    .unwrap_or_default()
+                std::path::PathBuf::from(agent_core::home_root()).join(".ankayma")
             });
             app.manage(AppState::new(data_dir));
 
@@ -2381,6 +2576,7 @@ pub fn run() {
             get_quota,
             get_node_info,
             get_path_proof,
+            probe_reachable,
             list_ci_policies,
             ci_history,
             add_ci_policy,
@@ -2461,7 +2657,7 @@ mod tests {
     #[test]
     fn stored_keypair_round_trips_through_the_handoff_file() {
         let dir = scratch("handoff-roundtrip");
-        super::write_handoff_state_to(&dir, "priv-b64", "pub-b64", "node-1", "100.64.0.1")
+        super::write_handoff_state_to(&dir, "priv-b64", "pub-b64", "node-1", "100.64.0.1", None, None)
             .expect("handoff write succeeds");
         let kp = super::load_stored_keypair_from(&dir).expect("keypair is recovered");
         assert_eq!(kp.private_b64, "priv-b64");
@@ -2502,7 +2698,7 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         let dir = std::env::temp_dir().join(format!("ankayma-handoff-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        super::write_handoff_state_to(&dir, "privkey", "pubkey", "node-1", "100.64.0.1")
+        super::write_handoff_state_to(&dir, "privkey", "pubkey", "node-1", "100.64.0.1", None, None)
             .expect("handoff write succeeds");
         let mode = std::fs::metadata(dir.join("agent.json"))
             .expect("agent.json exists")
@@ -2517,7 +2713,7 @@ mod tests {
             std::fs::Permissions::from_mode(0o644),
         )
         .expect("widen perms for migration test");
-        super::write_handoff_state_to(&dir, "privkey2", "pubkey2", "node-1", "100.64.0.1")
+        super::write_handoff_state_to(&dir, "privkey2", "pubkey2", "node-1", "100.64.0.1", None, None)
             .expect("handoff rewrite succeeds");
         let mode = std::fs::metadata(dir.join("agent.json"))
             .expect("agent.json exists")

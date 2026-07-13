@@ -22,8 +22,13 @@ use std::sync::{Arc, Mutex};
 
 use agent_core::dns::respond;
 
-/// Loopback port the responder listens on (a high port → no privilege needed for
-/// the socket itself; the `/etc/resolver` file points here). [T:macOS scoped DNS]
+/// Loopback port the responder listens on. macOS/Linux: a high port (no privilege,
+/// and `/etc/resolver` can point at a custom port). Windows: **53**, because an NRPT
+/// rule can only name a nameserver IP — never a port — so the elevated daemon must
+/// bind loopback:53 there for the rule to reach us. [T:macOS scoped DNS; Windows NRPT]
+#[cfg(windows)]
+pub const RESOLVER_PORT: u16 = 53;
+#[cfg(not(windows))]
 pub const RESOLVER_PORT: u16 = 5354;
 
 /// The live name→overlay-address map, swapped wholesale each refresh cycle.
@@ -102,9 +107,48 @@ pub fn remove_scoped_resolver(zone: &str) {
     let _ = std::fs::remove_file(format!("/etc/resolver/{zone}"));
 }
 
-#[cfg(not(target_os = "macos"))]
+/// Windows scoped DNS via NRPT: point ONLY the `.<zone>` namespace at our loopback
+/// responder, leaving the system resolver for every other name. NRPT carries no port,
+/// so the responder binds :53 (RESOLVER_PORT on Windows). Requires admin (the daemon
+/// already is, for Wintun). Delete-first for idempotency across restarts.
+/// `[T:Windows NRPT / Add-DnsClientNrptRule]`
+#[cfg(windows)]
+pub fn install_scoped_resolver(zone: &str) {
+    let ns = format!(".{zone}");
+    remove_scoped_resolver(zone); // clear any stale rule for this namespace first
+    let ps = format!(
+        "Add-DnsClientNrptRule -Namespace '{ns}' -NameServers '127.0.0.1' -Comment 'ankayma F-3'"
+    );
+    if let Err(e) = run_ps(&ps) {
+        eprintln!("resolver: Add-DnsClientNrptRule {ns} failed: {e} (names won't resolve)");
+    }
+}
+
+#[cfg(windows)]
+pub fn remove_scoped_resolver(zone: &str) {
+    let ns = format!(".{zone}");
+    let ps = format!(
+        "Get-DnsClientNrptRule | Where-Object {{ $_.Namespace -eq '{ns}' }} | \
+         Remove-DnsClientNrptRule -Force -ErrorAction SilentlyContinue"
+    );
+    let _ = run_ps(&ps);
+}
+
+#[cfg(windows)]
+fn run_ps(script: &str) -> std::io::Result<()> {
+    let status = std::process::Command::new("powershell")
+        .args(["-NoProfile", "-NonInteractive", "-Command", script])
+        .status()?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(std::io::Error::other(format!("powershell exited {status}")))
+    }
+}
+
+#[cfg(not(any(target_os = "macos", windows)))]
 pub fn install_scoped_resolver(_zone: &str) {}
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", windows)))]
 pub fn remove_scoped_resolver(_zone: &str) {}
 
 // Wire-format tests (parse_qname/respond) live with the implementation now, in

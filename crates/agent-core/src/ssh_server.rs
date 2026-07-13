@@ -284,7 +284,14 @@ impl ConnHandler {
                 Ok(c)
             }
             ShellSpec::LoginShell(user) => {
+                // geteuid() is POSIX-only. On Windows the embedded server's user
+                // landing (su/provision below) is out of scope for now (the Windows
+                // build targets the CLIENT path first) — fall to the current-user
+                // shell. [T:gate A.0-a windows-compat]
+                #[cfg(unix)]
                 let am_root = unsafe { libc::geteuid() } == 0;
+                #[cfg(not(unix))]
+                let am_root = false;
                 let already_user = current_username().as_deref() == Some(user.as_str());
                 let mut c = if am_root && !already_user {
                     // Landing a DIFFERENT user → provision if needed, then `su -`
@@ -295,11 +302,27 @@ impl ConnHandler {
                     c.arg(user);
                     c
                 } else {
-                    // Already this user (dev/dogfood) → login shell directly.
-                    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
-                    let mut c = CommandBuilder::new(shell);
-                    c.arg("-l");
-                    c
+                    // Already this user (dev/dogfood) → login shell directly. On
+                    // Windows there is no `su`/login-shell here; land the current
+                    // user's shell (ComSpec/cmd.exe) over ConPTY — `-l` is POSIX-only
+                    // and `/bin/sh` does not exist. [T:gate A.0-a windows-compat]
+                    #[cfg(windows)]
+                    {
+                        // PowerShell by default (richer UX than cmd.exe); override via
+                        // ANKAYMA_SHELL. PowerShell ships on every Win10/11.
+                        // [T:gate A.0-a windows-compat]
+                        let shell = std::env::var("ANKAYMA_SHELL")
+                            .unwrap_or_else(|_| "powershell.exe".to_string());
+                        CommandBuilder::new(shell)
+                    }
+                    #[cfg(not(windows))]
+                    {
+                        let shell =
+                            std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
+                        let mut c = CommandBuilder::new(shell);
+                        c.arg("-l");
+                        c
+                    }
                 };
                 c.env("TERM", &self.term);
                 Ok(c)

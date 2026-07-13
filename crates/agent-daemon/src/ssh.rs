@@ -22,7 +22,7 @@ const DEFAULT_CONTROL_PLANE: &str = "https://cp.ankayma.com";
 /// Where the device's persistent ed25519 mesh-SSH identity lives — next to
 /// `agent.json` under `~/.ankayma/`. `[T:A.1.3]`
 fn mesh_ssh_key_path() -> std::path::PathBuf {
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+    let home = crate::up::home_root();
     std::path::Path::new(&home)
         .join(".ankayma")
         .join("mesh-ssh-ed25519")
@@ -211,6 +211,10 @@ async fn run_mesh(cfg: &Config, resp: &SshSessionResponse, login: &str) -> Resul
 struct RawMode {
     #[cfg(unix)]
     saved: Option<libc::termios>,
+    #[cfg(windows)]
+    saved_out_mode: Option<u32>,
+    #[cfg(windows)]
+    saved_in_mode: Option<u32>,
 }
 
 impl RawMode {
@@ -226,7 +230,38 @@ impl RawMode {
             }
             RawMode { saved: None }
         }
-        #[cfg(not(unix))]
+        #[cfg(windows)]
+        unsafe {
+            use windows_sys::Win32::System::Console::{
+                GetConsoleMode, GetStdHandle, SetConsoleMode, ENABLE_ECHO_INPUT,
+                ENABLE_LINE_INPUT, ENABLE_PROCESSED_INPUT, ENABLE_VIRTUAL_TERMINAL_INPUT,
+                ENABLE_VIRTUAL_TERMINAL_PROCESSING, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE,
+            };
+            let mut rm = RawMode {
+                saved_out_mode: None,
+                saved_in_mode: None,
+            };
+            let hout = GetStdHandle(STD_OUTPUT_HANDLE);
+            let mut out_mode: u32 = 0;
+            if GetConsoleMode(hout, &mut out_mode) != 0 {
+                rm.saved_out_mode = Some(out_mode);
+                // Interpret the remote PTY's ANSI escapes instead of printing them raw.
+                SetConsoleMode(hout, out_mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING);
+            }
+            let hin = GetStdHandle(STD_INPUT_HANDLE);
+            let mut in_mode: u32 = 0;
+            if GetConsoleMode(hin, &mut in_mode) != 0 {
+                rm.saved_in_mode = Some(in_mode);
+                // Raw input: stream keystrokes (no line buffering / local echo) and
+                // let VT input through so the remote shell drives the terminal.
+                let raw = (in_mode
+                    & !(ENABLE_LINE_INPUT | ENABLE_ECHO_INPUT | ENABLE_PROCESSED_INPUT))
+                    | ENABLE_VIRTUAL_TERMINAL_INPUT;
+                SetConsoleMode(hin, raw);
+            }
+            rm
+        }
+        #[cfg(not(any(unix, windows)))]
         RawMode {}
     }
 }
@@ -237,6 +272,18 @@ impl Drop for RawMode {
         unsafe {
             if let Some(saved) = self.saved.take() {
                 libc::tcsetattr(0, libc::TCSANOW, &saved);
+            }
+        }
+        #[cfg(windows)]
+        unsafe {
+            use windows_sys::Win32::System::Console::{
+                GetStdHandle, SetConsoleMode, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE,
+            };
+            if let Some(m) = self.saved_out_mode.take() {
+                SetConsoleMode(GetStdHandle(STD_OUTPUT_HANDLE), m);
+            }
+            if let Some(m) = self.saved_in_mode.take() {
+                SetConsoleMode(GetStdHandle(STD_INPUT_HANDLE), m);
             }
         }
     }
@@ -250,6 +297,21 @@ fn term_size() -> Option<(u32, u32)> {
         let mut ws: libc::winsize = std::mem::zeroed();
         if libc::ioctl(1, libc::TIOCGWINSZ, &mut ws) == 0 && ws.ws_col > 0 {
             return Some((ws.ws_col as u32, ws.ws_row as u32));
+        }
+    }
+    #[cfg(windows)]
+    unsafe {
+        use windows_sys::Win32::System::Console::{
+            GetConsoleScreenBufferInfo, GetStdHandle, CONSOLE_SCREEN_BUFFER_INFO,
+            STD_OUTPUT_HANDLE,
+        };
+        let mut info: CONSOLE_SCREEN_BUFFER_INFO = std::mem::zeroed();
+        if GetConsoleScreenBufferInfo(GetStdHandle(STD_OUTPUT_HANDLE), &mut info) != 0 {
+            let cols = (info.srWindow.Right - info.srWindow.Left + 1) as u32;
+            let rows = (info.srWindow.Bottom - info.srWindow.Top + 1) as u32;
+            if cols > 0 {
+                return Some((cols, rows));
+            }
         }
     }
     None

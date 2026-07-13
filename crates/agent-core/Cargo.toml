@@ -55,6 +55,13 @@ ed25519-dalek = "2"
 # base64 for the grant token wire form (already in-tree via daemon). `[T:base64@0.22]`
 base64 = "0.22"
 
+# [T:A.1.21] Windows TUN via Wintun (NDIS miniport L3 adapter). We use the OFFICIAL
+# signed driver from the WireGuard team — we do NOT build or sign a kernel driver
+# (so the 04/2026 cross-signed-driver deadline doesn't apply). Windows-only; the
+# `tundev::TunHandle::Wintun` variant + `tundev::win` module link it. [T:gate A.0-a; §H.6]
+[target.'cfg(target_os = "windows")'.dependencies]
+wintun = "0.5"
+
 [dev-dependencies]
 serde_json = "1"
 tokio      = { version = "1", features = ["rt", "macros"] }

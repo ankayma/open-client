@@ -22,6 +22,43 @@ pub fn write_packet(fd: i32, packet: &[u8]) -> io::Result<usize> {
     imp::write_packet(fd, packet)
 }
 
+/// A handle to the OPEN tunnel device the pump drives. macOS/iOS/Linux/Android all
+/// hand us a POSIX fd (same read/write, per-platform framing); Windows' Wintun gives
+/// a *session* (a ring buffer + a ready event), NEVER a POSIX fd. This enum is the
+/// abstraction that lets `pump::spawn_tx`/`spawn_rx` (and the DNS-reply path) drive
+/// either kind without the old `fd: i32` assumption. Clone is cheap — `Fd` is Copy,
+/// `Wintun` is an `Arc` — so tx, rx, and the DNS path can each hold one.
+/// [T:gate A.0-a refactor; part-d-client-platform-architecture.md §H.8.1]
+#[derive(Clone)]
+pub enum TunHandle {
+    /// POSIX tunnel fd — utun (macOS/iOS), `/dev/net/tun` (Linux), or the Android
+    /// `VpnService` ParcelFileDescriptor. Read/write go through the `imp` framing.
+    Fd(i32),
+    /// Windows: a Wintun session, shared (`Arc`) across the pump threads.
+    #[cfg(target_os = "windows")]
+    Wintun(std::sync::Arc<wintun::Session>),
+}
+
+impl TunHandle {
+    /// Read one bare IP packet (framing stripped per platform).
+    pub fn read_packet(&self, buf: &mut [u8]) -> io::Result<usize> {
+        match self {
+            TunHandle::Fd(fd) => imp::read_packet(*fd, buf),
+            #[cfg(target_os = "windows")]
+            TunHandle::Wintun(sess) => win::read_packet(sess, buf),
+        }
+    }
+
+    /// Write one bare IP packet (framing added per platform).
+    pub fn write_packet(&self, packet: &[u8]) -> io::Result<usize> {
+        match self {
+            TunHandle::Fd(fd) => imp::write_packet(*fd, packet),
+            #[cfg(target_os = "windows")]
+            TunHandle::Wintun(sess) => win::write_packet(sess, packet),
+        }
+    }
+}
+
 // macOS + iOS: utun prepends a 4-byte address-family header. Both get the fd as a
 // utun device (iOS via the extension's tunnelFileDescriptor), so framing is
 // identical. `[T:Apple-XNU net/if_utun.h]`
@@ -216,5 +253,42 @@ mod imp {
             io::ErrorKind::Unsupported,
             "no tun fd plumbing on this platform",
         ))
+    }
+}
+
+// Windows: Wintun session I/O. Wintun is an NDIS L3 adapter with a ring buffer;
+// packets are BARE IP (no framing, like Linux IFF_NO_PI). receive_blocking() /
+// allocate_send_packet() take `&Arc<Session>`, which is exactly what TunHandle::Wintun
+// holds — so the pump's read/write map straight onto them. [T:wintun@0.5; §H.6]
+#[cfg(target_os = "windows")]
+mod win {
+    use std::io;
+    use std::sync::Arc;
+
+    /// Block until Wintun has a packet, copy the bare IP bytes out. Mirrors the utun
+    /// poll-and-return contract the pump expects.
+    pub fn read_packet(sess: &Arc<wintun::Session>, buf: &mut [u8]) -> io::Result<usize> {
+        match sess.receive_blocking() {
+            Ok(packet) => {
+                let bytes = packet.bytes();
+                let n = bytes.len().min(buf.len());
+                buf[..n].copy_from_slice(&bytes[..n]);
+                Ok(n)
+            }
+            Err(e) => Err(io::Error::other(format!("wintun receive: {e}"))),
+        }
+    }
+
+    /// Allocate a send packet from the ring, copy the bare IP bytes in, send it.
+    pub fn write_packet(sess: &Arc<wintun::Session>, packet: &[u8]) -> io::Result<usize> {
+        let len = packet.len();
+        match sess.allocate_send_packet(len as u16) {
+            Ok(mut send) => {
+                send.bytes_mut().copy_from_slice(packet);
+                sess.send_packet(send);
+                Ok(len)
+            }
+            Err(e) => Err(io::Error::other(format!("wintun allocate_send: {e}"))),
+        }
     }
 }

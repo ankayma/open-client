@@ -130,6 +130,12 @@ export async function getPathProof(): Promise<PathProof> {
   return invoke<PathProof>("get_path_proof");
 }
 
+// Active reachability: TCP-probe overlay IPs (connect/refused → reachable, timeout →
+// unreachable). More accurate than the lagging handshake age for gating SSH/Open.
+export async function probeReachable(targets: string[]): Promise<boolean[]> {
+  return invoke<boolean[]>("probe_reachable", { targets });
+}
+
 // [A] stub — control-plane receives event via agent-core relay (milestone 1.2)
 export async function trackEvent(
   name: string,

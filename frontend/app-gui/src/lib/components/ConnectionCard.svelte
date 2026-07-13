@@ -10,17 +10,28 @@
 		stopDataplane,
 		getDataplaneStatus,
 		type DataplaneStatus,
+		getPathProof,
 		vpnConnect,
 		vpnDisconnect,
 		vpnStatus,
 		getPlatform,
 		getNodeInfo
 	} from '$lib/tauri';
+	import type { PathProof } from '$lib/types';
 
 	let toggling = $state(false);
 	let connectError = $state<string | null>(null);
 	let dp = $state<DataplaneStatus | null>(null);
+	let proof = $state<PathProof | null>(null);
 	let hostname = $state<string | null>(null);
+	// "N peers" counts CONFIGURED WireGuard peers (the whole tenant roster), not live
+	// links. The honest number is how many handshaked recently — most of the roster
+	// never handshakes (idle, agent down, or NAT with no relay). [T:F-5 handshake age]
+	let activePeers = $derived(
+		(proof?.peers ?? []).filter(
+			(p) => p.last_handshake_secs !== null && p.last_handshake_secs <= 180
+		).length
+	);
 	// iOS runs the data plane in-app (Packet Tunnel extension); desktop hands off to
 	// the privileged daemon. The connect toggle picks the path from this. [T:A.1.9]
 	let isIos = $state(false);
@@ -46,6 +57,12 @@
 					: null;
 			} else {
 				dp = await getDataplaneStatus();
+				// Handshake ages for the "N active" count (dp peers carry no age).
+				try {
+					proof = await getPathProof();
+				} catch {
+					/* keep last */
+				}
 			}
 		} catch {
 			dp = null;
@@ -137,7 +154,7 @@
 			<!-- Peer count inline with the state (owner feedback 2026-07-04): the
 			     first thing to know after Connect is "am I meshed with anyone?".
 			     Fills in as soon as the daemon status poll reports. -->
-			{#if $connection.status === 'connected'}Connected{#if dp?.running}&nbsp;· {dp.peers.length} peer{dp.peers.length === 1 ? '' : 's'}{/if}
+			{#if $connection.status === 'connected'}Connected{#if dp?.running}&nbsp;· <span title="{activePeers} peer(s) handshaking now · {dp.peers.length} configured from the tenant roster">{activePeers} active / {dp.peers.length} peers</span>{/if}
 			{:else if $connection.status === 'connecting'}Connecting…
 			{:else}Disconnected{/if}
 		</span>

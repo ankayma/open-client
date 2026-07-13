@@ -1,0 +1,121 @@
+# GitHub Actions — Windows NSIS installer + Tauri auto-update artifacts, published to
+# get.ankayma.com (Cloudflare R2). Mirror of release-macos.yml.
+#
+# Authenticode signing via **Azure Trusted Signing** is a TODO (see the "Sign" step):
+# until the Trusted Signing account + certificate profile are wired, the installer
+# ships UNSIGNED and Windows SmartScreen shows an "unknown publisher" warning (still
+# installable). The Tauri *updater* signature (minisign) is independent of
+# Authenticode and works either way.
+#
+# Secrets:
+#   TAURI_SIGNING_PRIVATE_KEY            minisign private key (SHARED with macOS)
+#   TAURI_SIGNING_PRIVATE_KEY_PASSWORD   password for the above
+#   R2_ACCESS_KEY_ID / R2_SECRET_ACCESS_KEY / R2_ENDPOINT   R2 S3-compatible API token
+#   R2_BUCKET_MACOS   bucket behind get.ankayma.com (shared; this job writes the
+#                     windows/ prefix — rename to R2_BUCKET if you prefer)
+#   TODO Azure Trusted Signing (add when the cert profile exists):
+#     AZURE_TENANT_ID / AZURE_CLIENT_ID / AZURE_CLIENT_SECRET
+#     AZURE_TS_ENDPOINT / AZURE_TS_ACCOUNT / AZURE_TS_CERT_PROFILE
+name: release-windows
+
+on:
+  push:
+    tags: ["v*.*.*"]
+  workflow_dispatch: {}
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      # rust-toolchain.toml pins the version; x86_64-pc-windows-msvc is the runner
+      # default and the MSVC C++ build tools ship on windows-latest.
+      - name: Install Rust (pinned via rust-toolchain.toml)
+        run: rustup show
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install frontend deps
+        working-directory: frontend/app-gui
+        run: npm ci
+
+      - name: Install cargo-tauri CLI
+        run: cargo install tauri-cli --locked --version "^2"
+
+      # Microsoft-signed Wintun driver DLL, bundled as a Tauri resource beside the
+      # agent sidecar (see gui/src-tauri/tauri.windows.conf.json). Not vendored.
+      - name: Fetch wintun.dll
+        shell: pwsh
+        run: |
+          Invoke-WebRequest 'https://www.wintun.net/builds/wintun-0.14.1.zip' -OutFile "$env:RUNNER_TEMP\wintun.zip"
+          Expand-Archive "$env:RUNNER_TEMP\wintun.zip" "$env:RUNNER_TEMP\wintun" -Force
+          Copy-Item "$env:RUNNER_TEMP\wintun\wintun\bin\amd64\wintun.dll" "gui/src-tauri/wintun.dll" -Force
+
+      - name: Build frontend
+        working-directory: frontend/app-gui
+        run: npm run build
+
+      # The agent daemon is bundled as a Tauri sidecar (externalBin resolves it by
+      # target triple), so it must exist before the bundle step.
+      - name: Build agent daemon (sidecar)
+        shell: pwsh
+        run: |
+          cargo build --release --bin agent
+          Copy-Item target/release/agent.exe target/release/agent-x86_64-pc-windows-msvc.exe -Force
+
+      # Base config + tauri.windows.conf.json (NSIS/sidecar/wintun) + an inline
+      # override that turns on updater artifacts (signed with the minisign key) and
+      # points the updater at the windows manifest. --config merges left-to-right.
+      - name: Build NSIS installer + updater artifacts
+        working-directory: gui
+        shell: pwsh
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: cargo tauri build --config src-tauri/tauri.windows.conf.json --config '{"bundle":{"createUpdaterArtifacts":true},"plugins":{"updater":{"endpoints":["https://get.ankayma.com/windows/latest.json"]}}}'
+
+      # TODO[cert] — Azure Trusted Signing. Full step-by-step in
+      # docs/windows-signing-setup.md. Wire once the Trusted Signing account +
+      # certificate profile exist. The correct integration is via Tauri's Windows
+      # `signCommand` so Tauri signs the installer BEFORE generating the updater .sig
+      # (signing afterwards would invalidate the minisign signature). Add to the
+      # inline --config above:
+      #   "bundle":{"windows":{"signCommand":{"cmd":"trusted-signing-cli","args":["-e","$AZURE_TS_ENDPOINT","-a","$AZURE_TS_ACCOUNT","-c","$AZURE_TS_CERT_PROFILE","%1"]}}}
+      # and add an `azure/login@v2` step + the AZURE_* secrets to this job's env.
+      # Until then the installer is unsigned (SmartScreen warns; still installs).
+
+      - name: Assemble latest.json (Tauri updater manifest)
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="$(sed -n 's/.*"version": *"\(.*\)".*/\1/p' gui/src-tauri/tauri.conf.json | head -1)"
+          SETUP="$(find target/release/bundle/nsis -iname '*-setup.exe' | head -1)"
+          SIGNATURE="$(cat "$SETUP.sig")"
+          mkdir -p publish
+          cp "$SETUP" "$SETUP.sig" publish/
+          cat > publish/latest.json <<EOF
+          {
+            "version": "$VERSION",
+            "notes": "See release notes on GitHub.",
+            "pub_date": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+            "platforms": {
+              "windows-x86_64": {
+                "signature": "$SIGNATURE",
+                "url": "https://get.ankayma.com/windows/$(basename "$SETUP")"
+              }
+            }
+          }
+          EOF
+
+      - name: Publish to R2 (get.ankayma.com/windows/)
+        shell: bash
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: auto
+        run: |
+          aws s3 sync publish/ "s3://${{ secrets.R2_BUCKET_MACOS }}/windows/" --endpoint-url "${{ secrets.R2_ENDPOINT }}"

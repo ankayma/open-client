@@ -102,7 +102,9 @@
 	let sshError = $state('');
 	function sshTo(d: PeerBrief) {
 		sshError = '';
-		goto(`/terminal?node=${encodeURIComponent(d.node_id)}&host=${encodeURIComponent(d.hostname)}`);
+		goto(
+			`/terminal?node=${encodeURIComponent(d.node_id)}&host=${encodeURIComponent(d.hostname)}&from=${encodeURIComponent('/settings/devices')}`
+		);
 	}
 
 	async function removeDevice(nodeId: string) {

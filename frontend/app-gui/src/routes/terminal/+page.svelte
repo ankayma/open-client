@@ -12,21 +12,32 @@
 
 	const nodeId = $derived($page.url.searchParams.get('node') ?? '');
 	const host = $derived($page.url.searchParams.get('host') ?? nodeId);
+	// Close returns to the page the terminal was opened from (Services or My
+	// Devices), not a hard-coded route. Falls back to My Devices for old links.
+	const from = $derived($page.url.searchParams.get('from') ?? '/settings/devices');
 
 	// Desktop-only "open in external terminal" (Terminal.app / iTerm2 / …) for power
 	// users who want their terminal's features. Choice persists in localStorage.
 	// TODO[A]: detect which terminal apps are actually installed (e.g. a Tauri cmd
 	// that checks /Applications + `mdfind`) and only list those, so a not-installed
 	// pick (e.g. Ghostty) can't be chosen. For now an uninstalled app errors softly.
+	let platform = $state('');
 	let isDesktop = $state(false);
+	// The terminal-app list is per-OS (a macOS pick must not leak to Windows), so
+	// the choice is keyed by platform and defaults to that OS's native terminal.
+	let termApp = $state('Terminal');
 	getPlatform()
-		.then((p) => (isDesktop = p !== 'ios' && p !== 'android'))
+		.then((p) => {
+			platform = p;
+			isDesktop = p !== 'ios' && p !== 'android';
+			const saved =
+				typeof localStorage !== 'undefined' ? localStorage.getItem(`ssh_terminal_app_${p}`) : null;
+			termApp = saved || (p === 'windows' ? 'Windows Terminal' : 'Terminal');
+		})
 		.catch(() => {});
-	let termApp = $state(
-		(typeof localStorage !== 'undefined' && localStorage.getItem('ssh_terminal_app')) || 'Terminal'
-	);
 	function openExternal() {
-		if (typeof localStorage !== 'undefined') localStorage.setItem('ssh_terminal_app', termApp);
+		if (typeof localStorage !== 'undefined')
+			localStorage.setItem(`ssh_terminal_app_${platform}`, termApp);
 		openSshTerminal(nodeId, undefined, termApp).catch((e) => (notice = 'Mở terminal ngoài lỗi: ' + String(e)));
 	}
 
@@ -175,20 +186,26 @@
 
 <div class="term-page">
 	<header>
-		<button class="back" onclick={() => goto('/settings/devices')} aria-label="Close terminal">✕</button>
+		<button class="back" onclick={() => goto(from)} aria-label="Close terminal">✕</button>
 		<div class="title">
 			<span class="host">{host}</span>
 			<span class="dot {status}"></span>
 			<span class="state">{status}{elevated ? ' · root' : ''}</span>
 		</div>
-		{#if isDesktop}
+		{#if platform === 'windows' || platform === 'macos'}
 			<div class="ext" title="Mở phiên này trong terminal ngoài (nhiều tính năng hơn)">
 				<select bind:value={termApp} aria-label="Terminal app">
-					<option value="Terminal">Terminal</option>
-					<option value="iTerm">iTerm2</option>
-					<option value="Ghostty">Ghostty</option>
-					<option value="WezTerm">WezTerm</option>
-					<option value="Alacritty">Alacritty</option>
+					{#if platform === 'windows'}
+						<option value="Windows Terminal">Windows Terminal</option>
+						<option value="PowerShell">PowerShell</option>
+						<option value="cmd">Command Prompt</option>
+					{:else}
+						<option value="Terminal">Terminal</option>
+						<option value="iTerm">iTerm2</option>
+						<option value="Ghostty">Ghostty</option>
+						<option value="WezTerm">WezTerm</option>
+						<option value="Alacritty">Alacritty</option>
+					{/if}
 				</select>
 				<button class="extbtn" onclick={openExternal}>Mở ngoài ↗</button>
 			</div>
@@ -212,7 +229,17 @@
 	</div>
 
 	{#if status === 'error'}
-		<div class="err">SSH error: {errorMsg}</div>
+		<div class="err">
+			{#if /failed after|attempt|timed out|timeout|connect|refused|no route/i.test(errorMsg)}
+				<strong>Không kết nối được tới {host}.</strong>
+				Node có thể chưa ở trên mesh — app bên đó chưa Connect / máy offline, hoặc sau NAT
+				mà relay chưa khả dụng. WireGuard chỉ bắt tay khi cả hai đầu cùng online.
+			{:else}
+				SSH error: {errorMsg}
+			{/if}
+			<div class="err-detail">{errorMsg}</div>
+			<button class="retry" onclick={() => start(false)}>Thử lại</button>
+		</div>
 	{/if}
 	{#if status === 'connecting'}
 		<div class="connecting">Đang kết nối tới {host}…</div>
@@ -322,6 +349,23 @@
 		background: #21262d;
 		padding: 0.4rem 0.75rem;
 		font-size: 0.85rem;
+	}
+	.err-detail {
+		color: #8b949e;
+		font-family: 'SF Mono', 'Fira Code', monospace;
+		font-size: 0.72rem;
+		margin-top: 0.3rem;
+		opacity: 0.8;
+	}
+	.retry {
+		margin-top: 0.4rem;
+		background: #30363d;
+		color: #e6edf3;
+		border: 1px solid #444c56;
+		border-radius: 6px;
+		padding: 0.2rem 0.7rem;
+		font-size: 0.8rem;
+		cursor: pointer;
 	}
 	.term {
 		flex: 1;
