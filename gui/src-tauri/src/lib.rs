@@ -24,6 +24,11 @@ use tauri::{AppHandle, Emitter, Manager, State};
 // platforms; the iOS-only path is gated inside. [T:A.1.9]
 mod vpn;
 
+// Android VPN bridge (frontend → AnkaymaVpnService via JNI). Owns the TUN fd, the
+// in-process WireGuard pump, and the control-plane bypass proxy. [T:A.1.9, F-3]
+#[cfg(target_os = "android")]
+mod vpn_android;
+
 /// Target OS this build runs on ("ios"/"macos"/"linux"/"windows"). The frontend uses
 /// it to pick the data-plane path: iOS brings the tunnel up in-app (Packet Tunnel
 /// extension); desktop hands off to the privileged `agent` daemon. [T:A.1.9]
@@ -81,13 +86,50 @@ struct AppState {
     ssh_seq: std::sync::atomic::AtomicU64,
 }
 
+/// Build the control-plane HTTP client. On Android the full-tunnel VPN (0.0.0.0/0 +
+/// ::/0) would black-hole the app's own HTTPS to the *public* control plane, so route
+/// it through a loopback CONNECT proxy whose upstream socket is bound to the non-VPN
+/// network (vpn_android::start_control_plane_proxy). TLS stays end-to-end. Falls back
+/// to a plain client if the proxy can't start (still fine while disconnected).
+/// Desktop/iOS are unaffected. [T:protect-socket, F-3]
+fn build_http_client(base_url: &str) -> reqwest::Client {
+    #[cfg(target_os = "android")]
+    match vpn_android::start_control_plane_proxy() {
+        Ok(local_port) => {
+            let proxy_url = format!("http://127.0.0.1:{local_port}");
+            match reqwest::Proxy::all(&proxy_url) {
+                // Disable connection reuse: a pooled tunnel opened while disconnected
+                // has an UNBOUND upstream socket that the full-tunnel VPN black-holes
+                // once it comes up. A fresh connection per request re-runs the CONNECT
+                // → the proxy binds each new upstream socket to the non-VPN network at
+                // request time (bound=true while connected). [T:protect-socket]
+                Ok(proxy) => match reqwest::Client::builder()
+                    .proxy(proxy)
+                    .pool_max_idle_per_host(0)
+                    .build()
+                {
+                    Ok(c) => {
+                        log::info!("control-plane client routed via {proxy_url}");
+                        return c;
+                    }
+                    Err(e) => log::error!("cp-proxy: client build failed: {e}"),
+                },
+                Err(e) => log::error!("cp-proxy: Proxy::all failed: {e}"),
+            }
+        }
+        Err(e) => log::error!("cp-proxy: start failed: {e}"),
+    }
+    let _ = base_url;
+    reqwest::Client::new()
+}
+
 impl AppState {
     fn new(data_dir: std::path::PathBuf) -> Self {
         let base_url = std::env::var("ANKAYMA_CONTROL_PLANE")
             .unwrap_or_else(|_| DEFAULT_CONTROL_PLANE.to_string());
         let session = load_session_from_disk(&data_dir);
         AppState {
-            http: reqwest::Client::new(),
+            http: build_http_client(&base_url),
             base_url,
             data_dir,
             session: Mutex::new(session),
@@ -487,14 +529,15 @@ async fn sign_in_github(state: State<'_, AppState>, nonce: String) -> Result<(),
 }
 
 /// Open an external URL in the system browser. On desktop the `open` crate launches
-/// the OS default browser; on iOS that crate no-ops (no `open`/`xdg-open`), so route
-/// through the Swift `UIApplication.open` C-ABI bridge instead. [T:A.1.9]
+/// the OS default browser; on iOS/Android that crate no-ops (no `open`/`xdg-open`), so
+/// route through the platform bridge instead — Swift `UIApplication.open` on iOS, an
+/// ACTION_VIEW intent on Android. [T:A.1.9]
 fn open_url(url: &str) -> Result<(), String> {
-    #[cfg(target_os = "ios")]
+    #[cfg(any(target_os = "ios", target_os = "android"))]
     {
         vpn::open_external_url(url)
     }
-    #[cfg(not(target_os = "ios"))]
+    #[cfg(not(any(target_os = "ios", target_os = "android")))]
     {
         open::that(url).map_err(|e| format!("could not open browser: {e}"))
     }
