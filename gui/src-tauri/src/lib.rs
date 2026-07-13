@@ -59,7 +59,19 @@ struct EnrolledNode {
 /// Process-wide app state: HTTP client + session token + enrolled node (if any).
 struct AppState {
     http: reqwest::Client,
-    base_url: String,
+    /// [T:CP-UAE region-routing] Fixed at the auth-gateway — login (`sign_in_github`),
+    /// the desktop OAuth poll (`fetch_handoff`), and validating a raw token
+    /// (`session_info`) all go here, never to a regional CP. `[T:A.1.1]` auth stays
+    /// central; see main.rs module doc on the control-plane side.
+    auth_base_url: String,
+    /// Where every OTHER API call goes (enroll, ssh, ci_deploy, policy, …) — starts
+    /// equal to `auth_base_url`, then flips to `https://{region}.cp.ankayma.com`
+    /// once a session_info() call resolves the signed-in tenant's region. Behind a
+    /// Mutex because that resolution happens after `AppState` is already shared.
+    regional_base_url: Mutex<String>,
+    /// True when `ANKAYMA_CONTROL_PLANE` is set (dev/test pointing everything at one
+    /// box) — region-based switching is skipped so overriding stays fully in effect.
+    region_override_active: bool,
     /// Platform-correct data directory; Tauri resolves this per-OS so it works in
     /// the iOS sandbox (where $HOME is unreliable). [T:A.1.9]
     data_dir: std::path::PathBuf,
@@ -92,6 +104,20 @@ struct AppState {
 /// network (vpn_android::start_control_plane_proxy). TLS stays end-to-end. Falls back
 /// to a plain client if the proxy can't start (still fine while disconnected).
 /// Desktop/iOS are unaffected. [T:protect-socket, F-3]
+///
+/// Region-safe on every platform (verified 2026-07-13):
+///  - Android is full-tunnel (VpnService addRoute 0.0.0.0/0 + ::/0), so it needs this
+///    proxy — but the proxy is host-transparent: it dials whatever host each request's
+///    `CONNECT` names (`handle_connect` in vpn_android.rs) and only protect()s the
+///    socket from the VPN loop; it never pins a control plane.
+///  - Windows/macOS/Linux/iOS are split-tunnel (only the overlay CIDR is routed to the
+///    tun; the /32 host-address model, not a default route), so control-plane HTTPS
+///    goes straight out the normal interface — the plain client below needs no proxy.
+/// Either way, when `regional_base_url` flips to `https://{region}.cp.ankayma.com` the
+/// next request reaches that regional CP with no client rebuild.
+///
+/// `base_url` is currently unused (the proxy needs no target; the plain-client fallback
+/// takes none) — kept as a parameter so a future per-host client config has a seam.
 fn build_http_client(base_url: &str) -> reqwest::Client {
     #[cfg(target_os = "android")]
     match vpn_android::start_control_plane_proxy() {
@@ -125,12 +151,23 @@ fn build_http_client(base_url: &str) -> reqwest::Client {
 
 impl AppState {
     fn new(data_dir: std::path::PathBuf) -> Self {
-        let base_url = std::env::var("ANKAYMA_CONTROL_PLANE")
-            .unwrap_or_else(|_| DEFAULT_CONTROL_PLANE.to_string());
+        let override_url = std::env::var("ANKAYMA_CONTROL_PLANE").ok();
+        let auth_base_url = override_url
+            .clone()
+            .unwrap_or_else(|| DEFAULT_CONTROL_PLANE.to_string());
+        // Regional starts equal to auth (correct for a fresh install before any
+        // session has told us a region); update_region() moves it once known.
+        let regional_base_url = auth_base_url.clone();
+        let region_override_active = override_url.is_some();
         let session = load_session_from_disk(&data_dir);
         AppState {
-            http: build_http_client(&base_url),
-            base_url,
+            // build_http_client is the Android control-plane proxy path (no-op on
+            // other platforms); point it at the auth gateway, where the very first
+            // calls go before a session resolves the tenant's region.
+            http: build_http_client(&auth_base_url),
+            auth_base_url,
+            regional_base_url: Mutex::new(regional_base_url),
+            region_override_active,
             data_dir,
             session: Mutex::new(session),
             email: Mutex::new(None),
@@ -193,6 +230,29 @@ impl AppState {
     fn set_email(&self, email: Option<String>) {
         *self.email.lock().expect("email lock poisoned") = email;
     }
+
+    /// [T:CP-UAE region-routing] Current base URL for everything except auth.
+    fn regional_base_url(&self) -> String {
+        self.regional_base_url
+            .lock()
+            .expect("regional_base_url lock poisoned")
+            .clone()
+    }
+
+    /// Call once a session_info() response resolves the signed-in tenant's region
+    /// (e.g. right after login, or on the periodic re-validate in
+    /// `check_auth_state`). No-op under `ANKAYMA_CONTROL_PLANE` — a dev/test
+    /// override should stay in full effect, not get overridden back to a real
+    /// regional subdomain.
+    fn update_region(&self, region: &str) {
+        if self.region_override_active {
+            return;
+        }
+        *self
+            .regional_base_url
+            .lock()
+            .expect("regional_base_url lock poisoned") = format!("https://{region}.cp.ankayma.com");
+    }
 }
 
 // --- Session persistence (survive app restarts without re-login) ---
@@ -242,6 +302,12 @@ pub enum AuthState {
     Unauthenticated,
     Authenticating,
     Authenticated { user: User },
+    /// [T:CP-UAE region-routing] User bailed on the region picker (or any other
+    /// browser-side step) instead of finishing. Distinct from `Unauthenticated`
+    /// so the UI can say "cancelled" instead of silently reverting with no
+    /// explanation — found live-testing 2026-07-12 (poll otherwise hangs on
+    /// "Waiting for GitHub..." for up to 5 minutes with no signal).
+    Cancelled,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -415,7 +481,7 @@ async fn connect_inner(state: &AppState) -> Result<(), String> {
         workload_kind: Some("ClientDevice".to_string()),
         machine_proof: Some(proof),
     };
-    let resp = adapters::enroll(&state.http, &state.base_url, &tok, &req)
+    let resp = adapters::enroll(&state.http, &state.regional_base_url(), &tok, &req)
         .await
         .map_err(|e| e.to_string())?;
 
@@ -444,7 +510,7 @@ async fn connect_inner(state: &AppState) -> Result<(), String> {
         // where a leak hurts soonest, is ungated and rolls back cleanly. `[A: revisit
         // when the client can mint a step-up proof non-interactively]`
         if let Err(del) =
-            adapters::delete_node(&state.http, &state.base_url, &tok, &resp.node_id, None).await
+            adapters::delete_node(&state.http, &state.regional_base_url(), &tok, &resp.node_id, None).await
         {
             log::error!("enroll rollback failed for {}: {del}", resp.node_id);
         }
@@ -488,9 +554,10 @@ async fn check_auth_state(app: AppHandle, state: State<'_, AppState>) -> Result<
     let result = match state.token() {
         None => AuthState::Unauthenticated,
         // Re-validate the stored token against the control plane.
-        Some(tok) => match adapters::session_info(&state.http, &state.base_url, &tok).await {
+        Some(tok) => match adapters::session_info(&state.http, &state.auth_base_url, &tok).await {
             Ok(s) => {
                 state.set_email(Some(s.email.clone()));
+                state.update_region(&s.region);
                 AuthState::Authenticated { user: s.into() }
             }
             Err(_) => {
@@ -523,7 +590,7 @@ async fn sign_in_github(state: State<'_, AppState>, nonce: String) -> Result<(),
     // `nonce`. After GitHub, the callback parks the session token under that nonce;
     // the frontend polls `poll_login(nonce)` to sign in — no `ankayma://` deep link
     // needed (it's unreliable under `tauri dev`). Deep-link + paste remain fallbacks.
-    let base = state.base_url.trim_end_matches('/');
+    let base = state.auth_base_url.trim_end_matches('/');
     let url = format!("{base}/auth/github?source=desktop&nonce={nonce}");
     open_url(&url)
 }
@@ -551,7 +618,11 @@ async fn poll_login(
     state: State<'_, AppState>,
     nonce: String,
 ) -> Result<Option<AuthState>, String> {
-    match adapters::fetch_handoff(&state.http, &state.base_url, &nonce).await {
+    match adapters::fetch_handoff(&state.http, &state.auth_base_url, &nonce).await {
+        // [T:CP-UAE region-routing] Server-side cancel (region picker) parks this
+        // sentinel instead of a real token — not a session, don't try to validate
+        // it as one.
+        Ok(Some(token)) if token == "CANCELLED" => Ok(Some(AuthState::Cancelled)),
         Ok(Some(token)) => {
             let user = apply_session_token(&app, token).await?;
             Ok(Some(AuthState::Authenticated { user }))
@@ -572,10 +643,11 @@ async fn apply_session_token(app: &AppHandle, token: String) -> Result<User, Str
     }
     let state = app.state::<AppState>();
     // Validate by fetching the session; only store the token if it works.
-    let info = adapters::session_info(&state.http, &state.base_url, &token)
+    let info = adapters::session_info(&state.http, &state.auth_base_url, &token)
         .await
         .map_err(|e| e.to_string())?;
     state.set_email(Some(info.email.clone()));
+    state.update_region(&info.region);
     save_session_to_disk(&state.data_dir, &token);
     state.set_token(Some(token));
     let user: User = info.into();
@@ -682,7 +754,7 @@ async fn sign_out(app: AppHandle, state: State<'_, AppState>) -> Result<(), Stri
         .map(|n| n.node_id.clone());
     if let (Some(tok), Some(node_id)) = (state.token(), retiring) {
         if let Err(e) =
-            adapters::delete_node(&state.http, &state.base_url, &tok, &node_id, None).await
+            adapters::delete_node(&state.http, &state.regional_base_url(), &tok, &node_id, None).await
         {
             log::warn!("could not retire {node_id} on sign-out ({e}); an admin must remove it");
         }
@@ -711,7 +783,7 @@ async fn sign_out(app: AppHandle, state: State<'_, AppState>) -> Result<(), Stri
 #[tauri::command]
 async fn get_quota(state: State<'_, AppState>) -> Result<Quota, String> {
     let tok = state.token().ok_or("not signed in")?;
-    let q = adapters::quota(&state.http, &state.base_url, &tok)
+    let q = adapters::quota(&state.http, &state.regional_base_url(), &tok)
         .await
         .map_err(|e| e.to_string())?;
     Ok(Quota {
@@ -875,7 +947,7 @@ async fn probe_reachable(targets: Vec<String>) -> Result<Vec<bool>, String> {
 /// vendor_on_data_path is computed from peer states — honest per P.3, not hardcoded.
 #[tauri::command]
 async fn get_path_proof(state: State<'_, AppState>) -> Result<PathProof, String> {
-    let control_plane = state.base_url.clone();
+    let control_plane = state.regional_base_url();
     let not_connected = || PathProof {
         connected: false,
         control_plane: control_plane.clone(),
@@ -960,7 +1032,7 @@ async fn create_join_link(
     let tok = state.token().ok_or("not signed in")?;
     adapters::issue_join_token(
         &state.http,
-        &state.base_url,
+        &state.regional_base_url(),
         &tok,
         ttl_seconds,
         proof_token.as_deref(),
@@ -982,7 +1054,7 @@ async fn get_server_enroll_command(state: State<'_, AppState>) -> Result<String,
     let tok = state.token().ok_or("not signed in")?;
     Ok(format!(
         "agent up --token {tok} --control-plane {}",
-        state.base_url
+        state.regional_base_url()
     ))
 }
 
@@ -991,7 +1063,7 @@ async fn request_step_up(state: State<'_, AppState>, purpose: String) -> Result<
     // Ask the control plane to email an OTP for a sensitive action; returns the
     // challenge_id to pass back at `verify_step_up`. [T:Part D §Authority model]
     let tok = state.token().ok_or("not signed in")?;
-    adapters::request_step_up(&state.http, &state.base_url, &tok, &purpose)
+    adapters::request_step_up(&state.http, &state.regional_base_url(), &tok, &purpose)
         .await
         .map_err(|e| e.to_string())
 }
@@ -1008,7 +1080,7 @@ async fn verify_step_up(
     let tok = state.token().ok_or("not signed in")?;
     adapters::verify_step_up(
         &state.http,
-        &state.base_url,
+        &state.regional_base_url(),
         &tok,
         &purpose,
         &challenge_id,
@@ -1027,7 +1099,7 @@ async fn verify_step_up_totp(
     // Same exchange, against the enrolled TOTP secret instead of an emailed
     // challenge. [T:part-d-e7-stepup.md §H.8 Phase 2]
     let tok = state.token().ok_or("not signed in")?;
-    adapters::verify_step_up_totp(&state.http, &state.base_url, &tok, &purpose, &code)
+    adapters::verify_step_up_totp(&state.http, &state.regional_base_url(), &tok, &purpose, &code)
         .await
         .map_err(|e| e.to_string())
 }
@@ -1037,7 +1109,7 @@ async fn verify_step_up_totp(
 #[tauri::command]
 async fn totp_status(state: State<'_, AppState>) -> Result<bool, String> {
     let tok = state.token().ok_or("not signed in")?;
-    adapters::totp_status(&state.http, &state.base_url, &tok)
+    adapters::totp_status(&state.http, &state.regional_base_url(), &tok)
         .await
         .map_err(|e| e.to_string())
 }
@@ -1045,7 +1117,7 @@ async fn totp_status(state: State<'_, AppState>) -> Result<bool, String> {
 #[tauri::command]
 async fn totp_enroll(state: State<'_, AppState>) -> Result<(String, String), String> {
     let tok = state.token().ok_or("not signed in")?;
-    adapters::totp_enroll(&state.http, &state.base_url, &tok)
+    adapters::totp_enroll(&state.http, &state.regional_base_url(), &tok)
         .await
         .map_err(|e| e.to_string())
 }
@@ -1053,7 +1125,7 @@ async fn totp_enroll(state: State<'_, AppState>) -> Result<(String, String), Str
 #[tauri::command]
 async fn totp_confirm(state: State<'_, AppState>, code: String) -> Result<Vec<String>, String> {
     let tok = state.token().ok_or("not signed in")?;
-    adapters::totp_confirm(&state.http, &state.base_url, &tok, &code)
+    adapters::totp_confirm(&state.http, &state.regional_base_url(), &tok, &code)
         .await
         .map_err(|e| e.to_string())
 }
@@ -1066,7 +1138,7 @@ async fn totp_confirm(state: State<'_, AppState>, code: String) -> Result<Vec<St
 #[tauri::command]
 async fn webauthn_status(state: State<'_, AppState>) -> Result<bool, String> {
     let tok = state.token().ok_or("not signed in")?;
-    adapters::webauthn_status(&state.http, &state.base_url, &tok)
+    adapters::webauthn_status(&state.http, &state.regional_base_url(), &tok)
         .await
         .map_err(|e| e.to_string())
 }
@@ -1074,7 +1146,7 @@ async fn webauthn_status(state: State<'_, AppState>) -> Result<bool, String> {
 #[tauri::command]
 async fn webauthn_register_start(state: State<'_, AppState>) -> Result<serde_json::Value, String> {
     let tok = state.token().ok_or("not signed in")?;
-    adapters::webauthn_register_start(&state.http, &state.base_url, &tok)
+    adapters::webauthn_register_start(&state.http, &state.regional_base_url(), &tok)
         .await
         .map_err(|e| e.to_string())
 }
@@ -1089,7 +1161,7 @@ async fn webauthn_register_finish(
     let tok = state.token().ok_or("not signed in")?;
     adapters::webauthn_register_finish(
         &state.http,
-        &state.base_url,
+        &state.regional_base_url(),
         &tok,
         &state_id,
         credential,
@@ -1104,7 +1176,7 @@ async fn webauthn_authenticate_start(
     state: State<'_, AppState>,
 ) -> Result<serde_json::Value, String> {
     let tok = state.token().ok_or("not signed in")?;
-    adapters::webauthn_authenticate_start(&state.http, &state.base_url, &tok)
+    adapters::webauthn_authenticate_start(&state.http, &state.regional_base_url(), &tok)
         .await
         .map_err(|e| e.to_string())
 }
@@ -1119,7 +1191,7 @@ async fn verify_step_up_webauthn(
     let tok = state.token().ok_or("not signed in")?;
     adapters::verify_step_up_webauthn(
         &state.http,
-        &state.base_url,
+        &state.regional_base_url(),
         &tok,
         &purpose,
         &state_id,
@@ -1172,7 +1244,7 @@ async fn join_enroll_node(
         endpoint: None,
         machine_proof: Some(proof),
     };
-    let resp = adapters::enroll_via_join_token(&state.http, &state.base_url, &req)
+    let resp = adapters::enroll_via_join_token(&state.http, &state.regional_base_url(), &req)
         .await
         .map_err(|e| e.to_string())?;
 
@@ -1515,7 +1587,7 @@ async fn start_dataplane(state: State<'_, AppState>) -> Result<(), String> {
     // bring_up_dataplane blocks (UnixStream connect retry loop with
     // thread::sleep); run it off the async runtime so it doesn't stall the
     // Tauri executor (audit 2026-07-02).
-    let base_url = state.base_url.clone();
+    let base_url = state.regional_base_url();
     tauri::async_runtime::spawn_blocking(move || bring_up_dataplane(&bin, &tok, &base_url))
         .await
         .map_err(|e| format!("dataplane task panicked: {e}"))?
@@ -1604,7 +1676,7 @@ async fn open_ssh_terminal(
             "ANKAYMA_TOKEN=\"$(cat '{}')\" '{}' ssh {node_id} --mesh --allow-unpinned --control-plane {}",
             session.display(),
             bin.display(),
-            state.base_url
+            state.regional_base_url()
         );
         if let Some(l) = login.as_deref() {
             inner.push_str(&format!(" --login {l}"));
@@ -1656,7 +1728,7 @@ async fn open_ssh_terminal(
             "@echo off\r\nset /p ANKAYMA_TOKEN=<\"{}\"\r\n\"{}\" ssh {node_id} --mesh --allow-unpinned --control-plane {}",
             session.display(),
             bin.display(),
-            state.base_url
+            state.regional_base_url()
         );
         if let Some(l) = login.as_deref() {
             inner.push_str(&format!(" --login {l}"));
@@ -1725,7 +1797,7 @@ async fn ssh_open(
     // 1. Resolve the target + anchor the session in the ledger (never sees the stream).
     let resp = agent_core::adapters::open_ssh_session(
         &state.http,
-        &state.base_url,
+        &state.regional_base_url(),
         &token,
         &domain::SshSessionRequest {
             node_id: node_id.clone(),
@@ -1739,7 +1811,7 @@ async fn ssh_open(
     let elevate_grant = if root {
         let g = agent_core::adapters::elevate_ssh_session(
             &state.http,
-            &state.base_url,
+            &state.regional_base_url(),
             &token,
             &domain::SshElevateRequest {
                 node_id: node_id.clone(),
@@ -1970,7 +2042,7 @@ struct CiPolicyDraft {
 #[tauri::command]
 async fn list_ci_policies(state: State<'_, AppState>) -> Result<Vec<domain::CiPolicy>, String> {
     let tok = state.token().ok_or("not signed in")?;
-    adapters::list_ci_policies(&state.http, &state.base_url, &tok)
+    adapters::list_ci_policies(&state.http, &state.regional_base_url(), &tok)
         .await
         .map_err(|e| e.to_string())
 }
@@ -1984,7 +2056,7 @@ async fn ci_history(
     state: State<'_, AppState>,
 ) -> Result<Vec<domain::CiRun>, String> {
     let tok = state.token().ok_or("not signed in")?;
-    adapters::ci_history(&state.http, &state.base_url, &tok, node.as_deref())
+    adapters::ci_history(&state.http, &state.regional_base_url(), &tok, node.as_deref())
         .await
         .map_err(|e| e.to_string())
 }
@@ -2008,7 +2080,7 @@ async fn add_ci_policy(
     // returns STEP_UP_REQUIRED, the GUI runs the flow and retries with a proof.
     adapters::register_ci_policy(
         &state.http,
-        &state.base_url,
+        &state.regional_base_url(),
         &tok,
         &body,
         proof_token.as_deref(),
@@ -2026,7 +2098,7 @@ async fn delete_ci_policy(
     let tok = state.token().ok_or("not signed in")?;
     adapters::delete_ci_policy(
         &state.http,
-        &state.base_url,
+        &state.regional_base_url(),
         &tok,
         &repo,
         proof_token.as_deref(),
@@ -2040,7 +2112,7 @@ async fn delete_ci_policy(
 #[tauri::command]
 async fn list_subdomains(state: State<'_, AppState>) -> Result<Vec<domain::Subdomain>, String> {
     let tok = state.token().ok_or("not signed in")?;
-    adapters::list_subdomains(&state.http, &state.base_url, &tok)
+    adapters::list_subdomains(&state.http, &state.regional_base_url(), &tok)
         .await
         .map_err(|e| e.to_string())
 }
@@ -2058,7 +2130,7 @@ async fn create_subdomain(
         target_node_id,
         target_port,
     };
-    adapters::register_subdomain(&state.http, &state.base_url, &tok, &req)
+    adapters::register_subdomain(&state.http, &state.regional_base_url(), &tok, &req)
         .await
         .map_err(|e| e.to_string())
 }
@@ -2069,7 +2141,7 @@ async fn get_subdomain_cert(
     state: State<'_, AppState>,
 ) -> Result<domain::SubdomainCert, String> {
     let tok = state.token().ok_or("not signed in")?;
-    adapters::get_subdomain_cert(&state.http, &state.base_url, &tok, &fqdn)
+    adapters::get_subdomain_cert(&state.http, &state.regional_base_url(), &tok, &fqdn)
         .await
         .map_err(|e| e.to_string())
 }
@@ -2077,7 +2149,7 @@ async fn get_subdomain_cert(
 #[tauri::command]
 async fn delete_subdomain(label: String, state: State<'_, AppState>) -> Result<(), String> {
     let tok = state.token().ok_or("not signed in")?;
-    adapters::delete_subdomain(&state.http, &state.base_url, &tok, &label)
+    adapters::delete_subdomain(&state.http, &state.regional_base_url(), &tok, &label)
         .await
         .map_err(|e| e.to_string())
 }
@@ -2095,7 +2167,7 @@ async fn open_subdomain(fqdn: String) -> Result<(), String> {
 #[tauri::command]
 async fn list_members(state: State<'_, AppState>) -> Result<domain::MembersView, String> {
     let tok = state.token().ok_or("not signed in")?;
-    adapters::list_members(&state.http, &state.base_url, &tok)
+    adapters::list_members(&state.http, &state.regional_base_url(), &tok)
         .await
         .map_err(|e| e.to_string())
 }
@@ -2110,7 +2182,7 @@ async fn invite_member(
     let tok = state.token().ok_or("not signed in")?;
     adapters::invite_member(
         &state.http,
-        &state.base_url,
+        &state.regional_base_url(),
         &tok,
         email.trim(),
         ttl_seconds,
@@ -2138,7 +2210,7 @@ async fn join_team_link(
     state: State<'_, AppState>,
     token: String,
 ) -> Result<AuthState, String> {
-    let session = adapters::join_team_link(&state.http, &state.base_url, token.trim())
+    let session = adapters::join_team_link(&state.http, &state.regional_base_url(), token.trim())
         .await
         .map_err(|e| e.to_string())?;
     let user = apply_session_token(&app, session).await?;
@@ -2148,7 +2220,7 @@ async fn join_team_link(
 #[tauri::command]
 async fn join_team(invite: String, state: State<'_, AppState>) -> Result<(), String> {
     let tok = state.token().ok_or("not signed in")?;
-    adapters::join_team(&state.http, &state.base_url, &tok, invite.trim())
+    adapters::join_team(&state.http, &state.regional_base_url(), &tok, invite.trim())
         .await
         .map_err(|e| e.to_string())
 }
@@ -2162,7 +2234,7 @@ async fn remove_member(
     let tok = state.token().ok_or("not signed in")?;
     adapters::remove_member(
         &state.http,
-        &state.base_url,
+        &state.regional_base_url(),
         &tok,
         &user_id,
         proof_token.as_deref(),
@@ -2176,7 +2248,7 @@ async fn remove_member(
 #[tauri::command]
 async fn get_policy(state: State<'_, AppState>) -> Result<domain::PolicyView, String> {
     let tok = state.token().ok_or("not signed in")?;
-    adapters::get_policy(&state.http, &state.base_url, &tok)
+    adapters::get_policy(&state.http, &state.regional_base_url(), &tok)
         .await
         .map_err(|e| e.to_string())
 }
@@ -2184,7 +2256,7 @@ async fn get_policy(state: State<'_, AppState>) -> Result<domain::PolicyView, St
 #[tauri::command]
 async fn submit_policy(body: String, state: State<'_, AppState>) -> Result<(), String> {
     let tok = state.token().ok_or("not signed in")?;
-    adapters::submit_policy(&state.http, &state.base_url, &tok, &body)
+    adapters::submit_policy(&state.http, &state.regional_base_url(), &tok, &body)
         .await
         .map_err(|e| e.to_string())
 }
@@ -2192,7 +2264,7 @@ async fn submit_policy(body: String, state: State<'_, AppState>) -> Result<(), S
 #[tauri::command]
 async fn my_access(state: State<'_, AppState>) -> Result<domain::MyAccess, String> {
     let tok = state.token().ok_or("not signed in")?;
-    adapters::my_access(&state.http, &state.base_url, &tok)
+    adapters::my_access(&state.http, &state.regional_base_url(), &tok)
         .await
         .map_err(|e| e.to_string())
 }
@@ -2211,7 +2283,7 @@ async fn delete_node(
     let tok = state.token().ok_or("not signed in")?;
     adapters::delete_node(
         &state.http,
-        &state.base_url,
+        &state.regional_base_url(),
         &tok,
         &node_id,
         proof_token.as_deref(),
@@ -2241,7 +2313,7 @@ async fn list_nodes(state: State<'_, AppState>) -> Result<Vec<domain::NodeBrief>
     // Use the management endpoint (GET /api/v1/nodes) instead of /peers:
     // server-side role filter returns all nodes for admin, own nodes for member.
     // [T:A.1.2 + Part D §D.10.3 — no cross-member node visibility]
-    adapters::list_nodes(&state.http, &state.base_url, &tok)
+    adapters::list_nodes(&state.http, &state.regional_base_url(), &tok)
         .await
         .map_err(|e| e.to_string())
 }

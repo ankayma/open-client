@@ -54,7 +54,14 @@
 			if (elapsed > 300) return stopPoll(); // give up after 5 min
 			try {
 				const state = await pollLogin(nonce);
-				if (state) {
+				if (state?.status === 'cancelled') {
+					// User bailed on a browser-side step (e.g. the region picker) —
+					// stop polling and say so, instead of hanging on "Waiting for
+					// GitHub..." for up to 5 minutes with no explanation.
+					stopPoll();
+					error = 'Sign-in cancelled.';
+					step = 'idle';
+				} else if (state) {
 					stopPoll();
 					auth.set(state);
 					goto('/services');

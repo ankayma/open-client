@@ -14,7 +14,8 @@ export interface User {
 export type AuthState =
   | { status: "unauthenticated" }
   | { status: "authenticating" }
-  | { status: "authenticated"; user: User };
+  | { status: "authenticated"; user: User }
+  | { status: "cancelled" };
 
 export type ConnectionState =
   | { status: "disconnected" }

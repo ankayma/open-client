@@ -87,6 +87,15 @@ pub struct SessionInfo {
     pub email: String,
     pub login: String,
     pub tier: String,
+    /// [T:CP-UAE region-routing] which regional control-plane owns this tenant
+    /// ("vn", "uae", …) — the caller uses this to pick regional_base_url for
+    /// everything except auth itself, which always stays at the auth-gateway.
+    #[serde(default = "default_region")]
+    pub region: String,
+}
+
+fn default_region() -> String {
+    "vn".to_string()
 }
 
 /// Usage quota from `GET /api/v1/quota`. `[T:B.5.2]`
