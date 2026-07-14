@@ -44,14 +44,21 @@ const SOCK_BUF: usize = 64 * 1024;
 /// Poll cadence for the single-threaded smoltcp engine. `[A] verify: deploy
 /// throughput is fine at this tick; lower it if rsync feels slow over the tunnel.`
 const TICK: Duration = Duration::from_millis(3);
-/// Upper bound on waiting for the WireGuard handshake before the deploy command
-/// runs. The engine flags handshake-complete (`Tunn::stats().0` turns `Some`) and
-/// we proceed the moment it does — this cap only bounds the wait when the target
-/// never answers (it still covers the target's peer-refresh: SSE pushes our
-/// ephemeral node to it in well under this). `[A]` verify by E2E timing.
-const HANDSHAKE_SETTLE_MAX: Duration = Duration::from_secs(8);
-/// How often to re-check the handshake flag while waiting.
-const HANDSHAKE_POLL: Duration = Duration::from_millis(100);
+/// How long to let a freshly-built ci-deploy tunnel settle before running the deploy
+/// command. This wait is UNCONDITIONAL — ⚠️ DO NOT "optimize" it to proceed the moment
+/// the WireGuard handshake completes.
+///
+/// That exact optimization (commit 2f44d6b, 2026-07-04) BROKE every ci-deploy:
+/// `handshake_established()` turns true when the *initiator* (this runner) receives the
+/// handshake response (~0.3s), but the userspace tunnel is not yet carrying data BOTH
+/// ways at that instant — the runner's first TCP SYN never reaches the target's embedded
+/// SSH, and the deploy hangs to the 1h job timeout. Empirically confirmed 2026-07-15: a
+/// steady kernel-path peer connects to the same target:22022 fine (ping 0% loss, TCP OK),
+/// while a proceed-at-0.3s ci-deploy to the same node hangs. The last green deploy
+/// (2026-06-30, commit 3db1443) used this full unconditional settle. Keep it that way;
+/// if you want it faster, gate on "received a data packet back from the peer", not on the
+/// handshake flag alone. `[T: regression 2f44d6b, reverted 2026-07-15]`
+const HANDSHAKE_SETTLE: Duration = Duration::from_secs(8);
 
 /// A SOCKS5-accepted local connection handed to the engine to bridge over the
 /// tunnel: the requested overlay destination + the local client stream.
@@ -134,22 +141,21 @@ pub fn run_deploy(state: &AgentState, target: PeerInfo, exec: Option<Vec<String>
         })
     };
 
-    // Proceed as soon as the handshake completes; the fixed cap is only the
-    // no-answer bound (G-6: was an unconditional 8s sleep).
-    let settle_started = std::time::Instant::now();
-    while !handshake_done.load(Ordering::SeqCst) && settle_started.elapsed() < HANDSHAKE_SETTLE_MAX
-    {
-        std::thread::sleep(HANDSHAKE_POLL);
-    }
+    // Wait the FULL settle window, unconditionally — see HANDSHAKE_SETTLE. Proceeding
+    // early on `handshake_done` alone raced the tunnel's two-way readiness and hung the
+    // deploy (regression 2f44d6b). `handshake_done` is read ONLY to log what happened; it
+    // MUST NOT gate this wait. If you're here to make it faster: gate on data received
+    // back from the peer, never on the handshake flag.
+    std::thread::sleep(HANDSHAKE_SETTLE);
     if handshake_done.load(Ordering::SeqCst) {
         println!(
-            "handshake complete in {:.1}s",
-            settle_started.elapsed().as_secs_f32()
+            "handshake done; settled {}s — running deploy",
+            HANDSHAKE_SETTLE.as_secs()
         );
     } else {
         eprintln!(
-            "warning: no handshake after {}s — running deploy anyway (may fail to connect)",
-            HANDSHAKE_SETTLE_MAX.as_secs()
+            "warning: no handshake within {}s — running deploy anyway (may fail to connect)",
+            HANDSHAKE_SETTLE.as_secs()
         );
     }
 
