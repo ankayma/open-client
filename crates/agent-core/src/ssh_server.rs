@@ -343,13 +343,19 @@ impl ConnHandler {
     /// program (`ShellSpec::Program`): overriding a forced command with an
     /// arbitrary exec string would defeat the point of that mode, so exec is
     /// refused there rather than silently running the wrong thing.
-    fn resolve_exec_command(&self, elevated: bool, exec_cmd: &str) -> Option<std::process::Command> {
+    fn resolve_exec_command(
+        &self,
+        elevated: bool,
+        exec_cmd: &str,
+    ) -> Option<std::process::Command> {
         if elevated {
             // Agent's euid is already 0 (§H.4) — run the command directly as root.
             let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string());
             let mut c = std::process::Command::new(shell);
             c.arg("-c").arg(exec_cmd);
-            c.env("HOME", "/root").env("USER", "root").env("LOGNAME", "root");
+            c.env("HOME", "/root")
+                .env("USER", "root")
+                .env("LOGNAME", "root");
             return Some(c);
         }
         match &self.shell {
@@ -361,6 +367,15 @@ impl ConnHandler {
                 let am_root = false;
                 let already_user = current_username().as_deref() == Some(user.as_str());
                 let mut c = if am_root && !already_user {
+                    // Provision the landing user first — the shell path does this
+                    // (`build_command`) and exec must too. A node that has never
+                    // served an interactive F-2 session has no `ankayma` user yet,
+                    // and `agent ci-deploy` is exactly that case: CI is often the
+                    // first thing to ever land on a fresh deploy target.
+                    if let Err(e) = ensure_user_provisioned(user) {
+                        eprintln!("[F-2] exec: provision user {user} failed: {e}");
+                        return None;
+                    }
                     // `su - user -c "<cmd>"` — same landing-user rule as the shell
                     // case, just non-interactive.
                     let mut c = std::process::Command::new("su");
@@ -630,7 +645,10 @@ impl server::Handler for ConnHandler {
             });
         }
 
-        self.writer = child.stdin.take().map(|s| Box::new(s) as Box<dyn Write + Send>);
+        self.writer = child
+            .stdin
+            .take()
+            .map(|s| Box::new(s) as Box<dyn Write + Send>);
         let stdout = child.stdout.take();
         let stderr = child.stderr.take();
         self.exec_child = Some(child);
@@ -699,11 +717,24 @@ impl server::Handler for ConnHandler {
         data: &[u8],
         _session: &mut Session,
     ) -> Result<(), Self::Error> {
-        // Client keystrokes → PTY master. Small writes; blocking is negligible.
+        // Client keystrokes (PTY) or streamed stdin (exec). Small writes; blocking
+        // is negligible.
         if let Some(w) = self.writer.as_mut() {
             let _ = w.write_all(data);
             let _ = w.flush();
         }
+        Ok(())
+    }
+
+    async fn channel_eof(
+        &mut self,
+        _channel: ChannelId,
+        _session: &mut Session,
+    ) -> Result<(), Self::Error> {
+        // Client signalled end-of-input. Drop the child's stdin so a command that
+        // drains it (`tee`, `cat`) sees EOF and exits — without this an exec that
+        // streams an artifact in via stdin hangs forever waiting for more bytes.
+        self.writer = None;
         Ok(())
     }
 
@@ -989,16 +1020,71 @@ mod tests {
         opts.allow_unpinned = true; // exercising TOFU, same as the real ci-deploy path
 
         let stream = tokio::net::TcpStream::connect(addr).await.unwrap();
-        let (code, output) =
-            SshSession::exec_over_stream(stream, &opts, &client_key, "echo hi-from-exec; exit 7")
-                .await
-                .expect("exec should complete");
+        let (code, output) = SshSession::exec_over_stream(
+            stream,
+            &opts,
+            &client_key,
+            "echo hi-from-exec; exit 7",
+            None,
+        )
+        .await
+        .expect("exec should complete");
 
         assert_eq!(code, 7, "exit code must be the command's real exit code");
         assert!(
             String::from_utf8_lossy(&output).contains("hi-from-exec"),
             "stdout should be captured: {:?}",
             String::from_utf8_lossy(&output)
+        );
+    }
+
+    // A secretless deploy has to *deliver* the new binary, not just restart a
+    // service — and mesh SSH has no SFTP/SCP subsystem. Streaming the artifact
+    // into the remote command's stdin is that delivery path, so prove the bytes
+    // arrive intact (multi-frame, not a toy string) and stdin reaches EOF.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn client_streams_stdin_so_the_remote_command_can_write_a_file() {
+        let dir = tempdir().unwrap();
+        let host_key = gen_host_key(dir.path());
+        let client_key = MeshSshKey::load_or_generate(&dir.path().join("client")).unwrap();
+
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let cfg = SshServerConfig {
+            bind_ip: "127.0.0.1".to_string(),
+            port: addr.port(),
+            authorizer: Authorizer::TrustOverlay,
+            shell: ShellSpec::LoginShell("whoever-is-running-this-test".to_string()),
+            elevate: None,
+        };
+        tokio::spawn(async move {
+            let _ = serve_on(listener, cfg, host_key).await;
+        });
+
+        let mut opts = SshConnectOptions::new("127.0.0.1", "ankayma");
+        opts.port = addr.port();
+        opts.allow_unpinned = true;
+
+        // Big enough to cross russh's channel window, like a real binary would.
+        let artifact: Vec<u8> = (0..300_000u32).map(|i| (i % 251) as u8).collect();
+        let dest = dir.path().join("uploaded.bin");
+
+        let stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let (code, _) = SshSession::exec_over_stream(
+            stream,
+            &opts,
+            &client_key,
+            &format!("cat > {}", dest.display()),
+            Some(&artifact),
+        )
+        .await
+        .expect("exec with stdin should complete");
+
+        assert_eq!(code, 0, "`cat > file` must exit 0 once stdin hits EOF");
+        let written = std::fs::read(&dest).expect("remote command should have written the file");
+        assert_eq!(
+            written, artifact,
+            "every byte streamed over the channel must land on disk unchanged"
         );
     }
 }

@@ -233,8 +233,8 @@ impl RawMode {
         #[cfg(windows)]
         unsafe {
             use windows_sys::Win32::System::Console::{
-                GetConsoleMode, GetStdHandle, SetConsoleMode, ENABLE_ECHO_INPUT,
-                ENABLE_LINE_INPUT, ENABLE_PROCESSED_INPUT, ENABLE_VIRTUAL_TERMINAL_INPUT,
+                GetConsoleMode, GetStdHandle, SetConsoleMode, ENABLE_ECHO_INPUT, ENABLE_LINE_INPUT,
+                ENABLE_PROCESSED_INPUT, ENABLE_VIRTUAL_TERMINAL_INPUT,
                 ENABLE_VIRTUAL_TERMINAL_PROCESSING, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE,
             };
             let mut rm = RawMode {
@@ -302,8 +302,7 @@ fn term_size() -> Option<(u32, u32)> {
     #[cfg(windows)]
     unsafe {
         use windows_sys::Win32::System::Console::{
-            GetConsoleScreenBufferInfo, GetStdHandle, CONSOLE_SCREEN_BUFFER_INFO,
-            STD_OUTPUT_HANDLE,
+            GetConsoleScreenBufferInfo, GetStdHandle, CONSOLE_SCREEN_BUFFER_INFO, STD_OUTPUT_HANDLE,
         };
         let mut info: CONSOLE_SCREEN_BUFFER_INFO = std::mem::zeroed();
         if GetConsoleScreenBufferInfo(GetStdHandle(STD_OUTPUT_HANDLE), &mut info) != 0 {

@@ -14,9 +14,16 @@ use tokio::net::TcpStream;
 
 const DEFAULT_PORT: u16 = 22022;
 
-/// `agent ssh-exec [--port <n>] -- <command...>`
+/// `agent ssh-exec [--port <n>] [--stdin-file <path>] -- <command...>`
 pub async fn run(args: &[String]) -> Result<()> {
-    let (port, command) = parse(args)?;
+    let (port, stdin_file, command) = parse(args)?;
+
+    // Read the artifact up front. A deploy binary is tens of MB — fine in a CI
+    // runner's memory, and it keeps `exec_over_stream` free of filesystem concerns.
+    let stdin = match &stdin_file {
+        Some(p) => Some(std::fs::read(p).map_err(|e| anyhow!("read --stdin-file {p}: {e}"))?),
+        None => None,
+    };
 
     let proxy_addr = std::env::var("ANKAYMA_SOCKS_PROXY").map_err(|_| {
         anyhow!("ANKAYMA_SOCKS_PROXY not set — run this under `agent ci-deploy --exec`")
@@ -45,7 +52,8 @@ pub async fn run(args: &[String]) -> Result<()> {
     // Ephemeral — never written to disk, matching ci_deploy's ephemeral WG
     // keypair (both die with this one CI run).
     let key = MeshSshKey::generate_ephemeral()?;
-    let (code, output) = SshSession::exec_over_stream(stream, &opts, &key, &command).await?;
+    let (code, output) =
+        SshSession::exec_over_stream(stream, &opts, &key, &command, stdin.as_deref()).await?;
 
     tokio::io::stdout().write_all(&output).await.ok();
     std::process::exit(code as i32);
@@ -94,8 +102,9 @@ async fn socks5_connect(proxy_addr: &str, target_ip: &str, target_port: u16) -> 
     Ok(stream)
 }
 
-fn parse(args: &[String]) -> Result<(u16, String)> {
+fn parse(args: &[String]) -> Result<(u16, Option<String>, String)> {
     let mut port = DEFAULT_PORT;
+    let mut stdin_file: Option<String> = None;
     let mut rest: Vec<String> = Vec::new();
     let mut it = args.iter();
     while let Some(a) = it.next() {
@@ -107,12 +116,19 @@ fn parse(args: &[String]) -> Result<(u16, String)> {
                     .parse()
                     .map_err(|_| anyhow!("--port must be a number"))?;
             }
+            "--stdin-file" => {
+                stdin_file = Some(
+                    it.next()
+                        .ok_or_else(|| anyhow!("--stdin-file needs a path"))?
+                        .clone(),
+                );
+            }
             "--" => rest.extend(it.by_ref().cloned()),
             other => rest.push(other.to_string()),
         }
     }
     if rest.is_empty() {
-        bail!("usage: agent ssh-exec [--port <n>] -- <command...>");
+        bail!("usage: agent ssh-exec [--port <n>] [--stdin-file <path>] -- <command...>");
     }
-    Ok((port, rest.join(" ")))
+    Ok((port, stdin_file, rest.join(" ")))
 }

@@ -280,11 +280,19 @@ impl SshSession {
     /// Same auth + host-key-pinning + elevation-grant rules as [`Self::connect`]
     /// — just a single command instead of an interactive shell, and the network
     /// transport is supplied by the caller instead of resolved from `opts.host`.
+    ///
+    /// `stdin` feeds the remote command's standard input and is closed (EOF) once
+    /// sent, so `sudo tee <path>` on the far side writes a file and exits. That is
+    /// what lets a secretless deploy *ship an artifact* over the mesh: exec alone
+    /// can restart a service but cannot deliver the new binary, and the embedded
+    /// server has piped channel data → child stdin since the exec handler landed
+    /// (`ssh_server::data`). No SFTP/SCP subsystem is involved. `[T:ci-deploy exec]`
     pub async fn exec_over_stream<S>(
         stream: S,
         opts: &SshConnectOptions,
         key: &MeshSshKey,
         command: &str,
+        stdin: Option<&[u8]>,
     ) -> Result<(u32, Vec<u8>)>
     where
         S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
@@ -349,6 +357,20 @@ impl SshSession {
             .await
             .map_err(|e| anyhow!("exec: {e}"))?;
 
+        // Payload first, then EOF — the remote command sees a finite stdin and can
+        // exit. russh windows the writes, so a multi-MB artifact streams rather
+        // than landing in one frame.
+        if let Some(bytes) = stdin {
+            channel
+                .data(bytes)
+                .await
+                .map_err(|e| anyhow!("stream stdin to remote command: {e}"))?;
+            channel
+                .eof()
+                .await
+                .map_err(|e| anyhow!("close remote stdin: {e}"))?;
+        }
+
         let mut output = Vec::new();
         let mut code: u32 = 1;
         loop {
@@ -361,9 +383,7 @@ impl SshSession {
                 None => break,
             }
         }
-        let _ = handle
-            .disconnect(Disconnect::ByApplication, "", "en")
-            .await;
+        let _ = handle.disconnect(Disconnect::ByApplication, "", "en").await;
         Ok((code, output))
     }
 
