@@ -728,11 +728,16 @@ async fn start_embedded_ssh(
     });
 }
 
-/// [F-2] Firewall advisory for the embedded-server port. On a Linux node with `ufw`
-/// in default-deny, the overlay port must be explicitly allowed or clients time out
-/// (packets dropped before the listener). We do NOT silently edit the firewall: by
-/// default PRINT the exact command; `ANKAYMA_SSH_OPEN_FIREWALL=1` lets the agent add
-/// the rule itself (root-approved opt-in). `[T:P.2 no silent side-effects]`
+/// [F-2] Firewall for the embedded-server port. On a Linux node with `ufw` in
+/// default-deny, the overlay port must be allowed or clients time out (packets
+/// dropped before the listener). The rule is scoped to the overlay interface — it
+/// admits ONLY authenticated WireGuard mesh peers, the same trust boundary as the
+/// overlay-only bind (A.1.6) and `Authorizer::TrustOverlay`. So the agent opening
+/// its own mesh port is not the "silent side-effect on the host firewall" P.2 warns
+/// about; leaving it shut is the real footgun — F-2 mesh SSH silently times out on
+/// every headless server, which is the core NoSecret-CI deploy target. So we open it
+/// by DEFAULT and log it; `ANKAYMA_SSH_NO_FIREWALL=1` opts out for operators who
+/// manage the firewall out of band. `[T:A.1.6 overlay-only + P.6 dogfood]`
 #[cfg(target_os = "linux")]
 fn advise_firewall(port: u16, iface: &str) {
     let status = std::process::Command::new("ufw")
@@ -755,35 +760,34 @@ fn advise_firewall(port: u16, iface: &str) {
         return;
     }
     let manual = format!("ufw allow in on {iface} to any port {port} proto tcp");
-    let opt_in = std::env::var("ANKAYMA_SSH_OPEN_FIREWALL")
+    let opt_out = std::env::var("ANKAYMA_SSH_NO_FIREWALL")
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
         .unwrap_or(false);
-    if opt_in {
-        let ok = std::process::Command::new("ufw")
-            .args([
-                "allow",
-                "in",
-                "on",
-                iface,
-                "to",
-                "any",
-                "port",
-                &port.to_string(),
-                "proto",
-                "tcp",
-            ])
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false);
-        if ok {
-            println!("[F-2] firewall: opened {port}/tcp on {iface} (ANKAYMA_SSH_OPEN_FIREWALL=1)");
-        } else {
-            eprintln!("[F-2] firewall: could not auto-open {port} — run: {manual}");
-        }
+    if opt_out {
+        eprintln!("[F-2] ⚠ ufw active, {port}/tcp NOT opened (ANKAYMA_SSH_NO_FIREWALL=1) —");
+        eprintln!("[F-2]   SSH clients will TIME OUT until you allow it: {manual}");
+        return;
+    }
+    let ok = std::process::Command::new("ufw")
+        .args([
+            "allow",
+            "in",
+            "on",
+            iface,
+            "to",
+            "any",
+            "port",
+            &port.to_string(),
+            "proto",
+            "tcp",
+        ])
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if ok {
+        println!("[F-2] firewall: opened {port}/tcp on {iface} (overlay-only; set ANKAYMA_SSH_NO_FIREWALL=1 to skip)");
     } else {
-        eprintln!("[F-2] ⚠ ufw is active — SSH clients will TIME OUT until you allow the port:");
-        eprintln!("[F-2]     {manual}");
-        eprintln!("[F-2]   (or set ANKAYMA_SSH_OPEN_FIREWALL=1 so the agent adds it on start)");
+        eprintln!("[F-2] firewall: could not auto-open {port} on {iface} — run: {manual}");
     }
 }
 
