@@ -302,6 +302,12 @@ pub struct JoinEnrollRequest {
     pub hostname: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub endpoint: Option<String>,
+    /// Workload classification (Part B §B.1.4). A headless server enrolled via join
+    /// token sets `AppServer`, matching the session-authed `enroll` path; the control
+    /// plane's `join_enroll` accepts the same field (`JoinEnrollReq.workload_kind`).
+    /// `None` for an ordinary app-device join. `[T:Part B §B.1.4]`
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub workload_kind: Option<String>,
     /// See `domain::EnrollRequest::machine_proof`. Redeeming an invite also lifts an
     /// administrator's revocation of this device — the invite IS the re-admission.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1425,6 +1431,7 @@ mod tests {
             public_key: "x".into(),
             hostname: "h".into(),
             endpoint: None,
+            workload_kind: None,
             machine_proof: None,
         };
         let err = enroll_via_join_token(&http, "https://cp.ankayma.com", &req)
@@ -1479,6 +1486,7 @@ mod tests {
                 public_key: kp.public_b64,
                 hostname: "layer2-regression-e3".into(),
                 endpoint: None,
+                workload_kind: None,
                 machine_proof: None,
             },
         )

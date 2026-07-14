@@ -628,8 +628,8 @@ impl Config {
         let mut control_plane = std::env::var("ANKAYMA_CONTROL_PLANE")
             .unwrap_or_else(|_| DEFAULT_CONTROL_PLANE.to_string());
         let mut token = std::env::var("ANKAYMA_TOKEN").ok();
-        // Cloud-init user-data sets this on DO/other clouds so a fresh droplet joins
-        // headlessly with no SSH. `[T:plan-do-1click-image Phase A-a]`
+        // Cloud-init user-data can set this so a fresh cloud instance joins the mesh
+        // headlessly on first boot, with no SSH. [A: headless golden-image enroll]
         let mut join_token = std::env::var("ANKAYMA_JOIN_TOKEN").ok();
         let mut listen_port = DEFAULT_LISTEN_PORT;
         let mut state_path = default_state_path();

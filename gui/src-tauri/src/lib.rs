@@ -1242,6 +1242,8 @@ async fn join_enroll_node(
         public_key: kp.public_b64.clone(),
         hostname,
         endpoint: None,
+        // An app device joining its own tenant is not a server node. [T:Part B §B.1.4]
+        workload_kind: None,
         machine_proof: Some(proof),
     };
     let resp = adapters::enroll_via_join_token(&state.http, &state.regional_base_url(), &req)
