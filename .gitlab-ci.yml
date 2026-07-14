@@ -73,11 +73,13 @@ gui-check-linux:
   script:
     - cargo check -p ankayma-gui --locked
 
-# ── Build + Sign (main branch + tags) ───────────────────────────────────────
+# ── Build + Sign (TAGS ONLY — release artifact) ─────────────────────────────
+# Chỉ chạy khi tag. Main push KHÔNG cần binary đã ký này: control-plane deploy lấy
+# agent từ get.ankayma.com (publish bởi GitHub release-linux), không fetch artifact
+# GitLab nữa. Bỏ rule main = tiết kiệm 1 lần compile release mỗi push (compute-minutes).
 sign:
   stage: sign
   rules:
-    - if: '$CI_COMMIT_BRANCH == "main"'
     - if: '$CI_COMMIT_TAG'
   before_script:
     - apt-get update -qq && apt-get install -y -qq curl
@@ -115,8 +117,8 @@ sign:
 # [T:A.1.21]. install.sh (scripts/) consumes exactly these artifact names.
 build-linux:
   stage: sign
+  # TAGS ONLY (như sign) — musl build là artifact release, main push không dùng.
   rules:
-    - if: '$CI_COMMIT_BRANCH == "main"'
     - if: '$CI_COMMIT_TAG'
   before_script:
     - apt-get update -qq && apt-get install -y -qq curl musl-tools
