@@ -23,7 +23,7 @@ use std::process::Command;
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
-use agent_core::domain::EnrollRequest;
+use agent_core::domain::{EnrollRequest, EnrollResponse};
 use agent_core::pump::{self, Peers}; // shared packet pump (tx/rx/timers + peer roster)
 use agent_core::tunnel::StaticSecret;
 use agent_core::{adapters, reqwest, WgKeypair};
@@ -233,11 +233,11 @@ pub(crate) async fn serve_dataplane(
             .with_context(|| format!("bind udp/{}", state.listen_port))?,
     );
 
-    // [port-to-Windows] Windows Firewall default-denies unsolicited inbound UDP, so
-    // peers' handshake RESPONSES get dropped and every session stalls re-initiating —
-    // the classic WireGuard-on-Windows symptom (the official WG client installs this
-    // rule too). Advise the exact netsh command; the elevated daemon adds it itself on
-    // the ANKAYMA_OPEN_FIREWALL=1 opt-in. No-op off Windows. `[T:P.2 no silent side-effects]`
+    // Open the WireGuard data-plane port so peers that must INITIATE to this node (an
+    // ephemeral CI runner, a node behind NAT) can hand-shake in — a default-deny host
+    // firewall drops those packets and the mesh silently half-works. Handled on Linux
+    // (ufw) and Windows (netsh), by default; `ANKAYMA_NO_FIREWALL=1` opts out. No-op on
+    // macOS/iOS/Android (no port firewall on by default / client-only). `[T:A.1.6 + P.6]`
     advise_wg_firewall(state.listen_port);
 
     let peers: Peers = Arc::new(Mutex::new(Vec::new()));
@@ -615,6 +615,10 @@ fn spawn_owned_subdomain_tasks(
 struct Config {
     control_plane: String,
     token: Option<String>,
+    /// Scoped, short-lived, single-use join token (E-3). Preferred over `token` for
+    /// initial enrollment: a golden image / MOTD carries this, never a full-power
+    /// session token. `[T:P.3 + part-d-invite-flow.md §3]`
+    join_token: Option<String>,
     listen_port: u16,
     state_path: String,
 }
@@ -624,6 +628,9 @@ impl Config {
         let mut control_plane = std::env::var("ANKAYMA_CONTROL_PLANE")
             .unwrap_or_else(|_| DEFAULT_CONTROL_PLANE.to_string());
         let mut token = std::env::var("ANKAYMA_TOKEN").ok();
+        // Cloud-init user-data sets this on DO/other clouds so a fresh droplet joins
+        // headlessly with no SSH. `[T:plan-do-1click-image Phase A-a]`
+        let mut join_token = std::env::var("ANKAYMA_JOIN_TOKEN").ok();
         let mut listen_port = DEFAULT_LISTEN_PORT;
         let mut state_path = default_state_path();
 
@@ -634,6 +641,9 @@ impl Config {
                     control_plane = it.next().context("--control-plane needs a value")?.clone()
                 }
                 "--token" => token = Some(it.next().context("--token needs a value")?.clone()),
+                "--join-token" => {
+                    join_token = Some(it.next().context("--join-token needs a value")?.clone())
+                }
                 "--port" => {
                     listen_port = it
                         .next()
@@ -648,6 +658,7 @@ impl Config {
         Ok(Config {
             control_plane,
             token,
+            join_token,
             listen_port,
             state_path,
         })
@@ -736,81 +747,131 @@ async fn start_embedded_ssh(
 /// its own mesh port is not the "silent side-effect on the host firewall" P.2 warns
 /// about; leaving it shut is the real footgun — F-2 mesh SSH silently times out on
 /// every headless server, which is the core NoSecret-CI deploy target. So we open it
-/// by DEFAULT and log it; `ANKAYMA_SSH_NO_FIREWALL=1` opts out for operators who
-/// manage the firewall out of band. `[T:A.1.6 overlay-only + P.6 dogfood]`
+/// by DEFAULT and log it; `ANKAYMA_NO_FIREWALL=1` opts out for operators who manage
+/// the firewall out of band. `[T:A.1.6 overlay-only + P.6 dogfood]`
 #[cfg(target_os = "linux")]
 fn advise_firewall(port: u16, iface: &str) {
+    // F-2 mesh SSH — scope to the overlay interface: only authenticated WG peers.
+    ufw_open(
+        port,
+        "tcp",
+        Some(iface),
+        "[F-2]",
+        "mesh SSH clients time out",
+    );
+}
+
+/// Open EVERY inbound port the agent needs on a headless Linux node with `ufw`
+/// active — one place, so adding a port never turns into whack-a-mole (open one,
+/// hit the next failure). The rule is added by DEFAULT and logged; a single
+/// `ANKAYMA_NO_FIREWALL=1` opts out of all of it (operator manages the firewall out
+/// of band). `iface = Some(overlay)` scopes the rule to the mesh interface (mesh-only
+/// exposure, A.1.6). `iface = None` is a public port — used only for the WireGuard
+/// data plane, safe to expose because WG authenticates every packet by key and
+/// silently drops anything unsigned. `[T:A.1.6 overlay-only + P.6 dogfood]`
+#[cfg(target_os = "linux")]
+fn ufw_open(port: u16, proto: &str, iface: Option<&str>, tag: &str, why_if_shut: &str) {
     let status = std::process::Command::new("ufw")
         .arg("status")
         .output()
         .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
         .unwrap_or_default();
     if !status.contains("Status: active") {
-        // No ufw (or inactive). If iptables/nftables default-deny is in use, the
-        // operator must open the port themselves — we can't reliably detect that.
+        // No ufw (or inactive). An iptables/nftables default-deny we can't reliably
+        // detect — the operator opens it themselves in that case.
         return;
     }
-    // Already allowed? Confirm so the operator can see the port is open, and don't
-    // nag. (Matches a status line like "22022/tcp ... ALLOW".)
+    let port_proto = format!("{port}/{proto}");
+    let manual = match iface {
+        Some(i) => format!("ufw allow in on {i} to any port {port} proto {proto}"),
+        None => format!("ufw allow {port_proto}"),
+    };
+    // Already allowed? Don't nag. (Status line like "22022/tcp on ank0 ALLOW" or
+    // "51820/udp ... ALLOW".)
     if status
         .lines()
-        .any(|l| l.contains(&port.to_string()) && l.contains("ALLOW"))
+        .any(|l| l.contains(&port_proto) && l.contains("ALLOW"))
     {
-        println!("[F-2] firewall: ufw active, port {port}/tcp already allowed ✓");
+        println!("{tag} firewall: {port_proto} already allowed ✓");
         return;
     }
-    let manual = format!("ufw allow in on {iface} to any port {port} proto tcp");
-    let opt_out = std::env::var("ANKAYMA_SSH_NO_FIREWALL")
+    if std::env::var("ANKAYMA_NO_FIREWALL")
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(false);
-    if opt_out {
-        eprintln!("[F-2] ⚠ ufw active, {port}/tcp NOT opened (ANKAYMA_SSH_NO_FIREWALL=1) —");
-        eprintln!("[F-2]   SSH clients will TIME OUT until you allow it: {manual}");
+        .unwrap_or(false)
+    {
+        eprintln!("{tag} ⚠ ufw active, {port_proto} NOT opened (ANKAYMA_NO_FIREWALL=1) —");
+        eprintln!("{tag}   {why_if_shut} until you allow it: {manual}");
         return;
     }
-    let ok = std::process::Command::new("ufw")
-        .args([
-            "allow",
-            "in",
-            "on",
-            iface,
-            "to",
-            "any",
-            "port",
-            &port.to_string(),
-            "proto",
-            "tcp",
-        ])
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false);
-    if ok {
-        println!("[F-2] firewall: opened {port}/tcp on {iface} (overlay-only; set ANKAYMA_SSH_NO_FIREWALL=1 to skip)");
+    let pstr = port.to_string();
+    let ok = if let Some(i) = iface {
+        std::process::Command::new("ufw")
+            .args([
+                "allow", "in", "on", i, "to", "any", "port", &pstr, "proto", proto,
+            ])
+            .status()
     } else {
-        eprintln!("[F-2] firewall: could not auto-open {port} on {iface} — run: {manual}");
+        std::process::Command::new("ufw")
+            .args(["allow", &port_proto])
+            .status()
+    }
+    .map(|s| s.success())
+    .unwrap_or(false);
+    if ok {
+        let scope = if iface.is_some() {
+            "overlay-only"
+        } else {
+            "public; WG key-authenticated"
+        };
+        println!(
+            "{tag} firewall: opened {port_proto} ({scope}; set ANKAYMA_NO_FIREWALL=1 to skip)"
+        );
+    } else {
+        eprintln!("{tag} firewall: could not auto-open {port_proto} — run: {manual}");
     }
 }
 
-/// [F-2 port-to-Windows] Windows Firewall drops inbound tcp/22022 by default, so a
-/// mesh SSH client times out reaching a Windows node as a *target*. Mirrors the WG
-/// advisory (`advise_wg_firewall`) and the Linux P.2 stance: PRINT the exact netsh
-/// command; only auto-add on the `ANKAYMA_OPEN_FIREWALL=1` opt-in (the daemon runs
-/// elevated). `[T:P.2 no silent side-effects]`
+/// [wg] WireGuard data-plane inbound. A default-deny `ufw` drops peers' handshake
+/// packets, so any peer that must INITIATE to this node (an ephemeral CI runner, a
+/// node behind NAT) never connects — the mesh silently half-works. Public port,
+/// key-authenticated: open by default. `[T:A.1.6 + P.6]`
+#[cfg(target_os = "linux")]
+fn advise_wg_firewall(port: u16) {
+    ufw_open(
+        port,
+        "udp",
+        None,
+        "[wg]",
+        "peers can't hand-shake in (data plane)",
+    );
+}
+
 #[cfg(target_os = "windows")]
 fn advise_firewall(port: u16, _iface: &str) {
-    let rule = format!("Ankayma mesh ssh tcp/{port}");
+    // Mesh SSH target port. Windows Firewall has no interface-scoping like ufw, so
+    // the rule is by port — safe: the SSH server binds the overlay address only.
+    netsh_open(port, "TCP", "[F-2]", "mesh SSH clients time out");
+}
+
+/// Windows analogue of `ufw_open`: add by DEFAULT the inbound rule the agent needs
+/// (the daemon runs elevated) and log it; `ANKAYMA_NO_FIREWALL=1` opts out — the same
+/// switch as Linux, so "don't touch my firewall" is one flag on every platform.
+/// Leaving the port shut is the real footgun: a Windows node used as a mesh SSH target
+/// or a WG peer others initiate to silently times out. `[T:A.1.6 + P.6 dogfood]`
+#[cfg(target_os = "windows")]
+fn netsh_open(port: u16, proto: &str, tag: &str, why_if_shut: &str) {
+    let rule = format!("Ankayma mesh {proto}/{port}");
     let manual = format!(
-        "netsh advfirewall firewall add rule name=\"{rule}\" dir=in action=allow protocol=TCP localport={port}"
+        "netsh advfirewall firewall add rule name=\"{rule}\" dir=in action=allow protocol={proto} localport={port}"
     );
-    let opt_in = std::env::var("ANKAYMA_OPEN_FIREWALL")
+    if std::env::var("ANKAYMA_NO_FIREWALL")
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(false);
-    if !opt_in {
-        eprintln!("[F-2] ⚠ Windows Firewall drops inbound tcp/{port} — mesh SSH clients time out until allowed:");
-        eprintln!("[F-2]     {manual}");
+        .unwrap_or(false)
+    {
         eprintln!(
-            "[F-2]   (or set ANKAYMA_OPEN_FIREWALL=1 so the elevated daemon adds it on start)"
+            "{tag} ⚠ Windows Firewall drops inbound {proto}/{port} (ANKAYMA_NO_FIREWALL=1) —"
         );
+        eprintln!("{tag}   {why_if_shut} until you allow it: {manual}");
         return;
     }
     let ok = std::process::Command::new("netsh")
@@ -822,67 +883,43 @@ fn advise_firewall(port: u16, _iface: &str) {
             &format!("name={rule}"),
             "dir=in",
             "action=allow",
-            "protocol=TCP",
+            &format!("protocol={proto}"),
             &format!("localport={port}"),
         ])
         .status()
         .map(|s| s.success())
         .unwrap_or(false);
     if ok {
-        println!("[F-2] firewall: allowed inbound tcp/{port} (ANKAYMA_OPEN_FIREWALL=1)");
+        println!(
+            "{tag} firewall: allowed inbound {proto}/{port} (set ANKAYMA_NO_FIREWALL=1 to skip)"
+        );
     } else {
-        eprintln!("[F-2] firewall: could not add the rule — run elevated: {manual}");
+        eprintln!("{tag} firewall: could not add the rule — run elevated: {manual}");
     }
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "windows")))]
 fn advise_firewall(_port: u16, _iface: &str) {}
 
-/// [port-to-Windows] Inbound allow for the data-plane UDP listen port. Windows Firewall
-/// drops peers' handshake replies by default, so the overlay never establishes (ping /
-/// SSH / Open all time out at the tunnel). Mirrors the Linux `advise_firewall` P.2
-/// stance: PRINT the exact netsh command; only auto-add on the `ANKAYMA_OPEN_FIREWALL=1`
-/// opt-in (the daemon already runs elevated). `[T:P.2 no silent side-effects]`
+/// [port-to-Windows] Inbound allow for the data-plane UDP listen port — peers' handshake
+/// packets are dropped until it is open, so the overlay never establishes. Default-on
+/// via [`netsh_open`], like the Linux path.
 #[cfg(target_os = "windows")]
 fn advise_wg_firewall(port: u16) {
-    let rule = format!("Ankayma mesh udp/{port}");
-    let manual = format!(
-        "netsh advfirewall firewall add rule name=\"{rule}\" dir=in action=allow protocol=UDP localport={port}"
+    netsh_open(
+        port,
+        "UDP",
+        "[wg]",
+        "peers can't hand-shake in (data plane)",
     );
-    let opt_in = std::env::var("ANKAYMA_OPEN_FIREWALL")
-        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(false);
-    if !opt_in {
-        eprintln!("[wg] ⚠ Windows Firewall will DROP peer handshake replies until inbound udp/{port} is allowed:");
-        eprintln!("[wg]     {manual}");
-        eprintln!(
-            "[wg]   (or set ANKAYMA_OPEN_FIREWALL=1 so the elevated daemon adds it on start)"
-        );
-        return;
-    }
-    let ok = std::process::Command::new("netsh")
-        .args([
-            "advfirewall",
-            "firewall",
-            "add",
-            "rule",
-            &format!("name={rule}"),
-            "dir=in",
-            "action=allow",
-            "protocol=UDP",
-            &format!("localport={port}"),
-        ])
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false);
-    if ok {
-        println!("[wg] firewall: allowed inbound udp/{port} (ANKAYMA_OPEN_FIREWALL=1)");
-    } else {
-        eprintln!("[wg] firewall: could not add the rule — run elevated: {manual}");
-    }
 }
 
-#[cfg(not(target_os = "windows"))]
+// macOS (+ other unix): no port-based host firewall on by default — the macOS
+// Application Firewall is per-app and off by default, and we don't manage pf. Nodes
+// there work without opening ports; if the operator turns the app firewall on, macOS
+// prompts per-app in the GUI (not ours to script). iOS/Android are client-only and
+// cannot host an inbound listener, so there is nothing to open there either.
+#[cfg(not(any(target_os = "windows", target_os = "linux")))]
 fn advise_wg_firewall(_port: u16) {}
 
 // [slice 2] Live data-plane status, published for the GUI to read. The GUI runs
@@ -994,34 +1031,100 @@ async fn load_or_enroll(http: &reqwest::Client, cfg: &Config) -> Result<AgentSta
         }
     }
 
+    // Fresh enroll. Prefer a scoped join token (headless server path) over a full
+    // session token so a golden image / MOTD never redeems a full-power secret —
+    // the join token is single-use + short-TTL and enrolls this node directly.
+    // `[T:P.3 honest-power + part-d-invite-flow.md §3 join redeem]`
+    if let Some(join_token) = cfg.join_token.clone() {
+        return enroll_via_join_and_persist(http, cfg, &join_token, None).await;
+    }
     let token = cfg.token.clone().ok_or_else(|| {
-        anyhow!("initial enrollment requires --token <session_token> or ANKAYMA_TOKEN")
+        anyhow!(
+            "initial enrollment requires --join-token <token> / ANKAYMA_JOIN_TOKEN \
+             (scoped, preferred) or --token <session_token> / ANKAYMA_TOKEN"
+        )
     })?;
     enroll_and_persist(http, cfg, &token, None).await
 }
 
-/// Enroll (or idempotently re-enroll, if `existing` carries a keypair already
-/// known to the control plane) and persist the resulting identity. Reusing
-/// `existing`'s keypair on re-enroll — rather than generating a new one — is what
-/// makes this idempotent: the enrollment endpoint keys a persistent node on its
-/// enrolled public key, so the same key returns the same node.
-///
-/// The machine proof makes that idempotency survive losing the keypair as well: the
-/// server matches the DEVICE, so a rebuilt `agent.json` rotates the node's key in
-/// place. A headless node has no keystore, so the machine key is a 0600 file beside
-/// `agent.json`. It is NOT derived from `/etc/machine-id`, which systemd itself
-/// generates randomly and forbids putting on the network. `[T:man 5 machine-id]`
-///
-/// Golden images must ship without `machine.key`, exactly as systemd requires for
-/// `/etc/machine-id`: every clone would otherwise be the same device and fight over
-/// one node. `[T:systemd.io/BUILDING_IMAGES]`
+/// Session-authed enroll (or idempotent re-enroll if `existing` carries a known
+/// keypair) and persist the resulting identity. Shares the keypair/machine-proof
+/// prelude with the join path via `enroll_inputs`; see it for the idempotency and
+/// golden-image `machine.key` rules.
 async fn enroll_and_persist(
     http: &reqwest::Client,
     cfg: &Config,
     token: &str,
     existing: Option<AgentState>,
 ) -> Result<AgentState> {
-    let kp = match &existing {
+    let (kp, proof, endpoint) = enroll_inputs(cfg, &existing)?;
+    println!("enrolling node (advertising endpoint {endpoint})…");
+
+    let req = EnrollRequest {
+        public_key: kp.public_b64.clone(),
+        hostname: hostname(),
+        endpoint: Some(endpoint),
+        // [T:Part B §B.1.4] server nodes default to AppServer.
+        workload_kind: Some("AppServer".to_string()),
+        machine_proof: Some(proof),
+    };
+    let resp = adapters::enroll(http, &cfg.control_plane, token, &req)
+        .await
+        .map_err(|e| anyhow!("enroll: {e}"))?;
+
+    finalize_enroll(cfg, kp, resp)
+}
+
+/// Fresh enroll via a scoped E-3 join token — the headless-server path. Same
+/// idempotent keypair + machine-proof prelude and identical `EnrollResponse`
+/// handling as `enroll_and_persist`; only the request/endpoint differ (no Bearer,
+/// the join token IS the authorization — A.1.10/A.1.22). The node is tagged
+/// `AppServer` (Part B §B.1.4) via the control plane's `join_enroll` workload_kind.
+/// `[T:part-d-invite-flow.md §3 + A.1.10]`
+async fn enroll_via_join_and_persist(
+    http: &reqwest::Client,
+    cfg: &Config,
+    join_token: &str,
+    existing: Option<AgentState>,
+) -> Result<AgentState> {
+    let (kp, proof, endpoint) = enroll_inputs(cfg, &existing)?;
+    println!("enrolling node via join token (advertising endpoint {endpoint})…");
+
+    let req = adapters::JoinEnrollRequest {
+        join_token: join_token.to_string(),
+        public_key: kp.public_b64.clone(),
+        hostname: hostname(),
+        endpoint: Some(endpoint),
+        // [T:Part B §B.1.4] a headless node enrolled by `agent up` is a server.
+        workload_kind: Some("AppServer".to_string()),
+        machine_proof: Some(proof),
+    };
+    let resp = adapters::enroll_via_join_token(http, &cfg.control_plane, &req)
+        .await
+        .map_err(|e| anyhow!("join enroll: {e}"))?;
+
+    finalize_enroll(cfg, kp, resp)
+}
+
+/// Shared enrollment prelude: the (idempotent) keypair, this device's machine
+/// proof over it, and the advertised LAN endpoint. Reusing `existing`'s keypair —
+/// rather than generating a new one — is what makes a re-enroll idempotent: the
+/// control plane keys a persistent node on its enrolled public key, so the same
+/// key returns the same node. The machine proof makes that survive losing the
+/// keypair too: the server matches the DEVICE, so a rebuilt `agent.json` rotates
+/// the node's key in place.
+///
+/// The machine key is a 0600 file beside `agent.json` (a headless node has no
+/// keystore). It is NOT derived from `/etc/machine-id`, which systemd generates
+/// randomly and forbids putting on the network. Golden images must ship without
+/// `machine.key`, exactly as systemd requires for `/etc/machine-id`: every clone
+/// would otherwise be the same device and fight over one node.
+/// `[T:man 5 machine-id + systemd.io/BUILDING_IMAGES]`
+fn enroll_inputs(
+    cfg: &Config,
+    existing: &Option<AgentState>,
+) -> Result<(WgKeypair, String, String)> {
+    let kp = match existing {
         Some(s) => WgKeypair {
             private_b64: s.private_b64.clone(),
             public_b64: s.public_b64.clone(),
@@ -1040,20 +1143,13 @@ async fn enroll_and_persist(
 
     let lan_ip = detect_lan_ip().context("detect this machine's LAN IP")?;
     let endpoint = format!("{lan_ip}:{}", cfg.listen_port);
-    println!("enrolling node (advertising endpoint {endpoint})…");
+    Ok((kp, proof, endpoint))
+}
 
-    let req = EnrollRequest {
-        public_key: kp.public_b64.clone(),
-        hostname: hostname(),
-        endpoint: Some(endpoint),
-        // [T:Part B §B.1.4] server nodes default to AppServer.
-        workload_kind: Some("AppServer".to_string()),
-        machine_proof: Some(proof),
-    };
-    let resp = adapters::enroll(http, &cfg.control_plane, token, &req)
-        .await
-        .map_err(|e| anyhow!("enroll: {e}"))?;
-
+/// Handle the `EnrollResponse` common to both enroll paths: warn on a missing node
+/// service token, sanity-check the Layer 2 cert chain, then build + persist the
+/// `AgentState`.
+fn finalize_enroll(cfg: &Config, kp: WgKeypair, resp: EnrollResponse) -> Result<AgentState> {
     if resp.node_service_token.is_none() {
         eprintln!(
             "warning: control-plane did not return a node service token (pre-migration 015). \
@@ -1556,6 +1652,31 @@ fn reconcile_new_and_stale_peers(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `--join-token` parses into `Config.join_token`; the session `--token` stays
+    /// independent so `load_or_enroll` can prefer the scoped token. Uses only
+    /// explicit args (no env mutation) so it is deterministic under parallel tests.
+    /// [T:P.3 headless enroll]
+    #[test]
+    fn parse_join_token_flag() {
+        let args = [
+            "--control-plane".to_string(),
+            "https://cp.example".to_string(),
+            "--join-token".to_string(),
+            "scoped-abc".to_string(),
+        ];
+        let cfg = Config::parse(&args).unwrap();
+        assert_eq!(cfg.join_token.as_deref(), Some("scoped-abc"));
+        assert_eq!(cfg.control_plane, "https://cp.example");
+    }
+
+    /// `--join-token` needs a value — a trailing flag is a parse error, not a
+    /// silent empty token that would fail confusingly at enroll time.
+    #[test]
+    fn parse_join_token_requires_value() {
+        let args = ["--join-token".to_string()];
+        assert!(Config::parse(&args).is_err());
+    }
 
     /// agent.json written by a pre-Layer-2 daemon must keep loading: every
     /// Layer 2 field is `#[serde(default)]` → None. [T per P.4 compose]
