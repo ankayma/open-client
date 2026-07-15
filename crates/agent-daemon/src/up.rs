@@ -265,13 +265,18 @@ pub(crate) async fn serve_dataplane(
     // never on the tun fd itself — no DnsResponder needed here (iOS-only, no
     // split-DNS hook to piggyback on).
     let tun = tun_handle;
-    pump::spawn_tx(tun.clone(), udp.clone(), peers.clone(), None);
+    // Relay fallback path (Decision D-T1) is not activated yet: no relay-endpoint
+    // distribution from the control plane, so both pump legs run direct-UDP only
+    // (relay = None → exact prior behaviour). Wiring the relay in is gated on the
+    // CP handing this node a relay endpoint per product line. `[T: part-d-transport-connectivity §5]`
+    pump::spawn_tx(tun.clone(), udp.clone(), peers.clone(), None, None);
     pump::spawn_rx(tun, udp.clone(), peers.clone());
     pump::spawn_timers(
         udp.clone(),
         peers.clone(),
         static_private.clone(),
         index.clone(),
+        None,
     );
 
     // [F-3] Private DNS for branded names while the overlay is up: resolve the
