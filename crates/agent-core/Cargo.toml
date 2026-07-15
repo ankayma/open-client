@@ -54,6 +54,12 @@ portable-pty = "0.9"
 ed25519-dalek = "2"
 # base64 for the grant token wire form (already in-tree via daemon). `[T:base64@0.22]`
 base64 = "0.22"
+# [T: Decision D-T1, part-d-transport-connectivity §5] Relay wire codec (DERP-style
+# NAT-fallback frame protocol). FIRST-PARTY: the OPEN contract owned by the `relay`
+# repo (SSOT, §D.9.5 rule 3 — "the agent later embeds relay-core"). std-only, dep-free
+# (tiny TCB). Path dep during the prototype; flips to a versioned crate dependency once
+# relay-core is published (trigger: relay boundary-review passes).
+relay-core = { path = "../../../relay/crates/relay-core" }
 
 # [T:A.1.21] Windows TUN via Wintun (NDIS miniport L3 adapter). We use the OFFICIAL
 # signed driver from the WireGuard team — we do NOT build or sign a kernel driver
