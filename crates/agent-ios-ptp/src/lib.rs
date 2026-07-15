@@ -384,13 +384,16 @@ fn start_inner(fd: i32, config_json: &str, bound_if: u32) -> Result<Box<PtpHandl
     );
 
     let tun = agent_core::tundev::TunHandle::Fd(fd);
-    pump::spawn_tx(tun.clone(), udp.clone(), peers.clone(), p.dns);
+    // relay = None: NAT-fallback relay not activated yet (Decision D-T1) — direct-UDP
+    // only, unchanged behaviour, until the control plane distributes a relay endpoint.
+    pump::spawn_tx(tun.clone(), udp.clone(), peers.clone(), None, p.dns);
     pump::spawn_rx(tun, udp.clone(), peers.clone());
     pump::spawn_timers(
         udp.clone(),
         peers.clone(),
         p.static_private.clone(),
         index.clone(),
+        None,
     );
 
     // Status heartbeat (the SAME writer the desktop daemon uses): if the app supplied an
