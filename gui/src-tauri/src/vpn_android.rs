@@ -362,13 +362,16 @@ fn start_tunnel(
         }
     };
 
-    pump::spawn_tx(tun_fd, udp.clone(), peers.clone(), dns);
+    // relay = None: NAT-fallback relay not activated yet (Decision D-T1) — direct-UDP
+    // only, unchanged behaviour, until the control plane distributes a relay endpoint.
+    pump::spawn_tx(tun_fd, udp.clone(), peers.clone(), None, dns);
     pump::spawn_rx(tun_fd, udp.clone(), peers.clone());
     pump::spawn_timers(
         udp.clone(),
         peers.clone(),
         static_private.clone(),
         index.clone(),
+        None,
     );
 
     Ok(Box::new(VpnHandle {
