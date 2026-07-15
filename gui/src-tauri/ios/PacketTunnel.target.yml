@@ -15,8 +15,8 @@
         # Must track the host app's version (gui/src-tauri/tauri.conf.json) — Apple
         # rejects an extension whose CFBundleShortVersionString/Version diverges from
         # the app it ships in. [A: bump together until this is generated from one source]
-        CFBundleShortVersionString: 1.1.1
-        CFBundleVersion: "1.1.1"
+        CFBundleShortVersionString: 1.1.2
+        CFBundleVersion: "1.1.2"
         NSExtension:
           NSExtensionPointIdentifier: com.apple.networkextension.packet-tunnel
           NSExtensionPrincipalClass: $(PRODUCT_MODULE_NAME).PacketTunnelProvider
@@ -39,7 +39,7 @@
         SWIFT_VERSION: "5.0"
         SWIFT_OBJC_BRIDGING_HEADER: ../../ios/PacketTunnel/PacketTunnel-Bridging-Header.h
         HEADER_SEARCH_PATHS: $(inherited) $(PROJECT_DIR)/../../../../crates/agent-ios-ptp/include
-        LIBRARY_SEARCH_PATHS: $(inherited) $(PROJECT_DIR)/Externals/ptp/$(CONFIGURATION)
+        LIBRARY_SEARCH_PATHS: $(inherited) $(PROJECT_DIR)/PTPLib/$(CONFIGURATION)
         OTHER_LDFLAGS: $(inherited) -lagent_ios_ptp
     dependencies:
       - sdk: NetworkExtension.framework
@@ -56,6 +56,10 @@
           esac
           if [ "$CONFIGURATION" = "release" ]; then PROFILE="--release"; OUT="release"; else PROFILE=""; OUT="debug"; fi
           ( cd "$ROOT" && cargo build -p agent-ios-ptp --target "$TRIPLE" $PROFILE )
-          DEST="$SRCROOT/Externals/ptp/$CONFIGURATION"
+          # PTPLib (NOT Externals) — the app target globs `- path: Externals` as
+          # sources, so a .a placed under Externals/ptp gets copied into the app
+          # bundle as a resource AND linked by the extension → "duplicate output
+          # file" build failure. Keep the staticlib outside the app's source globs.
+          DEST="$SRCROOT/PTPLib/$CONFIGURATION"
           mkdir -p "$DEST"
           cp "$ROOT/target/$TRIPLE/$OUT/libagent_ios_ptp.a" "$DEST/libagent_ios_ptp.a"
