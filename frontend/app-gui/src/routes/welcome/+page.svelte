@@ -248,38 +248,37 @@
 		<p class="tagline">The sovereign zero-trust mesh —<br/>identity-bound access, your keys, your proof.</p>
 	</div>
 
-	<!-- [T per wow-5p plan §3a] 3 wow actions + the proof that closes each one —
-	     sovereignty evidence, not connectivity (connectivity is commodity). -->
+	<!-- Product pillars as cards. NoSecret CI/CD is omitted until the mesh
+	     ci-deploy path is proven E2E (see nosecret-cideploy-mesh-unproven). -->
 	<div class="features">
 		<div class="feature">
-			<span class="icon">🧾</span>
+			<span class="icon">🪪</span>
 			<div>
-				<strong>No-secret CI/CD</strong>
-				<span>Deploy from CI with no static secret — every run ends in a signed receipt</span>
+				<strong>NoPass</strong>
+				<span>Access without passwords</span>
 			</div>
 		</div>
 		<div class="feature">
 			<span class="icon">🔑</span>
 			<div>
-				<strong>No-key SSH</strong>
-				<span>SSH to prod: no bastion, no static key — every session lands in your ledger</span>
+				<strong>NoKey</strong>
+				<span>SSH without static keys</span>
 			</div>
 		</div>
 		<div class="feature">
 			<span class="icon">🌐</span>
 			<div>
-				<strong>Private domain</strong>
-				<span>Your services on your own domain — only your mesh can see them</span>
+				<strong>NoVPN</strong>
+				<span>Internal apps without a VPN</span>
 			</div>
 		</div>
 		<div class="feature">
 			<span class="icon">◈</span>
 			<div>
-				<strong>Prove it</strong>
-				<span>One click shows the real path: peer-to-peer, vendor never in the middle</span>
+				<strong>Prove It</strong>
+				<span>Vendor was never on your data path</span>
 			</div>
 		</div>
-		<p class="coexist">Adds on without touching what's already running.</p>
 	</div>
 
 	<div class="actions">
@@ -405,7 +404,7 @@
 		width: 100%;
 	}
 
-	/* Desktop: widen and lay the 4 wow cards out 2×2 so the GitHub CTA sits
+	/* Desktop: widen and lay the 4 pillar cards out 2×2 so the GitHub CTA sits
 	   above the fold — no scroll to reach sign-in. */
 	@media (min-width: 700px) {
 		main {
@@ -447,10 +446,6 @@
 			grid-template-columns: 1fr 1fr;
 			gap: 12px;
 		}
-
-		.coexist {
-			grid-column: 1 / -1;
-		}
 	}
 
 	.feature {
@@ -479,13 +474,6 @@
 	.feature span {
 		font-size: 13px;
 		color: var(--c-text-dim);
-	}
-
-	.coexist {
-		font-size: 12px;
-		color: var(--c-text-dim);
-		text-align: center;
-		font-style: italic;
 	}
 
 	.actions {

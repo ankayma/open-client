@@ -302,7 +302,7 @@
     <div class="card-head">
       <span class="label">
         {svc.label}
-        <span class="tag" title="why you can reach this">{svc.rule_ref}</span>
+        <span class="tag" title={svc.rule_ref}>{svc.rule_ref.replace(/\s*\(admin\)\s*$/, "")}</span>
         {#if owned}<span class="owned-badge">● owned</span>{/if}
         {#if !owned && reachOf(svc.node) !== "unknown"}
           <span class="reach {reachOf(svc.node)}" title={REACH_TITLE[reachOf(svc.node)]}>
@@ -393,7 +393,7 @@
           <div class="child-info">
             <span class="child-label">
               {svc.label}
-              <span class="tag" title="why you can reach this">{svc.rule_ref}</span>
+              <span class="tag" title={svc.rule_ref}>{svc.rule_ref.replace(/\s*\(admin\)\s*$/, "")}</span>
             </span>
             <code class="fqdn">{svc.fqdn}</code>
             {#if (svc.tags ?? []).length > 0}
