@@ -113,6 +113,7 @@ struct AppState {
 ///  - Windows/macOS/Linux/iOS are split-tunnel (only the overlay CIDR is routed to the
 ///    tun; the /32 host-address model, not a default route), so control-plane HTTPS
 ///    goes straight out the normal interface — the plain client below needs no proxy.
+///
 /// Either way, when `regional_base_url` flips to `https://{region}.cp.ankayma.com` the
 /// next request reaches that regional CP with no client rebuild.
 ///
@@ -301,7 +302,9 @@ fn clear_session_from_disk(data_dir: &std::path::Path) {
 pub enum AuthState {
     Unauthenticated,
     Authenticating,
-    Authenticated { user: User },
+    Authenticated {
+        user: User,
+    },
     /// [T:CP-UAE region-routing] User bailed on the region picker (or any other
     /// browser-side step) instead of finishing. Distinct from `Unauthenticated`
     /// so the UI can say "cancelled" instead of silently reverting with no
@@ -509,8 +512,14 @@ async fn connect_inner(state: &AppState) -> Result<(), String> {
         // admin must retire it. The free tier, whose node quota is the tightest and
         // where a leak hurts soonest, is ungated and rolls back cleanly. `[A: revisit
         // when the client can mint a step-up proof non-interactively]`
-        if let Err(del) =
-            adapters::delete_node(&state.http, &state.regional_base_url(), &tok, &resp.node_id, None).await
+        if let Err(del) = adapters::delete_node(
+            &state.http,
+            &state.regional_base_url(),
+            &tok,
+            &resp.node_id,
+            None,
+        )
+        .await
         {
             log::error!("enroll rollback failed for {}: {del}", resp.node_id);
         }
@@ -632,6 +641,48 @@ async fn poll_login(
     }
 }
 
+/// Scheme tag for a cross-region sign-in hand-off (vs a plain session token). Kept in
+/// sync with the control plane's issuer. `[T:A.1.23 region isolation]`
+const REGION_HANDOFF_PREFIX: &str = "rhf1.";
+
+fn is_region_handoff(token: &str) -> bool {
+    token.starts_with(REGION_HANDOFF_PREFIX)
+}
+
+/// Read the target `region` out of a hand-off's (server-signed) claims — used ONLY to
+/// pick which regional CP to redeem at. The signature is verified server-side, not
+/// here; a tampered region just routes the redeem to the wrong CP, which rejects it.
+fn region_from_handoff(blob: &str) -> Option<String> {
+    use base64::Engine as _;
+    let rest = blob.strip_prefix(REGION_HANDOFF_PREFIX)?;
+    let (payload_b64, _sig) = rest.split_once('.')?;
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(payload_b64)
+        .ok()?;
+    #[derive(serde::Deserialize)]
+    struct Claims {
+        region: String,
+    }
+    serde_json::from_slice::<Claims>(&bytes)
+        .ok()
+        .map(|c| c.region)
+}
+
+/// Exchange a signed region hand-off for a real session token at the target region's
+/// control plane, and point `regional_base_url` there. A user who signs in at the auth
+/// gateway for a different region gets a hand-off instead of a session (the gateway
+/// can't write the other region's store — no shared DB `[T:A.1.23]`); this redeems it.
+async fn redeem_region_handoff(state: &AppState, blob: String) -> Result<String, String> {
+    let region = region_from_handoff(&blob).ok_or("malformed region hand-off")?;
+    // Move regional_base_url to that region first (no-op under ANKAYMA_CONTROL_PLANE,
+    // which keeps every role on the single dev/test CP). Redeem happens there.
+    state.update_region(&region);
+    let base = state.regional_base_url();
+    adapters::redeem_handoff(&state.http, &base, &blob)
+        .await
+        .map_err(|e| e.to_string())
+}
+
 /// Validate a session token against the control plane and, if good, store it +
 /// refresh the UI/tray. Shared by the manual paste path (`submit_session_token`)
 /// and the `ankayma://` deep-link path so both behave identically.
@@ -642,8 +693,26 @@ async fn apply_session_token(app: &AppHandle, token: String) -> Result<User, Str
         return Err("session token is empty".into());
     }
     let state = app.state::<AppState>();
+
+    // A cross-region hand-off (`rhf1.…`) is NOT a session token — it's a signed voucher
+    // the target region's CP exchanges for a real session that lives only on that CP.
+    // Redeem it first; the returned token then validates on the regional base URL that
+    // redeem just pointed us at. A plain token validates on the auth gateway as before.
+    // `[T:A.1.23 region isolation]`
+    let is_handoff = is_region_handoff(&token);
+    let token = if is_handoff {
+        redeem_region_handoff(&state, token).await?
+    } else {
+        token
+    };
+    let validate_base = if is_handoff {
+        state.regional_base_url()
+    } else {
+        state.auth_base_url.clone()
+    };
+
     // Validate by fetching the session; only store the token if it works.
-    let info = adapters::session_info(&state.http, &state.auth_base_url, &token)
+    let info = adapters::session_info(&state.http, &validate_base, &token)
         .await
         .map_err(|e| e.to_string())?;
     state.set_email(Some(info.email.clone()));
@@ -753,8 +822,14 @@ async fn sign_out(app: AppHandle, state: State<'_, AppState>) -> Result<(), Stri
         .as_ref()
         .map(|n| n.node_id.clone());
     if let (Some(tok), Some(node_id)) = (state.token(), retiring) {
-        if let Err(e) =
-            adapters::delete_node(&state.http, &state.regional_base_url(), &tok, &node_id, None).await
+        if let Err(e) = adapters::delete_node(
+            &state.http,
+            &state.regional_base_url(),
+            &tok,
+            &node_id,
+            None,
+        )
+        .await
         {
             log::warn!("could not retire {node_id} on sign-out ({e}); an admin must remove it");
         }
@@ -1099,9 +1174,15 @@ async fn verify_step_up_totp(
     // Same exchange, against the enrolled TOTP secret instead of an emailed
     // challenge. [T:part-d-e7-stepup.md §H.8 Phase 2]
     let tok = state.token().ok_or("not signed in")?;
-    adapters::verify_step_up_totp(&state.http, &state.regional_base_url(), &tok, &purpose, &code)
-        .await
-        .map_err(|e| e.to_string())
+    adapters::verify_step_up_totp(
+        &state.http,
+        &state.regional_base_url(),
+        &tok,
+        &purpose,
+        &code,
+    )
+    .await
+    .map_err(|e| e.to_string())
 }
 
 // ── TOTP enrollment (Settings → Security) ─────────────────────────────────────
@@ -1743,9 +1824,9 @@ async fn open_ssh_terminal(
         // Open the chosen Windows terminal running the launcher. `cmd /k` keeps the
         // window after the session ends so errors stay readable.
         let launch = match app.as_str() {
-            "wt" | "Windows Terminal" => {
-                std::process::Command::new("wt.exe").args(["cmd", "/k", &bat]).status()
-            }
+            "wt" | "Windows Terminal" => std::process::Command::new("wt.exe")
+                .args(["cmd", "/k", &bat])
+                .status(),
             "powershell" | "PowerShell" => std::process::Command::new("cmd")
                 .args([
                     "/c",
@@ -2058,9 +2139,14 @@ async fn ci_history(
     state: State<'_, AppState>,
 ) -> Result<Vec<domain::CiRun>, String> {
     let tok = state.token().ok_or("not signed in")?;
-    adapters::ci_history(&state.http, &state.regional_base_url(), &tok, node.as_deref())
-        .await
-        .map_err(|e| e.to_string())
+    adapters::ci_history(
+        &state.http,
+        &state.regional_base_url(),
+        &tok,
+        node.as_deref(),
+    )
+    .await
+    .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -2760,7 +2846,39 @@ pub fn run() {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_deep_link, DeepLinkKind};
+    use super::{
+        is_region_handoff, parse_deep_link, region_from_handoff, DeepLinkKind,
+        REGION_HANDOFF_PREFIX,
+    };
+
+    // Build a hand-off blob the way the control plane does: rhf1.<b64url(json)>.<sig>.
+    // The client only reads `region`; the sig segment is opaque here.
+    fn handoff_blob(region: &str) -> String {
+        use base64::Engine as _;
+        let json = format!(r#"{{"v":1,"region":"{region}","nonce":"x","iat":1}}"#);
+        let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(json);
+        format!("{REGION_HANDOFF_PREFIX}{payload}.c2ln")
+    }
+
+    #[test]
+    fn region_handoff_is_detected_and_parsed() {
+        let blob = handoff_blob("uae");
+        assert!(is_region_handoff(&blob));
+        assert_eq!(region_from_handoff(&blob).as_deref(), Some("uae"));
+    }
+
+    #[test]
+    fn plain_session_token_is_not_a_handoff() {
+        let tok = "a3f9c0d1e2b3a4f5a6b7c8d9e0f1a2b3";
+        assert!(!is_region_handoff(tok));
+        assert_eq!(region_from_handoff(tok), None);
+    }
+
+    #[test]
+    fn malformed_handoff_yields_no_region() {
+        assert_eq!(region_from_handoff("rhf1.not-base64!.sig"), None);
+        assert_eq!(region_from_handoff("rhf1.onlyonesegment"), None);
+    }
 
     fn scratch(name: &str) -> std::path::PathBuf {
         let dir = std::env::temp_dir().join(format!("ankayma-{name}-{}", std::process::id()));
@@ -2774,8 +2892,16 @@ mod tests {
     #[test]
     fn stored_keypair_round_trips_through_the_handoff_file() {
         let dir = scratch("handoff-roundtrip");
-        super::write_handoff_state_to(&dir, "priv-b64", "pub-b64", "node-1", "100.64.0.1", None, None)
-            .expect("handoff write succeeds");
+        super::write_handoff_state_to(
+            &dir,
+            "priv-b64",
+            "pub-b64",
+            "node-1",
+            "100.64.0.1",
+            None,
+            None,
+        )
+        .expect("handoff write succeeds");
         let kp = super::load_stored_keypair_from(&dir).expect("keypair is recovered");
         assert_eq!(kp.private_b64, "priv-b64");
         assert_eq!(kp.public_b64, "pub-b64");
@@ -2815,8 +2941,16 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         let dir = std::env::temp_dir().join(format!("ankayma-handoff-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        super::write_handoff_state_to(&dir, "privkey", "pubkey", "node-1", "100.64.0.1", None, None)
-            .expect("handoff write succeeds");
+        super::write_handoff_state_to(
+            &dir,
+            "privkey",
+            "pubkey",
+            "node-1",
+            "100.64.0.1",
+            None,
+            None,
+        )
+        .expect("handoff write succeeds");
         let mode = std::fs::metadata(dir.join("agent.json"))
             .expect("agent.json exists")
             .permissions()
@@ -2830,8 +2964,16 @@ mod tests {
             std::fs::Permissions::from_mode(0o644),
         )
         .expect("widen perms for migration test");
-        super::write_handoff_state_to(&dir, "privkey2", "pubkey2", "node-1", "100.64.0.1", None, None)
-            .expect("handoff rewrite succeeds");
+        super::write_handoff_state_to(
+            &dir,
+            "privkey2",
+            "pubkey2",
+            "node-1",
+            "100.64.0.1",
+            None,
+            None,
+        )
+        .expect("handoff rewrite succeeds");
         let mode = std::fs::metadata(dir.join("agent.json"))
             .expect("agent.json exists")
             .permissions()

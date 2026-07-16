@@ -89,6 +89,43 @@ async fn get_json<T: serde::de::DeserializeOwned>(
         .map_err(|e| ApiError::Decode(e.to_string()))
 }
 
+/// Redeem a signed cross-region sign-in hand-off for a real session token at the
+/// target region's control plane. `POST /api/v1/session/redeem-handoff`.
+///
+/// A user authenticates once at the auth gateway; when their region differs from the
+/// gateway's, the gateway can't mint a session in the right region's store (per-region
+/// isolation, no shared DB `[T:A.1.23]`), so it returns a signed hand-off instead. The
+/// client presents it HERE, to the region's own CP, which verifies the signature and
+/// mints the session locally. No bearer — the signed hand-off IS the credential.
+pub async fn redeem_handoff(
+    http: &reqwest::Client,
+    base_url: &str,
+    handoff: &str,
+) -> Result<String, ApiError> {
+    #[derive(serde::Serialize)]
+    struct Req<'a> {
+        handoff: &'a str,
+    }
+    #[derive(serde::Deserialize)]
+    struct Resp {
+        token: String,
+    }
+    let resp = http
+        .post(url(base_url, "/api/v1/session/redeem-handoff"))
+        .json(&Req { handoff })
+        .timeout(CP_REST_TIMEOUT)
+        .send()
+        .await
+        .map_err(|e| ApiError::Transport(e.to_string()))?;
+    if !resp.status().is_success() {
+        return Err(status_error(resp).await);
+    }
+    resp.json::<Resp>()
+        .await
+        .map(|r| r.token)
+        .map_err(|e| ApiError::Decode(e.to_string()))
+}
+
 /// Validate a session token and fetch the signed-in user. `GET /api/v1/session`.
 pub async fn session_info(
     http: &reqwest::Client,
@@ -96,6 +133,32 @@ pub async fn session_info(
     session_token: &str,
 ) -> Result<SessionInfo, ApiError> {
     get_json(http, base_url, "/api/v1/session", session_token).await
+}
+
+/// One relay in the vendor-operated fleet map. The agent dials `endpoint` (`host:port`)
+/// as a NAT-fallback transport, addressing peers by WireGuard public key
+/// `[T:A.1.1 relay-block + Decision D-T1]`.
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct RelayEndpoint {
+    pub relay_id: String,
+    pub region: String,
+    pub endpoint: String,
+}
+
+/// Fetch this tenant's relay fleet map. `GET /api/v1/relay/map`. The control plane
+/// returns only enabled relays; an empty list is a normal, cacheable answer — the
+/// caller then runs direct-only, unchanged. `[T:§D.9.3]`
+pub async fn relay_map(
+    http: &reqwest::Client,
+    base_url: &str,
+    session_token: &str,
+) -> Result<Vec<RelayEndpoint>, ApiError> {
+    #[derive(serde::Deserialize)]
+    struct Resp {
+        relays: Vec<RelayEndpoint>,
+    }
+    let resp: Resp = get_json(http, base_url, "/api/v1/relay/map", session_token).await?;
+    Ok(resp.relays)
 }
 
 /// Poll the desktop OAuth handoff: `GET /auth/handoff?nonce=…`. Returns the session
