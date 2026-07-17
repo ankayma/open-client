@@ -68,6 +68,26 @@ if ! grep -q "NSCameraUsageDescription" "$PROJ"; then
   echo "✓ NSCameraUsageDescription injected into project.yml (app info properties)"
 fi
 
+# 3b. Register the ankayma:// custom URL scheme so deep links (invite emails, QR codes,
+#     the cp.ankayma.com/join landing page) actually open the app. Without CFBundleURLTypes
+#     iOS knows no app handles ankayma:// → Safari shows "the address is invalid" and the
+#     link never reaches the app. Same xcodegen-wipes-the-plist reason as the camera key,
+#     so it MUST live in project.yml. `cargo tauri ios init` does NOT inject it (a re-init
+#     dropped it and broke every deep link). [T:tauri.conf.json plugins.deep-link scheme]
+if ! grep -q "CFBundleURLTypes" "$PROJ"; then
+  awk '
+    { print }
+    /^      path: ankayma-gui_iOS\/Info\.plist$/ { app_info=1 }
+    app_info && /^      properties:$/ && !done {
+      print "        CFBundleURLTypes:"
+      print "          - CFBundleURLName: com.ankayma.app"
+      print "            CFBundleURLSchemes: [ankayma]"
+      done=1
+    }
+  ' "$PROJ" >"$PROJ.tmp" && mv "$PROJ.tmp" "$PROJ"
+  echo "✓ CFBundleURLTypes (ankayma:// scheme) injected into project.yml — deep links open the app"
+fi
+
 # 4. Regenerate the .xcodeproj from the patched project.yml.
 (cd "$GEN" && xcodegen generate)
 echo "✓ xcodegen done — gen/apple/ankayma-gui.xcodeproj (app + PacketTunnel targets)"
