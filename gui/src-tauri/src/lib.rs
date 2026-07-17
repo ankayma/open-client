@@ -551,6 +551,28 @@ fn apply_connection_change(app: &AppHandle) {
 
 // --- Commands ---
 
+/// The stored session expired (4h). Instead of logging out, prove possession of this
+/// device's DURABLE machine key and re-mint a session — no second sign-in, no "4h
+/// wall" (E-6 device-key model; [T:decision/session-reauth-device-key-2026-07-18]).
+/// Returns the refreshed user, or None if this device cannot re-auth: no enrolled node
+/// in memory (never connected this run), or the CP rejects the proof (device revoked /
+/// legacy). None → the caller does a real logout + disconnect.
+async fn try_reauth_via_device_key(app: &AppHandle, state: &AppState) -> Option<User> {
+    let (node_id, wg_pubkey) = {
+        let node = state.node.lock().ok()?;
+        let n = node.as_ref()?;
+        (n.node_id.clone(), n.public_b64.clone())
+    };
+    let machine = machine_key::MachineKey::load_or_create(&handoff_state_dir(state)).ok()?;
+    let proof = machine.proof_now(&wg_pubkey).ok()?;
+    let session =
+        adapters::session_refresh(&state.http, &state.regional_base_url(), &node_id, &proof)
+            .await
+            .ok()?;
+    // Adopt the fresh session exactly like a normal sign-in (validate + persist + email).
+    apply_session_token(app, session).await.ok()
+}
+
 #[tauri::command]
 async fn check_auth_state(app: AppHandle, state: State<'_, AppState>) -> Result<AuthState, String> {
     // Cold-start deep link: adopt a token the app was launched with, if any. This
@@ -569,12 +591,20 @@ async fn check_auth_state(app: AppHandle, state: State<'_, AppState>) -> Result<
                 state.update_region(&s.region);
                 AuthState::Authenticated { user: s.into() }
             }
-            Err(_) => {
-                clear_session_from_disk(&state.data_dir);
-                state.set_token(None);
-                state.set_email(None);
-                AuthState::Unauthenticated
-            }
+            // Session invalid/expired (4h). Try device-key re-auth before giving up —
+            // no second sign-in, no dropped tunnel. [T:decision/session-reauth-…-07-18]
+            Err(_) => match try_reauth_via_device_key(&app, state.inner()).await {
+                Some(user) => AuthState::Authenticated { user },
+                None => {
+                    // Device can't re-auth (revoked / legacy / never enrolled) → real
+                    // logout, and tear the tunnel down too (fix: logout must disconnect).
+                    clear_session_from_disk(&state.data_dir);
+                    state.set_token(None);
+                    state.set_email(None);
+                    disconnect_inner(state.inner());
+                    AuthState::Unauthenticated
+                }
+            },
         },
     };
     // Hand any held invite token to the frontend, but ONLY once authenticated. A

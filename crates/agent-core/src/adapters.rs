@@ -651,6 +651,37 @@ pub async fn invite_member(
 /// IS the credential — to become an email-rooted member. Returns a NEW session token (the
 /// invitee is now signed in, no GitHub). `POST /api/v1/members/join-link`. `[T:Part D §A
 /// invite-flow §Cases — ZERO confirm at redeem, doc lines 28-30]`
+/// Re-mint a user session by proving possession of this device's durable machine key
+/// — the device-key re-auth that removes the 4h session wall (no second sign-in).
+/// NO Authorization header: the `machine_proof` IS the credential (PoP, non-bearer).
+/// `POST {base_url}/api/v1/session/refresh` → the fresh session token.
+/// [T:decision/session-reauth-device-key-2026-07-18 §3.1]
+pub async fn session_refresh(
+    http: &reqwest::Client,
+    base_url: &str,
+    node_id: &str,
+    machine_proof: &str,
+) -> Result<String, ApiError> {
+    #[derive(serde::Deserialize)]
+    struct Resp {
+        session_token: String,
+    }
+    let resp = http
+        .post(url(base_url, "/api/v1/session/refresh"))
+        .json(&serde_json::json!({ "node_id": node_id, "machine_proof": machine_proof }))
+        .timeout(CP_REST_TIMEOUT)
+        .send()
+        .await
+        .map_err(|e| ApiError::Transport(e.to_string()))?;
+    if !resp.status().is_success() {
+        return Err(status_error(resp).await);
+    }
+    resp.json::<Resp>()
+        .await
+        .map(|r| r.session_token)
+        .map_err(|e| ApiError::Transport(e.to_string()))
+}
+
 pub async fn join_team_link(
     http: &reqwest::Client,
     base_url: &str,
