@@ -88,6 +88,29 @@ if ! grep -q "CFBundleURLTypes" "$PROJ"; then
   echo "✓ CFBundleURLTypes (ankayma:// scheme) injected into project.yml — deep links open the app"
 fi
 
+# 3d. Keep the app's own Rust static lib (libapp.a) OUT of the app bundle. The app
+#     target globs `- path: Externals` as sources and tauri writes libapp.a there, so
+#     xcodegen adds it to BOTH "Link Binary" (correct) AND "Copy Bundle Resources"
+#     (wrong) → App Store rejects with 90171 "Invalid bundle structure … libapp.a not
+#     permitted". Fix like the PTP staticlib: link via `-lapp` + LIBRARY_SEARCH_PATHS
+#     (already set to Externals/<arch>/<config>) and EXCLUDE *.a from the source glob so
+#     it is no longer bundled. init drops this; a re-init reintroduced the bug.
+if ! grep -q 'OTHER_LDFLAGS.*-lapp' "$PROJ"; then
+  awk '
+    { print }
+    /^      - path: Externals$/ && !ex {
+      print "        excludes:"
+      print "          - \"**/*.a\""
+      ex=1
+    }
+    /^        LIBRARY_SEARCH_PATHS\[arch=arm64\]:/ && !ld {
+      print "        OTHER_LDFLAGS: $(inherited) -lapp"
+      ld=1
+    }
+  ' "$PROJ" >"$PROJ.tmp" && mv "$PROJ.tmp" "$PROJ"
+  echo "✓ libapp.a linked via -lapp + excluded from bundle (fixes App Store 90171)"
+fi
+
 # 4. Regenerate the .xcodeproj from the patched project.yml.
 (cd "$GEN" && xcodegen generate)
 echo "✓ xcodegen done — gen/apple/ankayma-gui.xcodeproj (app + PacketTunnel targets)"
