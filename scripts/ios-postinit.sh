@@ -71,3 +71,12 @@ fi
 # 4. Regenerate the .xcodeproj from the patched project.yml.
 (cd "$GEN" && xcodegen generate)
 echo "✓ xcodegen done — gen/apple/ankayma-gui.xcodeproj (app + PacketTunnel targets)"
+
+# 5. Regenerate the App Icon from the CANONICAL source. `cargo tauri ios init` seeds
+#    gen/apple/Assets.xcassets/AppIcon from stale derived icons — it has shipped the
+#    WRONG swirl logo to the App Store before (0.1.0, 1.1.3-build1; see memory
+#    ios-build-steps). `cargo tauri icon` overwrites the AppIcon set from the "An"
+#    canonical icon_source.png. ALWAYS from icons/icon_source.png, never an external file.
+export PATH="$HOME/.cargo/bin:$PATH"
+(cd "$ROOT/gui/src-tauri" && cargo tauri icon icons/icon_source.png >/dev/null)
+echo "✓ app icons regenerated from icons/icon_source.png (canonical 'An') — prevents swirl regression"
