@@ -99,4 +99,10 @@ echo "✓ xcodegen done — gen/apple/ankayma-gui.xcodeproj (app + PacketTunnel 
 #    canonical icon_source.png. ALWAYS from icons/icon_source.png, never an external file.
 export PATH="$HOME/.cargo/bin:$PATH"
 (cd "$ROOT/gui/src-tauri" && cargo tauri icon icons/icon_source.png >/dev/null)
+# `cargo tauri icon` ALSO rewrites the committed `icons/` set (same 'An', but a fresh
+# non-deterministic encoding each run) → a noisy `icon.icns` M on every build. We only
+# needed the git-IGNORED gen/apple AppIcon refreshed (done above); restore the tracked
+# source icons so a build never dirties the working tree. (To change the brand, run
+# `cargo tauri icon` manually and commit `icons/` — that's a deliberate act, not a build.)
+git -C "$ROOT" checkout -- gui/src-tauri/icons/ 2>/dev/null || true
 echo "✓ app icons regenerated from icons/icon_source.png (canonical 'An') — prevents swirl regression"
