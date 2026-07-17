@@ -565,12 +565,21 @@ async fn try_reauth_via_device_key(app: &AppHandle, state: &AppState) -> Option<
     };
     let machine = machine_key::MachineKey::load_or_create(&handoff_state_dir(state)).ok()?;
     let proof = machine.proof_now(&wg_pubkey).ok()?;
-    let session =
-        adapters::session_refresh(&state.http, &state.regional_base_url(), &node_id, &proof)
-            .await
-            .ok()?;
-    // Adopt the fresh session exactly like a normal sign-in (validate + persist + email).
-    apply_session_token(app, session).await.ok()
+    // session_refresh runs on — and mints the session INTO — the owner's REGIONAL CP
+    // (regional_base_url). Validate + adopt it THERE, not the gateway (auth_base_url):
+    // a regional (e.g. UAE) session lives only on its region's box, so checking it
+    // against the gateway would 401. [T:decision/session-reauth-device-key-2026-07-18 §5]
+    let base = state.regional_base_url();
+    let session = adapters::session_refresh(&state.http, &base, &node_id, &proof)
+        .await
+        .ok()?;
+    let info = adapters::session_info(&state.http, &base, &session).await.ok()?;
+    state.set_email(Some(info.email.clone()));
+    state.update_region(&info.region);
+    save_session_to_disk(&state.data_dir, &session);
+    state.set_token(Some(session));
+    apply_connection_change(app);
+    Some(info.into())
 }
 
 #[tauri::command]
