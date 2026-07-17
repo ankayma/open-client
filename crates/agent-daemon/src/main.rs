@@ -43,6 +43,7 @@ async fn main() -> Result<()> {
     match args.first().map(String::as_str) {
         Some("up") => up::run(&args[1..]).await,
         Some("ci-deploy") => ci_deploy::run(&args[1..]).await,
+        Some("ci-deploy-trace") => up::run_ci_deploy_trace(&args[1..]).await,
         Some("ssh") => ssh::run(&args[1..]).await,
         Some("ssh-exec") => ssh_exec::run(&args[1..]).await,
         Some("resolve") => resolve::run(&args[1..]).await,

@@ -362,6 +362,17 @@ fn engine_loop(
     let mut udp_buf = [0u8; 2048];
     let mut decap_out = [0u8; 2048];
 
+    // Diagnostic instrumentation for the ci-deploy send-path bug (runner SYN not reaching
+    // the target's embedded SSH). Gated on ANKAYMA_NETSTACK_DEBUG so ONE traced run shows
+    // exactly where a packet dies — smoltcp didn't emit / encapsulate dropped it / it was
+    // sent but no reply came back — instead of burning CI to guess.
+    // `[T: memory nosecret-cideploy-mesh-unproven — trace, don't guess]`
+    let debug = std::env::var("ANKAYMA_NETSTACK_DEBUG").is_ok();
+    let mut dbg_out: u64 = 0;
+    let mut dbg_in: u64 = 0;
+    let mut dbg_encap_drop: u64 = 0;
+    let mut dbg_last = std::time::Instant::now();
+
     while running.load(Ordering::SeqCst) {
         // Flag handshake completion for run_deploy's settle wait (G-6).
         if !handshake_done.load(Ordering::SeqCst)
@@ -382,6 +393,7 @@ fn engine_loop(
                             }
                             TunnResult::WriteToTunnelV4(pkt, _)
                             | TunnResult::WriteToTunnelV6(pkt, _) => {
+                                dbg_in += 1;
                                 device.inbound.push_back(pkt.to_vec());
                                 break;
                             }
@@ -492,10 +504,29 @@ fn engine_loop(
             let mut enc = [0u8; 2048];
             match tunn.encapsulate(&pkt, &mut enc) {
                 TunnResult::WriteToNetwork(out) => {
+                    dbg_out += 1;
+                    if debug && dbg_out <= 6 {
+                        eprintln!(
+                            "[netstack] encapsulate ok: inner {}B → {}B ciphertext → udp {target_endpoint}",
+                            pkt.len(),
+                            out.len()
+                        );
+                    }
                     let _ = udp.send_to(out, target_endpoint);
                 }
                 TunnResult::Err(e) => eprintln!("encapsulate error: {e:?}"),
-                _ => {}
+                // Anything else (e.g. session not ready → packet buffered/dropped by
+                // boringtun) means smoltcp emitted a packet the tunnel did NOT put on the
+                // wire. For a SYN that is exactly the "deploy hangs" failure mode.
+                _ => {
+                    dbg_encap_drop += 1;
+                    if debug {
+                        eprintln!(
+                            "[netstack] ⚠ encapsulate produced no wire packet — {}B inner DROPPED (session not ready?)",
+                            pkt.len()
+                        );
+                    }
+                }
             }
         }
 
@@ -510,6 +541,22 @@ fn engine_loop(
             let socket_done = !socket.is_active() && !socket.may_recv();
             !(socket_done && b.to_stream.is_empty())
         });
+
+        // Diagnostic heartbeat (ANKAYMA_NETSTACK_DEBUG): socket state pinpoints the failure —
+        // `SynSent` with out>0,in=0 = SYN left but no SYN-ACK came back (target / return path);
+        // out=0 with a bridge = smoltcp emitted nothing; encap_drop>0 = tunnel swallowed it.
+        if debug && dbg_last.elapsed() >= Duration::from_secs(2) {
+            dbg_last = std::time::Instant::now();
+            let states: Vec<String> = bridges
+                .iter()
+                .map(|b| format!("{:?}", sockets.get::<tcp::Socket>(b.handle).state()))
+                .collect();
+            eprintln!(
+                "[netstack] out={dbg_out} in={dbg_in} encap_drop={dbg_encap_drop} bridges={} states={states:?} handshake={}",
+                bridges.len(),
+                handshake_done.load(Ordering::SeqCst)
+            );
+        }
 
         std::thread::sleep(TICK);
     }

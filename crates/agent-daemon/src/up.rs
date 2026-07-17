@@ -1093,6 +1093,107 @@ async fn load_or_enroll(http: &reqwest::Client, cfg: &Config) -> Result<AgentSta
 /// keypair) and persist the resulting identity. Shares the keypair/machine-proof
 /// prelude with the join path via `enroll_inputs`; see it for the idempotency and
 /// golden-image `machine.key` rules.
+/// DEBUG HARNESS (not a product command): run the EXACT userspace ci-deploy data path
+/// (`netstack::run_deploy`) against a target, using a normal enrollment token instead of
+/// a CI OIDC token — so the send-path bug (`agent ssh-exec` SYN never reaches the target)
+/// can be traced locally with full logging, without burning a CI pipeline.
+/// `[T: memory nosecret-cideploy-mesh-unproven — trace, don't guess]`
+///
+///   agent ci-deploy-trace --token <t> --target-host <h> [--control-plane <u>] [--port n] [--exec …]
+///
+/// Default exec self-invokes `agent ssh-exec -- true` (the exact failing combo). Forces
+/// ANKAYMA_NETSTACK_DEBUG so the `[netstack]` heartbeat prints out/in/encap_drop/socket-state.
+pub(crate) async fn run_ci_deploy_trace(args: &[String]) -> Result<()> {
+    let mut control_plane = "https://cp.ankayma.com".to_string();
+    let mut token: Option<String> = None;
+    let mut target_host: Option<String> = None;
+    let mut port: u16 = 51820;
+    let mut exec: Option<Vec<String>> = None;
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--control-plane" => {
+                control_plane = it
+                    .next()
+                    .ok_or_else(|| anyhow!("--control-plane needs a value"))?
+                    .clone()
+            }
+            "--token" => {
+                token = Some(
+                    it.next()
+                        .ok_or_else(|| anyhow!("--token needs a value"))?
+                        .clone(),
+                )
+            }
+            "--target-host" => {
+                target_host = Some(
+                    it.next()
+                        .ok_or_else(|| anyhow!("--target-host needs a value"))?
+                        .clone(),
+                )
+            }
+            "--port" => {
+                port = it
+                    .next()
+                    .ok_or_else(|| anyhow!("--port needs a value"))?
+                    .parse()
+                    .map_err(|_| anyhow!("--port must be a number"))?
+            }
+            "--exec" => exec = Some(it.by_ref().cloned().collect()),
+            other => return Err(anyhow!("unknown argument: {other}")),
+        }
+    }
+    let token = token.ok_or_else(|| anyhow!("--token required"))?;
+    let target_host = target_host.ok_or_else(|| anyhow!("--target-host required"))?;
+
+    std::env::set_var("ANKAYMA_NETSTACK_DEBUG", "1");
+
+    let http = reqwest::Client::new();
+    let cfg = Config {
+        control_plane: control_plane.clone(),
+        token: Some(token.clone()),
+        join_token: None,
+        listen_port: port,
+        state_path: format!("/tmp/ankayma-trace-{}.json", std::process::id()),
+    };
+    // Fresh ephemeral identity → the control plane assigns an overlay and propagates our
+    // peer to the target's allowed-ips, exactly like a normal node (the closest non-OIDC
+    // stand-in for the CI ephemeral node).
+    let state = enroll_and_persist(&http, &cfg, &token, None).await?;
+    println!(
+        "[trace] enrolled node {} overlay {}",
+        state.node_id, state.overlay_ip
+    );
+
+    // Let the control plane push our peer to the target before we dial it.
+    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+
+    let svc = state
+        .service_token
+        .clone()
+        .ok_or_else(|| anyhow!("enroll returned no service token"))?;
+    let peers = adapters::peers(&http, &control_plane, &svc)
+        .await
+        .map_err(|e| anyhow!("fetch peers: {e}"))?;
+    let target = peers
+        .into_iter()
+        .find(|p| p.hostname == target_host)
+        .ok_or_else(|| anyhow!("target host {target_host} not found among peers"))?;
+    println!(
+        "[trace] target {} overlay {} endpoint {:?}",
+        target.hostname, target.overlay_ip, target.endpoint
+    );
+
+    let exec = exec.or_else(|| {
+        let me = std::env::current_exe().ok()?.to_string_lossy().into_owned();
+        Some(vec![me, "ssh-exec".into(), "--".into(), "true".into()])
+    });
+
+    tokio::task::spawn_blocking(move || crate::netstack::run_deploy(&state, target, exec))
+        .await
+        .map_err(|e| anyhow!("trace task panicked: {e}"))?
+}
+
 async fn enroll_and_persist(
     http: &reqwest::Client,
     cfg: &Config,
