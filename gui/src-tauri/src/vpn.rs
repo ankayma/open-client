@@ -96,13 +96,15 @@ async fn build_config(state: &AppState) -> Result<String, String> {
     // the complete peer set to the extension. Self is dropped (it's the tun
     // address, not a dialable peer). Falls back to the enroll snapshot on error.
     let peers: Vec<agent_core::domain::PeerInfo> = match state.token() {
-        Some(tok) => match agent_core::adapters::peers(&state.http, &state.regional_base_url(), &tok).await {
-            Ok(list) => list
-                .into_iter()
-                .filter(|p| p.overlay_ip != overlay_ip)
-                .collect(),
-            Err(_) => enroll_peers,
-        },
+        Some(tok) => {
+            match agent_core::adapters::peers(&state.http, &state.regional_base_url(), &tok).await {
+                Ok(list) => list
+                    .into_iter()
+                    .filter(|p| p.overlay_ip != overlay_ip)
+                    .collect(),
+                Err(_) => enroll_peers,
+            }
+        }
         None => enroll_peers,
     };
     // Reflect the ACTUAL roster handed to the tunnel back into app state so the UI
@@ -113,7 +115,12 @@ async fn build_config(state: &AppState) -> Result<String, String> {
     }
     let (zone, resolve): (Option<String>, Vec<serde_json::Value>) = match state.token() {
         Some(tok) => {
-            match agent_core::adapters::resolve_subdomains(&state.http, &state.regional_base_url(), &tok).await
+            match agent_core::adapters::resolve_subdomains(
+                &state.http,
+                &state.regional_base_url(),
+                &tok,
+            )
+            .await
             {
                 Ok(t) => {
                     let names = t
