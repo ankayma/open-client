@@ -16,13 +16,11 @@
 
 use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, SocketAddr, UdpSocket};
-use std::sync::mpsc::Receiver;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use crate::dataplane::{self, DialablePeer};
 use crate::domain::PeerInfo;
-use crate::relay_transport::{RelayClient, RelayInbound};
 use crate::tunnel::{handshake_established, make_tunn, PublicKey, StaticSecret, Tunn, TunnResult};
 
 /// Safe overlay MTU under a typical 1500-byte path. `[T:WireGuard]`
@@ -240,36 +238,6 @@ fn peer_by_source(peers: &Peers, src: SocketAddr) -> Option<Arc<PeerEntry>> {
         .cloned()
 }
 
-/// Find the peer that owns a WireGuard public key. Relay-delivered datagrams carry
-/// the exact sender key (`Recv{src}`), so this is a precise lookup — no trial-decap
-/// guessing needed as on the UDP path. `[T: Decision D-T1]`
-fn peer_by_pubkey(peers: &Peers, pubkey: [u8; 32]) -> Option<Arc<PeerEntry>> {
-    let g = peers.lock().expect("peers lock");
-    g.iter().find(|p| p.peer.public_key == pubkey).cloned()
-}
-
-/// Send one WireGuard `ciphertext` datagram to `entry` over the best available path:
-/// a known direct UDP endpoint if we have one, otherwise the relay fallback
-/// `[T: Decision D-T1 — Tailscale-lite]`. With no endpoint and no relay the frame is
-/// dropped (unchanged from the pre-relay behaviour); the inner WG session retransmits.
-fn send_ciphertext(
-    entry: &PeerEntry,
-    udp: &UdpSocket,
-    relay: Option<&RelayClient>,
-    ciphertext: &[u8],
-) {
-    match entry.endpoint() {
-        Some(ep) => {
-            let _ = udp.send_to(ciphertext, ep);
-        }
-        None => {
-            if let Some(r) = relay {
-                r.send(entry.peer.public_key, ciphertext);
-            }
-        }
-    }
-}
-
 /// A self-addressed DNS responder for hosts with no OS-level split-DNS hook (iOS:
 /// `NEDNSSettings.matchDomains` routes matching queries INTO the tunnel instead of
 /// resolving them locally, so they arrive here as ordinary UDP packets). Optional —
@@ -418,7 +386,6 @@ pub fn spawn_tx(
     tun: crate::tundev::TunHandle,
     udp: Arc<UdpSocket>,
     peers: Peers,
-    relay: Option<Arc<RelayClient>>,
     dns: Option<DnsResponder>,
 ) {
     std::thread::spawn(move || {
@@ -514,7 +481,9 @@ pub fn spawn_tx(
             let mut tunn = entry.tunn.lock().expect("tunn lock");
             match tunn.encapsulate(&pkt[..n], &mut enc) {
                 TunnResult::WriteToNetwork(out) => {
-                    send_ciphertext(&entry, &udp, relay.as_deref(), out);
+                    if let Some(ep) = entry.endpoint() {
+                        let _ = udp.send_to(out, ep);
+                    }
                     // Outbound data (or the handshake it triggered) — the tunnel
                     // is in use, so it must not be torn down as idle.
                     entry.touch();
@@ -589,51 +558,6 @@ pub fn spawn_rx(tun: crate::tundev::TunHandle, udp: Arc<UdpSocket>, peers: Peers
     });
 }
 
-/// Relay ingress → decapsulate → tun. The relay leg of the data plane: drains
-/// WireGuard ciphertext the relay forwarded to us (`Recv{src,payload}`, already
-/// decoded into `RelayInbound` by `relay_transport`) and feeds it through the same
-/// boringtun `decapsulate` path as the UDP rx pump. Replies (handshake responses,
-/// cookies) go BACK through the relay, since a peer reached via the relay has no
-/// direct endpoint to answer to. `[T: Decision D-T1 — part-d-transport-connectivity §5]`
-///
-/// Runs only when a relay is configured; the UDP rx pump (`spawn_rx`) is unaffected,
-/// so a node with a direct path keeps its exact prior behaviour.
-pub fn spawn_relay_rx(
-    tun: crate::tundev::TunHandle,
-    relay: Arc<RelayClient>,
-    inbound: Receiver<RelayInbound>,
-    peers: Peers,
-) {
-    std::thread::spawn(move || {
-        let mut out = [0u8; 2048];
-        // Sender drops when the relay connection closes → recv() ends the loop.
-        while let Ok(RelayInbound { src, payload }) = inbound.recv() {
-            // The relay names the exact sender key, so demux is a direct lookup —
-            // no trial-decapsulation. An unknown key (revoked/stale) is dropped.
-            let Some(entry) = peer_by_pubkey(&peers, src) else {
-                continue;
-            };
-            let mut tunn = entry.tunn.lock().expect("tunn lock");
-            let mut res = tunn.decapsulate(None, &payload, &mut out);
-            loop {
-                match res {
-                    TunnResult::WriteToNetwork(p) => {
-                        // Handshake response / cookie / keepalive → back via the relay.
-                        relay.send(src, p);
-                        res = tunn.decapsulate(None, &[], &mut out);
-                    }
-                    TunnResult::WriteToTunnelV4(pkt, _) | TunnResult::WriteToTunnelV6(pkt, _) => {
-                        let _ = tun.write_packet(pkt);
-                        entry.touch(); // inbound data → tunnel in use
-                        break;
-                    }
-                    _ => break,
-                }
-            }
-        }
-    });
-}
-
 /// Candidate order for demuxing one inbound datagram: the endpoint-match guess
 /// first, then EVERY other peer. The guess is an ordering optimization, never a
 /// filter — two peers behind one NAT share a public IP (a phone and a laptop on
@@ -696,7 +620,6 @@ pub fn spawn_timers(
     peers: Peers,
     static_private: StaticSecret,
     index: Arc<Mutex<u32>>,
-    relay: Option<Arc<RelayClient>>,
 ) {
     std::thread::spawn(move || {
         let mut buf = [0u8; 2048];
@@ -708,20 +631,13 @@ pub fn spawn_timers(
             for entry in snapshot {
                 let mut tunn = entry.tunn.lock().expect("tunn lock");
                 if let TunnResult::WriteToNetwork(p) = tunn.update_timers(&mut buf) {
-                    match entry.endpoint() {
-                        Some(ep) => match udp.send_to(p, ep) {
+                    if let Some(ep) = entry.endpoint() {
+                        match udp.send_to(p, ep) {
                             Ok(n) => plog(&format!("timer→{ep} ({}) {n}B", entry.peer.hostname)),
                             Err(e) => plog(&format!(
                                 "timer→{ep} ({}) SEND FAILED: {e}",
                                 entry.peer.hostname
                             )),
-                        },
-                        // No direct endpoint → keep the session's timers alive over
-                        // the relay (retransmits, keepalive). `[T: Decision D-T1]`
-                        None => {
-                            if let Some(r) = &relay {
-                                r.send(entry.peer.public_key, p);
-                            }
                         }
                     }
                 }
@@ -803,39 +719,6 @@ mod tests {
         // incoming: exact endpoint match, then sole-peer fallback for an unknown src.
         assert!(peer_by_source(&peers, "1.2.3.4:51820".parse().unwrap()).is_some());
         assert!(peer_by_source(&peers, "9.9.9.9:1".parse().unwrap()).is_some());
-    }
-
-    // Relay ingress demuxes by exact WG public key (the relay names the sender), not
-    // by endpoint guess — a precise lookup. Pin it. `[T: Decision D-T1]`
-    #[test]
-    fn peer_by_pubkey_matches_exact_sender_key() {
-        let mk = |overlay: &str, pk: [u8; 32]| -> Arc<PeerEntry> {
-            let sp = StaticSecret::random_from_rng(OsRng);
-            let pp = PublicKey::from(&StaticSecret::random_from_rng(OsRng));
-            Arc::new(PeerEntry {
-                peer: DialablePeer {
-                    node_id: "n".into(),
-                    hostname: "h".into(),
-                    public_key: pk,
-                    public_key_b64: "k".into(),
-                    overlay_ip: overlay.parse().unwrap(),
-                    endpoint: None,
-                },
-                endpoint: Mutex::new(None),
-                tunn: Mutex::new(make_tunn(sp, pp, 1, None)),
-                last_activity: Mutex::new(Instant::now()),
-                keepalive: None,
-            })
-        };
-        let a = mk("10.0.0.1", [0x11; 32]);
-        let b = mk("10.0.0.2", [0x22; 32]);
-        let peers: Peers = Arc::new(Mutex::new(vec![a.clone(), b.clone()]));
-
-        assert!(Arc::ptr_eq(
-            &peer_by_pubkey(&peers, [0x22; 32]).unwrap(),
-            &b
-        ));
-        assert!(peer_by_pubkey(&peers, [0x99; 32]).is_none());
     }
 
     // With two peers, an unknown source has no sole-peer fallback → None (forces the

@@ -265,55 +265,13 @@ pub(crate) async fn serve_dataplane(
     // never on the tun fd itself — no DnsResponder needed here (iOS-only, no
     // split-DNS hook to piggyback on).
     let tun = tun_handle;
-    // Relay fallback (Decision D-T1, "Tailscale-lite"): fetch this PL's relay fleet
-    // map and, if the control plane published one, keep a relay leg up for NAT-fallback
-    // reachability. Empty map → relay = None → exact prior direct-UDP-only behaviour, so
-    // a PL with no relay deployed is unchanged. `[T:A.1.1 relay-block + part-d-transport-connectivity §5]`
-    let relay: Option<Arc<agent_core::relay_transport::RelayClient>> = {
-        let token = ctx.service_token.read().unwrap().clone();
-        match adapters::relay_map(&ctx.http, &ctx.control_plane, &token).await {
-            Ok(map) if !map.is_empty() => {
-                // One region today → pin the first enabled relay; RTT-based home-relay
-                // selection lands when the fleet spans ≥2 regions (§D.9.6). `[A]`
-                let picked = &map[0];
-                let my_pubkey = agent_core::tunnel::PublicKey::from(&static_private).to_bytes();
-                match agent_core::relay_transport::RelayClient::connect(
-                    &picked.endpoint,
-                    my_pubkey,
-                    token.into_bytes(),
-                ) {
-                    Ok((client, inbound)) => {
-                        let client = Arc::new(client);
-                        pump::spawn_relay_rx(tun.clone(), client.clone(), inbound, peers.clone());
-                        eprintln!("relay leg up: {} via {}", picked.relay_id, picked.endpoint);
-                        Some(client)
-                    }
-                    // Fail-open to direct-only: a relay we cannot reach must not block the
-                    // data plane — WG still works for direct/LAN peers, and the next
-                    // resync retries. (Fail-closed is the relay's own membership contract,
-                    // A.1.6, not the agent's startup path.) `[T]`
-                    Err(e) => {
-                        eprintln!("relay {} unreachable, direct-only: {e}", picked.relay_id);
-                        None
-                    }
-                }
-            }
-            Ok(_) => None, // empty map: no relay deployed for this PL yet
-            Err(e) => {
-                eprintln!("relay map fetch failed, direct-only: {e}");
-                None
-            }
-        }
-    };
-
-    pump::spawn_tx(tun.clone(), udp.clone(), peers.clone(), relay.clone(), None);
+    pump::spawn_tx(tun.clone(), udp.clone(), peers.clone(), None);
     pump::spawn_rx(tun, udp.clone(), peers.clone());
     pump::spawn_timers(
         udp.clone(),
         peers.clone(),
         static_private.clone(),
         index.clone(),
-        relay,
     );
 
     // [F-3] Private DNS for branded names while the overlay is up: resolve the
