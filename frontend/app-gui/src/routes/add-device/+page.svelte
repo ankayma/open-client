@@ -3,7 +3,7 @@
 	import { get } from 'svelte/store';
 	import { goto } from '$app/navigation';
 	import { joinEnrollNode, createJoinLink, getServerEnrollCommand } from '$lib/tauri';
-	import { pendingInvite } from '$lib/stores';
+	import { pendingInvite, auth } from '$lib/stores';
 	import { encodeQR } from '$lib/qr';
 	import { runWithStepUp, isStepUpRequired } from '$lib/stepup';
 
@@ -112,7 +112,8 @@
 			try {
 				const m = invite.token.match(/token=([^&\s]+)/);
 				const tok = m ? m[1] : invite.token.trim();
-				await joinEnrollNode(tok, ''); // unnamed — rename later in Devices
+				const state = await joinEnrollNode(tok, ''); // unnamed — rename later in Devices
+				if (state) auth.set(state); // adopt the session the CP minted (no second login)
 				joinDone = true;
 				setTimeout(() => goto('/services'), 800);
 			} catch (e: unknown) {

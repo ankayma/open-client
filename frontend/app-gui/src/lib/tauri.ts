@@ -366,10 +366,13 @@ export async function getServerEnrollCommand(): Promise<string> {
   return invoke<string>("get_server_enroll_command");
 }
 
-// Recipient side of a node invite (`ankayma://join?token=…`): enroll THIS device
-// into the invite's tenant using only the join token (no session). [A] invite-flow.
-export async function joinEnrollNode(joinToken: string, hostname: string): Promise<void> {
-  return invoke("join_enroll_node", { joinToken, hostname });
+// Recipient side of a node invite (`ankayma://join?token=…`): enroll THIS device into
+// the invite's tenant using only the join token. When the CP mints a session on redeem,
+// returns the AuthState to adopt — signs into the owner's account with NO second GitHub
+// login (devices.md). Older CPs that don't yet mint a session return null: the device is
+// enrolled, but the caller must guide the user to sign in. [T:devices.md / invite-flow]
+export async function joinEnrollNode(joinToken: string, hostname: string): Promise<AuthState | null> {
+  return invoke<AuthState | null>("join_enroll_node", { joinToken, hostname });
 }
 
 // PolicyBlock access + my-access catalog.

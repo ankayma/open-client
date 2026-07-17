@@ -53,6 +53,13 @@ pub struct EnrollResponse {
     /// URL to fetch the CRL from the CP (revocation = CRL broadcast, B.4.2).
     #[serde(default)]
     pub crl_url: Option<String>,
+    /// [T:client/docs/user-guide/devices.md "no second GitHub login"] Session token
+    /// the CP mints when THIS device redeems a node invite, so the app signs into the
+    /// invite owner's account WITHOUT a second OAuth. Absent on CPs that pre-date this
+    /// (join_enroll not yet minting) — `None`, the caller falls back to guiding the
+    /// user to sign in. No break (P.4 compose).
+    #[serde(default)]
+    pub session_token: Option<String>,
 }
 
 /// A node entry from the management endpoint `GET /api/v1/nodes`. [T:B.5.2]

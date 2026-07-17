@@ -1293,7 +1293,7 @@ async fn join_enroll_node(
     state: State<'_, AppState>,
     join_token: String,
     hostname: String,
-) -> Result<(), String> {
+) -> Result<Option<AuthState>, String> {
     let join_token = join_token.trim().to_string();
     if join_token.is_empty() {
         return Err("join token is empty".into());
@@ -1330,6 +1330,10 @@ async fn join_enroll_node(
     let resp = adapters::enroll_via_join_token(&state.http, &state.regional_base_url(), &req)
         .await
         .map_err(|e| e.to_string())?;
+    // [T:devices.md "no second GitHub login"] The CP mints a session for the invite
+    // owner on redeem so this device signs into their account with no second OAuth.
+    // Older CPs omit it → None → the UI guides the user to sign in first.
+    let session_token = resp.session_token.clone();
 
     // Handoff: persist this identity so a reconnect reuses THIS node — no
     // duplicate enroll. iOS→app data dir, desktop→~/.ankayma. [T:A.1.10 / up.rs]
@@ -1353,7 +1357,17 @@ async fn join_enroll_node(
         peers: resp.peers,
     });
     apply_connection_change(&app);
-    Ok(())
+
+    // Sign into the owner's account from the minted session (no second GitHub login).
+    // apply_session_token only validates + stores the session (it does NOT re-enroll a
+    // node), so it composes cleanly on top of the node we just enrolled.
+    match session_token {
+        Some(tok) => {
+            let user = apply_session_token(&app, tok).await?;
+            Ok(Some(AuthState::Authenticated { user }))
+        }
+        None => Ok(None),
+    }
 }
 
 // --- Data plane (milestone 1.2 — privileged daemon handoff) ---

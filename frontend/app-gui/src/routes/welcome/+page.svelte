@@ -3,7 +3,7 @@
 	import { onMount, onDestroy } from 'svelte';
 	import { get } from 'svelte/store';
 	import { auth, pendingInvite } from '$lib/stores';
-	import { signInGithub, pollLogin, submitSessionToken, joinTeamLink, takePendingJoinTeam, getPlatform } from '$lib/tauri';
+	import { signInGithub, pollLogin, submitSessionToken, joinTeamLink, joinEnrollNode, takePendingJoinTeam, getPlatform } from '$lib/tauri';
 	import { listen } from '@tauri-apps/api/event';
 
 	// idle   → initial screen with GitHub button
@@ -191,7 +191,17 @@
 				auth.set(state);
 				goto('/services');
 			} else if (/\bjoin\b/.test(v)) {
-				error = 'This is a device invite. Sign in first, then add this device from Settings → My Devices.';
+				// Node invite: enroll THIS device. When the CP mints a session for the invite
+				// owner, we adopt it — signed into their account with no second GitHub login
+				// (devices.md). If it doesn't (older CP), the device is enrolled but has no
+				// session — guide the user to sign in to finish.
+				const state = await joinEnrollNode(tok, '');
+				if (state) {
+					auth.set(state);
+					goto('/services');
+				} else {
+					error = 'This device joined the mesh. Sign in to finish setting it up.';
+				}
 			} else {
 				// Bare token — try it as a team invite (the only kind that signs you in).
 				const state = await joinTeamLink(tok);
