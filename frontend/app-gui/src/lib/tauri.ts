@@ -299,12 +299,18 @@ export async function createSubdomain(
   label: string,
   targetNodeId: string,
   targetPort: number,
+  proof?: StepUpProof,
 ): Promise<string> {
-  return invoke<string>("create_subdomain", { label, targetNodeId, targetPort });
+  return invoke<string>("create_subdomain", {
+    label,
+    targetNodeId,
+    targetPort,
+    proofToken: proof?.proofToken,
+  });
 }
 
-export async function deleteSubdomain(label: string): Promise<void> {
-  return invoke("delete_subdomain", { label });
+export async function deleteSubdomain(label: string, proof?: StepUpProof): Promise<void> {
+  return invoke("delete_subdomain", { label, proofToken: proof?.proofToken });
 }
 
 export async function openSubdomain(fqdn: string): Promise<void> {
@@ -380,8 +386,8 @@ export async function joinEnrollNode(joinToken: string, hostname: string): Promi
 export async function getPolicy(): Promise<PolicyView> {
   return invoke<PolicyView>("get_policy");
 }
-export async function submitPolicy(body: string): Promise<void> {
-  return invoke("submit_policy", { body });
+export async function submitPolicy(body: string, proof?: StepUpProof): Promise<void> {
+  return invoke("submit_policy", { body, proofToken: proof?.proofToken });
 }
 export async function myAccess(): Promise<MyAccess> {
   return invoke<MyAccess>("my_access");

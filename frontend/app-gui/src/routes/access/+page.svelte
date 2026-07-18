@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { getPolicy, submitPolicy, listMembers } from "$lib/tauri";
+  import { runWithStepUp } from "$lib/stepup";
 
   // PolicyBlock authoring (Slice B). An admin edits the typed rules (from a principal
   // selector → to a resource selector) and publishes a new block onto the tenant's
@@ -70,7 +71,9 @@
     error = "";
     saved = "";
     try {
-      await submitPolicy(JSON.stringify({ rules }));
+      await runWithStepUp("manage_policy", (proof) =>
+        submitPolicy(JSON.stringify({ rules }), proof),
+      );
       saved = "Published ✓";
       await load();
     } catch (e: unknown) {

@@ -6,7 +6,7 @@
 	import { goto } from '$app/navigation';
 	import { onMount } from 'svelte';
 	import { connection, quota } from '$lib/stores';
-	import { listNodes, getNodeInfo, deleteNode, getQuota, getPathProof } from '$lib/tauri';
+	import { listNodes, getNodeInfo, deleteNode, getQuota, getPathProof, listMembers } from '$lib/tauri';
 	import { runWithStepUp } from '$lib/stepup';
 	import type { PeerBrief } from '$lib/types';
 
@@ -54,8 +54,27 @@
 		return mins < 60 ? `Silent for ${mins}m` : `Silent for ${Math.round(mins / 60)}h`;
 	}
 
+	// Whose device this is, for the admin roster view. Returns null when we can't
+	// name an owner (solo tenant, or a member with no roster access) -- then no
+	// label renders. "you" for my own nodes, "@login" for a teammate's.
+	function ownerLabel(d: PeerBrief): string | null {
+		const uid = d.owner_user_id;
+		if (!uid) return null;
+		const login = memberLogins.get(uid);
+		if (uid === myUserId) return login ? `you · @${login}` : 'you';
+		return login ? `@${login}` : null;
+	}
+
 	let devices = $state<PeerBrief[]>([]);
 	let thisNodeId = $state<string | null>(null);
+	// user_id -> github_login, so an admin can tell whose device each node is when
+	// several members enrol lookalike hardware (e.g. three iPhones). Only an admin
+	// gets the full roster; a member sees only their own nodes, so the map is empty
+	// and no owner label is shown -- which is correct, there's nothing to disambiguate.
+	let memberLogins = $state(new Map<string, string>());
+	// My own user_id, read off this device's peer entry (PeerBrief carries owner_user_id).
+	// Lets us mark my nodes "you" instead of my own @login.
+	let myUserId = $state<string | null>(null);
 	let loading = $state(true);
 	let error = $state('');
 	let confirmNode = $state<PeerBrief | null>(null);
@@ -74,13 +93,18 @@
 			// This device first (so we can flag it), then the full peer list. The
 			// data-plane proof is best-effort: without it every peer reads `unknown`,
 			// which is the honest answer, so its failure must not fail the page.
-			const [self, peers, proof] = await Promise.all([
+			const [self, peers, proof, roster] = await Promise.all([
 				getNodeInfo().catch(() => null),
 				listNodes(),
-				getPathProof().catch(() => null)
+				getPathProof().catch(() => null),
+				// Best-effort: only an admin may list the roster; a member's 403 leaves
+				// the map empty (they only see their own nodes anyway). Never fail the page.
+				listMembers().catch(() => null)
 			]);
 			thisNodeId = self?.node_id ?? null;
 			devices = peers;
+			memberLogins = new Map((roster?.members ?? []).map((m) => [m.user_id, m.github_login]));
+			myUserId = peers.find((d) => d.node_id === thisNodeId)?.owner_user_id ?? null;
 			pathKnown = proof?.connected ?? false;
 			handshakeAge = new Map(
 				(proof?.peers ?? []).map((p) => [p.overlay_ip, p.last_handshake_secs])
@@ -201,6 +225,7 @@
 						<div class="name-row">
 							<span class="name">{d.hostname}</span>
 							{#if d.node_id === thisNodeId}<span class="badge">This device</span>{/if}
+							{#if ownerLabel(d)}<span class="owner" title="Owner">{ownerLabel(d)}</span>{/if}
 						</div>
 						<span class="ip">{d.overlay_ip}</span>
 					</div>
@@ -428,6 +453,19 @@
 		font-size: 12px;
 		color: var(--c-text-dim);
 		font-family: 'SF Mono', 'Fira Code', monospace;
+		overflow-wrap: anywhere;
+	}
+
+	/* Owner tag — dim, quiet, so it reads as metadata not a second title. Lets an
+	   admin tell apart lookalike devices (three iPhones) by who enrolled each. */
+	.owner {
+		font-size: 11px;
+		font-weight: 500;
+		color: var(--c-text-dim);
+		background: color-mix(in srgb, var(--c-text-dim) 12%, transparent);
+		padding: 2px 8px;
+		border-radius: 999px;
+		flex-shrink: 0;
 		overflow-wrap: anywhere;
 	}
 

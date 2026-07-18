@@ -2302,6 +2302,7 @@ async fn create_subdomain(
     target_node_id: String,
     target_port: u16,
     state: State<'_, AppState>,
+    proof_token: Option<String>,
 ) -> Result<String, String> {
     let tok = state.token().ok_or("not signed in")?;
     let req = domain::SubdomainReq {
@@ -2309,9 +2310,15 @@ async fn create_subdomain(
         target_node_id,
         target_port,
     };
-    adapters::register_subdomain(&state.http, &state.regional_base_url(), &tok, &req)
-        .await
-        .map_err(|e| e.to_string())
+    adapters::register_subdomain(
+        &state.http,
+        &state.regional_base_url(),
+        &tok,
+        &req,
+        proof_token.as_deref(),
+    )
+    .await
+    .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -2326,11 +2333,21 @@ async fn get_subdomain_cert(
 }
 
 #[tauri::command]
-async fn delete_subdomain(label: String, state: State<'_, AppState>) -> Result<(), String> {
+async fn delete_subdomain(
+    label: String,
+    state: State<'_, AppState>,
+    proof_token: Option<String>,
+) -> Result<(), String> {
     let tok = state.token().ok_or("not signed in")?;
-    adapters::delete_subdomain(&state.http, &state.regional_base_url(), &tok, &label)
-        .await
-        .map_err(|e| e.to_string())
+    adapters::delete_subdomain(
+        &state.http,
+        &state.regional_base_url(),
+        &tok,
+        &label,
+        proof_token.as_deref(),
+    )
+    .await
+    .map_err(|e| e.to_string())
 }
 
 /// Open a branded name in the browser. It resolves only on an enrolled device once
@@ -2433,11 +2450,21 @@ async fn get_policy(state: State<'_, AppState>) -> Result<domain::PolicyView, St
 }
 
 #[tauri::command]
-async fn submit_policy(body: String, state: State<'_, AppState>) -> Result<(), String> {
+async fn submit_policy(
+    body: String,
+    state: State<'_, AppState>,
+    proof_token: Option<String>,
+) -> Result<(), String> {
     let tok = state.token().ok_or("not signed in")?;
-    adapters::submit_policy(&state.http, &state.regional_base_url(), &tok, &body)
-        .await
-        .map_err(|e| e.to_string())
+    adapters::submit_policy(
+        &state.http,
+        &state.regional_base_url(),
+        &tok,
+        &body,
+        proof_token.as_deref(),
+    )
+    .await
+    .map_err(|e| e.to_string())
 }
 
 #[tauri::command]

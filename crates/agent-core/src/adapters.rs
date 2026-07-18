@@ -513,13 +513,19 @@ pub async fn register_subdomain(
     base_url: &str,
     session_token: &str,
     req: &SubdomainReq,
+    proof_token: Option<&str>,
 ) -> Result<String, ApiError> {
     #[derive(serde::Deserialize)]
     struct Resp {
         fqdn: String,
     }
+    let base = url(base_url, "/api/v1/subdomain");
+    let endpoint = match proof_token {
+        Some(p) => format!("{base}?proof_token={p}"),
+        None => base,
+    };
     let resp = http
-        .post(url(base_url, "/api/v1/subdomain"))
+        .post(endpoint)
         .bearer_auth(session_token)
         .json(req)
         .timeout(CP_REST_TIMEOUT)
@@ -586,9 +592,15 @@ pub async fn delete_subdomain(
     base_url: &str,
     session_token: &str,
     label: &str,
+    proof_token: Option<&str>,
 ) -> Result<(), ApiError> {
+    let base = url(base_url, &format!("/api/v1/subdomain/{label}"));
+    let endpoint = match proof_token {
+        Some(p) => format!("{base}?proof_token={p}"),
+        None => base,
+    };
     let resp = http
-        .delete(url(base_url, &format!("/api/v1/subdomain/{label}")))
+        .delete(endpoint)
         .bearer_auth(session_token)
         .timeout(CP_REST_TIMEOUT)
         .send()
@@ -773,9 +785,15 @@ pub async fn submit_policy(
     base_url: &str,
     session_token: &str,
     body: &str,
+    proof_token: Option<&str>,
 ) -> Result<(), ApiError> {
+    let base = url(base_url, "/api/v1/policies");
+    let endpoint = match proof_token {
+        Some(p) => format!("{base}?proof_token={p}"),
+        None => base,
+    };
     let resp = http
-        .post(url(base_url, "/api/v1/policies"))
+        .post(endpoint)
         .bearer_auth(session_token)
         .header("content-type", "application/json")
         .body(body.to_string())

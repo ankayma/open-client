@@ -2,6 +2,7 @@
 	import { onMount } from 'svelte';
 	import { goto } from '$app/navigation';
 	import { listSubdomains, createSubdomain, deleteSubdomain, openSubdomain, listNodes } from '$lib/tauri';
+	import { runWithStepUp } from '$lib/stepup';
 	import type { Subdomain, PeerBrief } from '$lib/types';
 
 	// F-3 branded subdomain (Part C §H.3.6.1, milestone 1.4): a private name mapped
@@ -42,7 +43,9 @@
 		adding = true;
 		error = '';
 		try {
-			await createSubdomain(newLabel.trim().toLowerCase(), newTarget, port);
+			await runWithStepUp('manage_subdomain', (proof) =>
+				createSubdomain(newLabel.trim().toLowerCase(), newTarget, port, proof),
+			);
 			newLabel = '';
 			showAddForm = false;
 			await load();
@@ -56,7 +59,7 @@
 
 	async function removeSubdomain(label: string) {
 		try {
-			await deleteSubdomain(label);
+			await runWithStepUp('manage_subdomain', (proof) => deleteSubdomain(label, proof));
 			await load();
 		} catch (e: unknown) {
 			loadError = e instanceof Error ? e.message : 'Failed to remove subdomain';

@@ -58,6 +58,8 @@ const PURPOSE_LABEL: Record<string, string> = {
   invite_member: "invite this member",
   remove_member: "remove this member",
   manage_ci_policy: "change this deploy rule",
+  manage_subdomain: "change this private-domain mapping",
+  manage_policy: "change this access policy",
 };
 export function purposeLabel(p: string): string {
   return PURPOSE_LABEL[p] ?? p;
