@@ -248,10 +248,14 @@
     overflow: hidden;
     margin: 8px 0;
   }
+  /* Mobile-first: stack so a long login never squeezes the action button off the
+     row — the button drops to its own line, last. Desktop restores the inline row
+     (see @media below). */
   .row {
     display: flex;
-    align-items: center;
-    justify-content: space-between;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 10px;
     padding: 12px 16px;
     border-bottom: 1px solid var(--c-border);
   }
@@ -261,10 +265,26 @@
   .who {
     display: flex;
     align-items: center;
+    flex-wrap: wrap;
     gap: 8px;
+    min-width: 0;
+  }
+  .remove {
+    align-self: flex-end;
+  }
+  @media (min-width: 760px) {
+    .row {
+      flex-direction: row;
+      align-items: center;
+      justify-content: space-between;
+    }
+    .remove {
+      align-self: auto;
+    }
   }
   .login {
     font-weight: 600;
+    word-break: break-word;
   }
   .role {
     font-size: 11px;

@@ -3,7 +3,7 @@
 	import { goto } from '$app/navigation';
 	import { page } from '$app/state';
 	import { listen, type UnlistenFn } from '@tauri-apps/api/event';
-	import { auth, connection, quota, activeTheme, activeLang, pendingInvite } from '$lib/stores';
+	import { auth, connection, quota, activeTheme, activeLang, pendingInvite, myRole } from '$lib/stores';
 	import { checkAuthState, getConnectionStatus, getQuota } from '$lib/tauri';
 	import { applyTheme, THEMES, THEME_PAIRS } from '$lib/theme';
 	import { STRINGS, type Lang } from '$lib/i18n';
@@ -28,8 +28,9 @@
 			auth.set(authState);
 			if (authState.status === 'authenticated') {
 				goto('/services');
-			} else if (!silent) {
-				goto('/welcome');
+			} else {
+				myRole.set(null); // clear the cached role so a signed-out session can't leak it
+				if (!silent) goto('/welcome');
 			}
 		} catch {
 			// Tauri not available (browser dev) — stay on current route
@@ -454,9 +455,11 @@
 
 		/* Use the desktop window: pages cap at a mobile column (480px) by default;
 		   on desktop let them breathe to a wide content measure so tables/detail
-		   panels have room. One rule, every page — no per-screen retrofit. */
+		   panels have room. One rule, every page — no per-screen retrofit.
+		   1280px is a standard content measure — wide enough for long service
+		   hostnames + action buttons without cramping. */
 		.app.with-sidebar .view :global(main) {
-			max-width: 1080px;
+			max-width: 1280px;
 		}
 
 		.brand {

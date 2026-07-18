@@ -5,6 +5,12 @@ import type { Lang } from './i18n';
 
 export const auth = writable<AuthState>({ status: 'unauthenticated' });
 
+// The signed-in user's role in the active tenant ("admin" | "member"), as reported by
+// `myAccess()` (the same value the Services page shows as a role chip). Null until first
+// loaded. Used to hide admin-only chrome (e.g. the Admin tab) from members — a UX gate;
+// the server still enforces authorization on every admin action. [reuse, no CP change]
+export const myRole = writable<string | null>(null);
+
 export const connection = writable<ConnectionState>({ status: 'disconnected' });
 
 export const quota = writable<Quota | null>(null);

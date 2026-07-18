@@ -3,7 +3,7 @@
   import { goto } from "$app/navigation";
   import { myAccess, openSubdomain, getNodeInfo, listNodes, listCiPolicies, ciHistory, getPathProof, probeReachable } from "$lib/tauri";
   import type { MyAccess, AccessService, PeerBrief, CiPolicy, CiRun, PathProof, PathPeer } from "$lib/types";
-  import { connection } from "$lib/stores";
+  import { connection, myRole } from "$lib/stores";
   import ConnectionCard from "$lib/components/ConnectionCard.svelte";
   import PathChain from "$lib/components/PathChain.svelte";
 
@@ -124,6 +124,7 @@
     error = "";
     try {
       data = await myAccess();
+      myRole.set(data.role); // surface role app-wide (BottomTabBar admin-tab gate)
     } catch (e: unknown) {
       error = e instanceof Error ? e.message : "Failed to load services";
     } finally {
@@ -522,7 +523,7 @@
     .layout {
       flex-direction: row;
       align-items: flex-start;
-      max-width: 1080px;
+      max-width: 1280px;
     }
     .conn-panel {
       width: 260px;
