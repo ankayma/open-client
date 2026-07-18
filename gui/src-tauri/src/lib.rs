@@ -317,8 +317,12 @@ pub enum AuthState {
 pub struct User {
     pub tenant_id: String,
     pub email: String,
-    pub tier: String,         // "F0" | "F0Plus"
+    pub tier: String,         // "F0" | "F0Plus" | "F1Starter"
     pub product_line: String, // this control plane is the Personal PL
+    pub role: String,         // capability: "admin" | "member"
+    pub seat_type: String,    // quota class: "admin"|"builder"|"user"|"lite"
+    pub seat_node_cap: u32,   // per-member node cap for this seat_type
+    pub seat_privdomain_cap: u32,
 }
 
 impl From<domain::SessionInfo> for User {
@@ -328,6 +332,10 @@ impl From<domain::SessionInfo> for User {
             email: s.email,
             tier: s.tier,
             product_line: "Personal".into(),
+            role: s.role,
+            seat_type: s.seat_type,
+            seat_node_cap: s.seat_caps.nodes,
+            seat_privdomain_cap: s.seat_caps.privdomains,
         }
     }
 }

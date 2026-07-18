@@ -99,6 +99,23 @@ pub struct SessionInfo {
     /// everything except auth itself, which always stays at the auth-gateway.
     #[serde(default = "default_region")]
     pub region: String,
+    /// Capability dimension: "admin" | "member" (Part B §B.1.8, choice A). Default
+    /// covers a pre-seat_type control plane (older CP omits the field).
+    #[serde(default)]
+    pub role: String,
+    /// Quota dimension: "admin"|"builder"|"user"|"lite" (SeatType). Orthogonal to role.
+    #[serde(default)]
+    pub seat_type: String,
+    /// Per-member caps for this seat_type (config; monotonic-tunable server-side).
+    #[serde(default)]
+    pub seat_caps: SeatCaps,
+}
+
+/// Per-member resource caps by SeatType, as `/api/v1/session` returns them.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct SeatCaps {
+    pub nodes: u32,
+    pub privdomains: u32,
 }
 
 fn default_region() -> String {

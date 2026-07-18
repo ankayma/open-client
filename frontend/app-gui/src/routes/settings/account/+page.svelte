@@ -53,6 +53,23 @@
 				<span class="label">Plan</span>
 				<span class="value tier-badge">{$auth.user.tier}</span>
 			</div>
+			<!-- Two orthogonal dimensions (Part B §B.1.8 SeatType, choice A):
+			     Seat type = your quota (node/domain) · Role = what you can manage. -->
+			{#if $auth.user.tier !== 'F0'}
+				<div class="row">
+					<span class="label">Seat type</span>
+					<span class="value">
+						<span class="tier-badge">{({ admin: 'Admin', builder: 'Builder', user: 'User', lite: 'Lite' })[$auth.user.seat_type] ?? $auth.user.seat_type}</span>
+						{#if $auth.user.tier === 'F1Starter'}
+							<span style="color:var(--c-text-dim);font-size:12px;margin-left:6px;">· {$auth.user.seat_node_cap} nodes · {$auth.user.seat_privdomain_cap} domains</span>
+						{/if}
+					</span>
+				</div>
+			{/if}
+			<div class="row">
+				<span class="label">Role</span>
+				<span class="value">{$auth.user.role === 'admin' ? 'Admin' : 'Member'}</span>
+			</div>
 		</section>
 
 		{#if $auth.user.tier === 'F0'}

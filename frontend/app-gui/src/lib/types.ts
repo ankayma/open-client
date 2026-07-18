@@ -4,11 +4,19 @@ export type ProductLine = "Personal" | "Enterprise";
 
 export type Tier = "F0" | "F0Plus" | "F1Starter";
 
+// Commercial SeatType — the QUOTA dimension (per-member), orthogonal to `role`
+// (capability). Part B §B.1.8 SeatType, choice A.
+export type SeatType = "admin" | "builder" | "user" | "lite";
+
 export interface User {
   tenant_id: string;
   email: string;
   tier: Tier;
   product_line: ProductLine;
+  role: string; // capability: "admin" | "member"
+  seat_type: SeatType; // quota class
+  seat_node_cap: number; // per-member node cap for this seat_type
+  seat_privdomain_cap: number;
 }
 
 export type AuthState =
