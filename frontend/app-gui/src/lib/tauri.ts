@@ -360,10 +360,11 @@ export async function createJoinLink(ttlSeconds?: number, proof?: StepUpProof): 
   });
 }
 
-// Headless node (server/VPS) enrollment: a copy-paste `agent up --token ...` command
-// for a shell with no Ankayma app. Read-only — the GUI never runs it.
-export async function getServerEnrollCommand(): Promise<string> {
-  return invoke<string>("get_server_enroll_command");
+// Headless node (server/VPS) enrollment: a copy-paste `agent up --join-token …`
+// command for a shell with no Ankayma app. `joinToken` is a scoped, single-use
+// enrollment token the caller minted behind a step-up — never the session token.
+export async function getServerEnrollCommand(joinToken: string): Promise<string> {
+  return invoke<string>("get_server_enroll_command", { joinToken });
 }
 
 // Recipient side of a node invite (`ankayma://join?token=…`): enroll THIS device into

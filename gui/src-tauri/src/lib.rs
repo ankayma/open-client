@@ -1193,10 +1193,19 @@ async fn create_join_link(
 /// (it can reuse `enroll_via_join_token`, already used by `join_enroll_node`),
 /// then swap this to a scoped token.
 #[tauri::command]
-async fn get_server_enroll_command(state: State<'_, AppState>) -> Result<String, String> {
-    let tok = state.token().ok_or("not signed in")?;
+async fn get_server_enroll_command(
+    state: State<'_, AppState>,
+    join_token: String,
+) -> Result<String, String> {
+    // Build the server-enroll command from a SCOPED, single-use join token (E-3) —
+    // NOT the session token. The caller mints it behind a step-up, exactly like the
+    // device invite link, so this command never carries the user's full credential.
+    // The agent enrolls the server as AppServer itself. [T:P.3 + part-d-invite-flow §Authority]
+    if join_token.is_empty() {
+        return Err("missing enrollment token".into());
+    }
     Ok(format!(
-        "agent up --token {tok} --control-plane {}",
+        "agent up --join-token {join_token} --control-plane {}",
         state.regional_base_url()
     ))
 }

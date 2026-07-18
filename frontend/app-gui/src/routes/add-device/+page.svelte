@@ -7,25 +7,29 @@
 	import { encodeQR } from '$lib/qr';
 	import { runWithStepUp, isStepUpRequired } from '$lib/stepup';
 
-	// Device vs server: two different node kinds (Part B §B.1.1 — a Node without an
-	// owner is a service/server). Device = scan QR with the Ankayma app. Server = no
-	// app to run, so a copy-paste CLI command instead.
+	// Device vs server: two node kinds (Part B §B.1.1 — a Node without an owner is a
+	// service/server). Device = scan QR with the app. Server = no app to run, so a
+	// copy-paste CLI command carrying a SCOPED, single-use enrollment token minted
+	// behind a step-up — never the session token, and never shown before verifying.
 	let serverCmd = $state<string | null>(null);
-	let serverCmdLoading = $state(false);
+	let serverBusy = $state(false);
 	let serverCmdError = $state<string | null>(null);
 	let serverCmdRevealed = $state(false);
 	let serverCmdCopied = $state(false);
 
-	async function loadServerCmd() {
-		if (serverCmd || serverCmdLoading) return;
-		serverCmdLoading = true;
+	// Verify (step-up, same gate as the device link) → mint a fresh scoped join token
+	// → build `agent up --join-token …`. Solo/F0 tenants pass through with no OTP.
+	async function generateServerCmd() {
+		serverBusy = true;
 		serverCmdError = null;
 		try {
-			serverCmd = await getServerEnrollCommand();
+			const url = await runWithStepUp('enroll_node', (proof) => createJoinLink(nodeTtl, proof));
+			const m = url.match(/token=([^&\s]+)/);
+			serverCmd = await getServerEnrollCommand(m ? m[1] : url);
 		} catch (e) {
-			serverCmdError = e instanceof Error ? e.message : 'Failed to build the enroll command';
+			serverCmdError = e instanceof Error ? e.message : 'Failed to generate the command';
 		} finally {
-			serverCmdLoading = false;
+			serverBusy = false;
 		}
 	}
 
@@ -246,7 +250,7 @@
 				</svg>
 			</div>
 			<p class="qr-note">This team requires a quick verification before minting an invite.</p>
-			<button class="join-btn" onclick={generateWithStepUp}>Verify &amp; generate invite link</button>
+			<button class="join-btn" onclick={generateWithStepUp}>Verify &amp; generate</button>
 		{:else}
 			<div class="qr-wrap">
 				<svg width="120" height="120" viewBox="0 0 24 24" fill="none" stroke="var(--c-accent)" stroke-width="1.5" stroke-opacity="0.6">
@@ -257,23 +261,20 @@
 			<p class="desc">For now, install Ankayma on the other device and sign in with the same GitHub account — it joins your mesh automatically.</p>
 		{/if}
 
-		<details class="server-option" ontoggle={(e) => { if (e.currentTarget.open) loadServerCmd(); }}>
+		<details class="server-option">
 			<summary>Adding a server instead?</summary>
 		<p class="desc">
-			Servers don't run the Ankayma app — enroll from the server's own shell with this
-			command. It uses your session, so treat it like a password: don't paste it anywhere
-			but the server's terminal.
+			Servers don't run the Ankayma app — enroll from the server's own shell with a
+			one-time command. Verify first: it mints a single-use token (not your session),
+			so treat it like a password and paste it only in the server's terminal.
 		</p>
 
-		{#if serverCmdLoading}
+		{#if serverBusy}
 			<div class="qr-wrap loading"><span class="spinner-lg"></span></div>
-		{:else if serverCmdError}
-			<p class="join-err">{serverCmdError}</p>
-			<button class="qr-export" onclick={loadServerCmd}>Retry</button>
 		{:else if serverCmd}
 			<div class="link-box server-cmd">
 				<code class="link-text">
-					{serverCmdRevealed ? serverCmd : serverCmd.replace(/--token \S+/, '--token ••••••••••••')}
+					{serverCmdRevealed ? serverCmd : serverCmd.replace(/--join-token \S+/, '--join-token ••••••••••••')}
 				</code>
 				<button class="copy-btn" onclick={() => (serverCmdRevealed = !serverCmdRevealed)} aria-label={serverCmdRevealed ? 'Hide token' : 'Show token'}>
 					{#if serverCmdRevealed}
@@ -296,8 +297,11 @@
 			</div>
 			<p class="qr-note">
 				SSH into the server and run this command — it enrolls and brings the tunnel up
-				directly, no QR or app needed.
+				directly, no QR or app needed. The token is single-use.
 			</p>
+		{:else}
+			<button class="join-btn" onclick={generateServerCmd}>Verify &amp; reveal command</button>
+			{#if serverCmdError}<p class="join-err" style="margin-top:10px">{serverCmdError}</p>{/if}
 		{/if}
 		</details>
 	{/if}
