@@ -387,7 +387,10 @@
           </span>
         {/if}
       </span>
-      <div class="head-actions">
+    </div>
+    {#if ciRules(group.node).length > 0 || (!group.owned && sshPeer(group.node))}
+      <!-- Node-level actions on their own row, matching the flat card layout. -->
+      <div class="card-actions">
         {#if ciRules(group.node).length > 0}
           <button class="btn-secondary ci-chip" title="CI deploy history for {group.node}" onclick={() => openCiHistory(group.node)}>🧾 CI/CD</button>
         {/if}
@@ -403,7 +406,7 @@
           </button>
         {/if}
       </div>
-    </div>
+    {/if}
     <div class="child-list">
       {#each group.services as svc (svc.fqdn)}
         <div class="child-row" class:denied={svc.status === "denied"}>
@@ -424,13 +427,13 @@
           {:else if !group.owned}
             <!-- self device: no Open/path chain to yourself (see head CI/CD only). -->
             <div class="child-actions">
-              <button class="btn-primary sm" disabled={!connected || probedDown(svc.node)} title={probedDown(svc.node) ? "Unreachable — no response over the mesh" : ""} onclick={() => openSubdomain(svc.fqdn)}>Open ↗</button>
               <button
                 class="btn-secondary sm"
                 disabled={probedDown(svc.node)}
                 title={probedDown(svc.node) ? "Unreachable — no live path to show" : ""}
                 onclick={() => (pathChainSvc = svc)}
               >◈ path chain</button>
+              <button class="btn-primary sm" disabled={!connected || probedDown(svc.node)} title={probedDown(svc.node) ? "Unreachable — no response over the mesh" : ""} onclick={() => openSubdomain(svc.fqdn)}>Open ↗</button>
             </div>
           {/if}
         </div>
@@ -765,13 +768,7 @@
     font-size: 12px;
     padding: 5px 10px;
   }
-  .head-actions {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    flex-shrink: 0;
-  }
-  /* All service-card actions on one wrapping row at the card's foot. */
+  /* All card actions on one wrapping row at the card's foot (flat + node cards). */
   .card-actions {
     display: flex;
     flex-wrap: wrap;
@@ -925,9 +922,9 @@
   }
   .child-row {
     display: flex;
-    align-items: flex-start;
-    justify-content: space-between;
-    gap: 10px;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 8px;
     padding: 8px 10px;
     background: color-mix(in srgb, var(--c-accent) 4%, var(--c-bg));
     border: 1px solid var(--c-border);
@@ -952,8 +949,8 @@
   }
   .child-actions {
     display: flex;
-    gap: 4px;
-    flex-shrink: 0;
+    flex-wrap: wrap;
+    gap: 6px;
   }
   :global(.btn-primary.sm),
   :global(.btn-secondary.sm) {
