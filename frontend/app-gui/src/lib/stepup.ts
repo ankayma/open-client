@@ -25,8 +25,17 @@ export interface StepUpState {
   // OTP mode: mint a fresh emailed challenge (covers expiry/attempt-lock).
   // TOTP mode: fall back to the emailed OTP instead (lost/uninstalled app).
   resend: () => Promise<void>;
+  // Epoch ms until which Resend is on cooldown (0 = available now). The modal
+  // disables the button and shows a countdown until this passes — anti-spam so a
+  // user can't hammer Resend and flood their inbox. [best-practice: escalating
+  // backoff, aligns under the server's 3/min anti-bomb cap.]
+  resendCooldownUntil: number;
   cancel: () => void;
 }
+
+// Escalating resend cooldown: 30s after the first send, then 60s, then 120s (cap).
+// Client-side courtesy + anti-spam; the server enforces its own 3/min hard limit.
+const RESEND_BACKOFF_SECS = [30, 60, 120];
 
 // Null = no step-up in progress. The <StepUpModal/> in the layout renders this.
 export const stepUp = writable<StepUpState | null>(null);
@@ -90,6 +99,20 @@ export async function runWithStepUp<T>(
       stepUp.update((s) => (s ? { ...s, ...p } : s));
     const close = () => stepUp.set(null);
 
+    // Escalating cooldown state. Each emailed send bumps the index → longer wait.
+    let resendIdx = 0;
+    let cooldownUntil = 0;
+    const armCooldown = () => {
+      const secs = RESEND_BACKOFF_SECS[Math.min(resendIdx, RESEND_BACKOFF_SECS.length - 1)];
+      resendIdx += 1;
+      cooldownUntil = Date.now() + secs * 1000;
+      return cooldownUntil;
+    };
+    // OTP factor already emailed a code above (challengeId request) → start the
+    // first cooldown now. TOTP factor has sent nothing yet, so no cooldown until
+    // the user falls back to email.
+    if (factor === "otp") armCooldown();
+
     const submit = async (code: string) => {
       const trimmed = code.trim();
       if (!trimmed) {
@@ -116,11 +139,19 @@ export async function runWithStepUp<T>(
     // OTP mode: mint a fresh challenge (expiry/attempt-lock). TOTP mode: give up
     // on the authenticator app and fall back to an emailed code instead.
     const resend = async () => {
+      // Guard: honor the cooldown even if the UI somehow calls through (the modal
+      // also disables the button). Prevents inbox flooding + server rate-limit hits.
+      if (Date.now() < cooldownUntil) return;
       patch({ sending: true, error: null });
       try {
         challengeId = await requestStepUp(purpose);
         factor = "otp";
-        patch({ sending: false, error: "A new code was sent.", factor: "otp" });
+        patch({
+          sending: false,
+          error: "A new code was sent.",
+          factor: "otp",
+          resendCooldownUntil: armCooldown(),
+        });
       } catch (e3) {
         patch({ sending: false, error: e3 instanceof Error ? e3.message : String(e3) });
       }
@@ -131,6 +162,16 @@ export async function runWithStepUp<T>(
       reject(new Error("Step-up cancelled"));
     };
 
-    stepUp.set({ purpose, requiredAal, factor, sending: false, error: null, submit, resend, cancel });
+    stepUp.set({
+      purpose,
+      requiredAal,
+      factor,
+      sending: false,
+      error: null,
+      submit,
+      resend,
+      resendCooldownUntil: cooldownUntil,
+      cancel,
+    });
   });
 }

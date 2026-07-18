@@ -9,6 +9,21 @@
 	$effect(() => {
 		if ($stepUp) code = '';
 	});
+
+	// Tick once a second so the Resend cooldown counts down live.
+	let now = $state(Date.now());
+	$effect(() => {
+		const id = setInterval(() => (now = Date.now()), 500);
+		return () => clearInterval(id);
+	});
+	// Seconds left on the resend cooldown (0 = resend available). Only the emailed-OTP
+	// factor has a cooldown; the TOTP "use email instead" action has none until used.
+	let cooldownLeft = $derived(
+		$stepUp ? Math.max(0, Math.ceil(($stepUp.resendCooldownUntil - now) / 1000)) : 0,
+	);
+	let resendDisabled = $derived(
+		!$stepUp || $stepUp.sending || ($stepUp.factor !== 'totp' && cooldownLeft > 0),
+	);
 </script>
 
 {#if $stepUp}
@@ -49,8 +64,14 @@
 			{/if}
 			<div style="display:flex;justify-content:flex-end;gap:8px;align-items:center;">
 				<button class="su-ghost" onclick={() => $stepUp?.cancel()}>Cancel</button>
-				<button class="su-ghost" onclick={() => $stepUp?.resend()} disabled={$stepUp.sending}>
-					{$stepUp.factor === 'totp' ? 'Use email code instead' : 'Resend'}
+				<button class="su-ghost" onclick={() => $stepUp?.resend()} disabled={resendDisabled}>
+					{#if $stepUp.factor === 'totp'}
+						Use email code instead
+					{:else if cooldownLeft > 0}
+						Resend in {cooldownLeft}s
+					{:else}
+						Resend
+					{/if}
 				</button>
 				<button
 					class="su-primary"
@@ -72,6 +93,7 @@
 		border-radius: 8px;
 	}
 	.su-ghost:hover { color: var(--c-text); }
+	.su-ghost:disabled { opacity: 0.5; }
 	.su-primary {
 		font-size: 14px;
 		font-weight: 600;
