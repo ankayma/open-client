@@ -14,7 +14,7 @@ members = [
 ]
 
 [workspace.package]
-version = "1.1.5"
+version = "1.1.6"
 edition = "2021"
 rust-version = "1.75"
 license = "LicenseRef-Elastic-2.0"   # [T per Part D §D.7] — Apache-2.0 chosen 2026-06-17, switched to ELv2 2026-07-10; see LICENSE
