@@ -303,13 +303,13 @@
     <div class="card-head">
       <span class="label">
         {svc.label}
-        <span class="tag" title={svc.rule_ref}>{svc.rule_ref.replace(/\s*\(admin\)\s*$/, "")}</span>
-        {#if owned}<span class="owned-badge">● owned</span>{/if}
         {#if !owned && reachOf(svc.node) !== "unknown"}
           <span class="reach {reachOf(svc.node)}" title={REACH_TITLE[reachOf(svc.node)]}>
             {reachOf(svc.node) === "online" ? "●" : "○"} {REACH_LABEL[reachOf(svc.node)]}
           </span>
         {/if}
+        {#if owned}<span class="owned-badge">● owned</span>{/if}
+        <span class="tag" title={svc.rule_ref}>{svc.rule_ref.replace(/\s*\(admin\)\s*$/, "")}</span>
       </span>
     </div>
     <code class="fqdn">{svc.fqdn}</code>
