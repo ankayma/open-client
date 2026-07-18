@@ -10,7 +10,6 @@
 	// Device vs server: two different node kinds (Part B §B.1.1 — a Node without an
 	// owner is a service/server). Device = scan QR with the Ankayma app. Server = no
 	// app to run, so a copy-paste CLI command instead.
-	let mode = $state<'device' | 'server'>('device');
 	let serverCmd = $state<string | null>(null);
 	let serverCmdLoading = $state(false);
 	let serverCmdError = $state<string | null>(null);
@@ -30,10 +29,6 @@
 		}
 	}
 
-	function selectMode(m: 'device' | 'server') {
-		mode = m;
-		if (m === 'server') loadServerCmd();
-	}
 
 	async function copyServerCmd() {
 		if (!serverCmd) return;
@@ -206,16 +201,6 @@
 			{/if}
 		</section>
 	{:else}
-		<div class="mode-tabs">
-			<button class="mode-tab" class:active={mode === 'device'} onclick={() => selectMode('device')}>
-				Device
-			</button>
-			<button class="mode-tab" class:active={mode === 'server'} onclick={() => selectMode('server')}>
-				Server
-			</button>
-		</div>
-
-		{#if mode === 'device'}
 		<p class="desc">Install Ankayma on another device and scan this code, or share the link. The device will join your mesh automatically.</p>
 
 		<div class="ttl-row">
@@ -272,21 +257,8 @@
 			<p class="desc">For now, install Ankayma on the other device and sign in with the same GitHub account — it joins your mesh automatically.</p>
 		{/if}
 
-		<div class="platforms">
-			<p class="platforms-label">Download Ankayma on</p>
-			<div class="platform-row">
-				<a class="platform-chip" href="https://apps.apple.com" target="_blank" rel="noopener">
-					<span>🍎</span> iOS
-				</a>
-				<a class="platform-chip" href="https://play.google.com" target="_blank" rel="noopener">
-					<span>🤖</span> Android
-				</a>
-				<a class="platform-chip" href="https://github.com/ankayma/open-client/releases" target="_blank" rel="noopener">
-					<span>💻</span> Desktop
-				</a>
-			</div>
-		</div>
-		{:else}
+		<details class="server-option" ontoggle={(e) => { if (e.currentTarget.open) loadServerCmd(); }}>
+			<summary>Adding a server instead?</summary>
 		<p class="desc">
 			Servers don't run the Ankayma app — enroll from the server's own shell with this
 			command. It uses your session, so treat it like a password: don't paste it anywhere
@@ -327,7 +299,7 @@
 				directly, no QR or app needed.
 			</p>
 		{/if}
-		{/if}
+		</details>
 	{/if}
 	</div>
 </main>
@@ -483,29 +455,43 @@
 		white-space: nowrap;
 	}
 
-	.mode-tabs {
-		display: flex;
-		gap: 4px;
-		padding: 3px;
-		background: var(--c-surface);
-		border: 1px solid var(--c-border);
-		border-radius: var(--radius);
+	/* Primary CTA — the gated "Verify & generate" mint button. */
+	.join-btn {
 		width: 100%;
+		background: var(--c-accent);
+		color: #fff;
+		font-weight: 600;
+		font-size: 14px;
+		padding: 12px 20px;
+		border-radius: 10px;
+		text-align: center;
 	}
 
-	.mode-tab {
-		flex: 1;
-		padding: 8px;
-		border-radius: 8px;
+	/* Server enrollment as a collapsed disclosure below the device flow. */
+	.server-option {
+		width: 100%;
+		margin-top: 4px;
+		border-top: 1px solid var(--c-border);
+		padding-top: 20px;
+		display: flex;
+		flex-direction: column;
+		align-items: center;
+		gap: 16px;
+	}
+
+	.server-option summary {
+		cursor: pointer;
 		font-size: 13px;
 		font-weight: 600;
 		color: var(--c-text-dim);
+		list-style: none;
+		text-align: center;
 	}
 
-	.mode-tab.active {
-		background: var(--c-accent);
-		color: #fff;
-	}
+	.server-option summary::-webkit-details-marker { display: none; }
+	.server-option summary::after { content: ' ▸'; color: var(--c-accent); }
+	.server-option[open] summary::after { content: ' ▾'; }
+	.server-option summary:hover { color: var(--c-text); }
 
 	.server-cmd .link-text {
 		white-space: pre-wrap;
@@ -528,36 +514,6 @@
 	}
 
 	.copy-btn:hover { background: var(--c-accent); color: #fff; }
-
-	.platforms { width: 100%; }
-
-	.platforms-label {
-		font-size: 12px;
-		color: var(--c-text-dim);
-		margin-bottom: 10px;
-		text-align: center;
-	}
-
-	.platform-row {
-		display: flex;
-		gap: 8px;
-		justify-content: center;
-	}
-
-	.platform-chip {
-		display: flex;
-		align-items: center;
-		gap: 6px;
-		padding: 8px 14px;
-		background: var(--c-surface);
-		border: 1px solid var(--c-border);
-		border-radius: 8px;
-		font-size: 13px;
-		color: var(--c-text);
-		transition: border-color 0.15s;
-	}
-
-	.platform-chip:hover { border-color: var(--c-accent); text-decoration: none; }
 
 	/* Recipient auto-enroll status (deep-link Cases C/D) */
 	.enroll-status {
