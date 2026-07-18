@@ -86,7 +86,7 @@ struct AppState {
     pending_token: Mutex<Option<String>>,
     /// A held `ankayma://join-team?token=…` invite, captured the same way as
     /// `pending_token`. Drained only once authenticated so a not-yet-signed-in
-    /// recipient keeps it across sign-in. See docs/part-d-invite-flow §Edge case.
+    /// recipient keeps it across sign-in. See Part D §Edge case.
     pending_join_team: Mutex<Option<String>>,
     /// A held `ankayma://join?token=…` node-enrollment invite. Same lifecycle as
     /// `pending_join_team`: drained only once authenticated.
@@ -621,7 +621,7 @@ async fn check_auth_state(app: AppHandle, state: State<'_, AppState>) -> Result<
     // Hand any held invite token to the frontend, but ONLY once authenticated. A
     // not-yet-signed-in recipient (or one whose session was revoked) keeps the
     // pending invite across sign-in, since we don't drain it here until the session
-    // validates. [A] flow per docs/part-d-invite-flow.md §Edge case.
+    // validates. [A] flow per Part D §Edge case.
     if matches!(result, AuthState::Authenticated { .. }) {
         if let Some(tok) = state.take_pending_join_team() {
             let _ = app.emit("join-team-pending", tok);
@@ -774,7 +774,7 @@ async fn submit_session_token(app: AppHandle, token: String) -> Result<AuthState
 /// The three `ankayma://` deep links we route on, distinguished by host:
 /// `auth` (session sign-in), `join-team` (member invite), `join` (node enrollment
 /// invite). The previous code keyed only on scheme, so a `join-team`/`join` token
-/// was wrongly adopted as a session token. [A] per docs/part-d-invite-flow.md.
+/// was wrongly adopted as a session token. [A] per Part D (invite flow).
 enum DeepLinkKind {
     Auth,
     JoinTeam,
@@ -1219,7 +1219,7 @@ async fn verify_step_up(
     code: String,
 ) -> Result<String, String> {
     // Exchange the solved OTP for a proof_token, then retry the original action
-    // with it. [T:part-d-e7-stepup.md §H.5]
+    // with it. [T:Part D §H.5]
     let tok = state.token().ok_or("not signed in")?;
     adapters::verify_step_up(
         &state.http,
@@ -1240,7 +1240,7 @@ async fn verify_step_up_totp(
     code: String,
 ) -> Result<String, String> {
     // Same exchange, against the enrolled TOTP secret instead of an emailed
-    // challenge. [T:part-d-e7-stepup.md §H.8 Phase 2]
+    // challenge. [T:Part D §H.8 Phase 2]
     let tok = state.token().ok_or("not signed in")?;
     adapters::verify_step_up_totp(
         &state.http,

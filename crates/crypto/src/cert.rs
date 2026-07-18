@@ -1,7 +1,7 @@
 //! cert — Layer 2 node-cert utilities (expiry, chain sanity check). OPEN crate.
 //!
 //! Intensity: **Critical** (CLAUDE.md T/A §). Every primitive is cited.
-//! `[T:part-d-layer2-cert-infrastructure.md §H.2 Step 1]` the node receives a
+//! `[T:Part D §H.2 Step 1]` the node receives a
 //! leaf cert + Provisioning CA from `EnrollResponse` (TH-A dynamic trust — no CA
 //! pinned in the binary). This module gives the agent two checks:
 //!   * `cert_expiry_days` — drive the "renew soon" warning (display only, 1.x).
@@ -98,7 +98,7 @@ pub fn cert_expiry_rfc3339(pem: &str) -> Result<String, CertError> {
 /// key-usage / name-chaining walk): at connect time rustls performs real path
 /// validation against this CA (`broker_client`, agent-core). Here we only fail
 /// fast at enrollment if the CP handed us mismatched material. `[T per
-/// part-d-layer2-cert-infrastructure.md §H.2 Step 1 "sanity check post-enroll"]`
+/// Part D §H.2 Step 1 "sanity check post-enroll"]`
 pub fn verify_cert_chain(leaf_pem: &str, ca_pem: &str) -> Result<(), CertError> {
     let leaf_blocks = pem_blocks(leaf_pem)?;
     let leaf = leaf_blocks[0].parse_x509().map_err(|_| CertError::Parse)?;

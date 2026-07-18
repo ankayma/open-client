@@ -28,7 +28,7 @@ pub fn write_packet(fd: i32, packet: &[u8]) -> io::Result<usize> {
 /// abstraction that lets `pump::spawn_tx`/`spawn_rx` (and the DNS-reply path) drive
 /// either kind without the old `fd: i32` assumption. Clone is cheap — `Fd` is Copy,
 /// `Wintun` is an `Arc` — so tx, rx, and the DNS path can each hold one.
-/// [T:gate A.0-a refactor; part-d-client-platform-architecture.md §H.8.1]
+/// [T:gate A.0-a refactor; Part D §H.8.1]
 #[derive(Clone)]
 pub enum TunHandle {
     /// POSIX tunnel fd — utun (macOS/iOS), `/dev/net/tun` (Linux), or the Android

@@ -70,7 +70,7 @@
     error = "";
     try {
       // Admin action (M-1) — a multi-user tenant gates this behind a step-up;
-      // runWithStepUp drives the modal transparently. [T:part-d-e7-stepup.md H.2#6]
+      // runWithStepUp drives the modal transparently. [T:Part D H.2#6]
       inviteUrl = await runWithStepUp("invite_member", (proof) =>
         inviteMember(inviteEmail.trim(), memberTtl, proof),
       );
@@ -100,7 +100,7 @@
 
   async function remove(userId: string) {
     try {
-      // Admin action (M-4) — same step-up gate as invite. [T:part-d-e7-stepup.md H.2#7]
+      // Admin action (M-4) — same step-up gate as invite. [T:Part D H.2#7]
       await runWithStepUp("remove_member", (proof) => removeMember(userId, proof));
       await load();
     } catch (e: unknown) {

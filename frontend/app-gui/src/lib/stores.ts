@@ -17,7 +17,7 @@ export const quota = writable<Quota | null>(null);
 
 // A deep-link invite captured by the Rust side and handed over (once authenticated)
 // via the `join-team-pending` / `join-node-pending` events. The target page consumes
-// it on mount and resets this to null. See docs/part-d-invite-flow.md.
+// it on mount and resets this to null. See Part D (invite flow).
 export interface PendingInvite {
 	type: 'join-team' | 'join-node';
 	token: string;

@@ -1,5 +1,5 @@
 // Browser-side WebAuthn/FIDO2 ceremony driver (E-7 StepUp Phase 3 — AAL3,
-// part-d-e7-stepup.md §H.8 Phase 3). The control plane (webauthn-rs) speaks
+// Part D §H.8 Phase 3). The control plane (webauthn-rs) speaks
 // the standard browser JSON transport (camelCase, base64url binary fields) —
 // this is the only layer that touches `navigator.credentials`; the Tauri
 // commands in tauri.ts are opaque JSON pass-throughs either side of it.

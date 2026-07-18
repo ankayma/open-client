@@ -1,6 +1,6 @@
 <script lang="ts">
 	// Shows what the agent actually knows about this device's security posture,
-	// plus TOTP enrollment (E-7 StepUp Phase 2 — part-d-e7-stepup.md §H.8).
+	// plus TOTP enrollment (E-7 StepUp Phase 2 — Part D §H.8).
 	// No cert-renewal action here — not wired to a Tauri command yet, and a
 	// button that does nothing is worse than no button (P.3 honest gap).
 	import { onMount } from 'svelte';

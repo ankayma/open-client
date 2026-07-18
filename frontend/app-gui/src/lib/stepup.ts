@@ -1,4 +1,4 @@
-// Client side of the step-up authority gate (part-d-e7-stepup.md §H.5).
+// Client side of the step-up authority gate (Part D §H.5).
 //
 // A management action in a MULTI-USER tenant (mint a node-invite, revoke a node,
 // invite/offboard a member) is gated server-side: the first call (no proof) returns

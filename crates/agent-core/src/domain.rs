@@ -41,7 +41,7 @@ pub struct EnrollResponse {
     /// RFC3339 expiry of the service token.
     #[serde(default)]
     pub token_expires_at: Option<String>,
-    /// [T:part-d-layer2-cert-infrastructure.md §H.2] Layer 2 node identity:
+    /// [T:Part D §H.2] Layer 2 node identity:
     /// leaf cert signed by the TenantCA, used for mTLS to the broker (B.5.1).
     /// Absent from CPs that pre-date Layer 2 — `None`, no break (P.4 compose).
     #[serde(default)]
@@ -511,7 +511,7 @@ mod tests {
     #[test]
     fn enroll_response_parses_layer2_cert_fields() {
         // Layer 2 CP additionally returns cert material + CRL location.
-        // [T:part-d-layer2-cert-infrastructure.md §H.2 Step 1]
+        // [T:Part D §H.2 Step 1]
         let json = r#"{
             "node_id": "n1",
             "overlay_ip": "100.64.0.2",

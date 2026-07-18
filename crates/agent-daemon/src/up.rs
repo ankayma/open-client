@@ -53,7 +53,7 @@ pub(crate) struct AgentState {
     /// [T:Part B §B.1.4] Canonical workload kind, e.g. "AppServer".
     #[serde(default)]
     pub(crate) workload_kind: Option<String>,
-    /// [T:part-d-layer2-cert-infrastructure.md §H.2] Layer 2 node identity:
+    /// [T:Part D §H.2] Layer 2 node identity:
     /// leaf cert signed by the TenantCA. None until the CP ships Layer 2.
     #[serde(default)]
     pub(crate) node_cert_pem: Option<String>,
@@ -99,7 +99,7 @@ pub async fn run(args: &[String]) -> Result<()> {
 
     // [Layer 2] Expiry warning — display only; renewal flow ships on the P.8
     // trigger (1yr Personal TTL ⇒ not a 1.x launch gate).
-    // [T:part-d-layer2-cert-infrastructure.md §H.1]
+    // [T:Part D §H.1]
     if let Some(cert) = state.node_cert_pem.as_deref() {
         if let Ok(days) = agent_core::cert::cert_expiry_days(cert) {
             if days < 30 {
@@ -631,7 +631,7 @@ struct Config {
     token: Option<String>,
     /// Scoped, short-lived, single-use join token (E-3). Preferred over `token` for
     /// initial enrollment: a golden image / MOTD carries this, never a full-power
-    /// session token. `[T:P.3 + part-d-invite-flow.md §3]`
+    /// session token. `[T:P.3 + Part D §3]`
     join_token: Option<String>,
     listen_port: u16,
     state_path: String,
@@ -999,7 +999,7 @@ async fn load_or_enroll(http: &reqwest::Client, cfg: &Config) -> Result<AgentSta
     // Fresh enroll. Prefer a scoped join token (headless server path) over a full
     // session token so a golden image / MOTD never redeems a full-power secret —
     // the join token is single-use + short-TTL and enrolls this node directly.
-    // `[T:P.3 honest-power + part-d-invite-flow.md §3 join redeem]`
+    // `[T:P.3 honest-power + Part D §3 join redeem]`
     if let Some(join_token) = cfg.join_token.clone() {
         return enroll_via_join_and_persist(http, cfg, &join_token, None).await;
     }
@@ -1146,7 +1146,7 @@ async fn enroll_and_persist(
 /// handling as `enroll_and_persist`; only the request/endpoint differ (no Bearer,
 /// the join token IS the authorization — A.1.10/A.1.22). The node is tagged
 /// `AppServer` (Part B §B.1.4) via the control plane's `join_enroll` workload_kind.
-/// `[T:part-d-invite-flow.md §3 + A.1.10]`
+/// `[T:Part D §3 + A.1.10]`
 async fn enroll_via_join_and_persist(
     http: &reqwest::Client,
     cfg: &Config,
@@ -1228,7 +1228,7 @@ fn finalize_enroll(cfg: &Config, kp: WgKeypair, resp: EnrollResponse) -> Result<
     // failure is loud but non-fatal: Layer 1 (bearer token) still works and the
     // broker isn't dialed until the broker milestone. [A: fail-open here until
     // an mTLS consumer exists; revisit when broker transport lands]
-    // [T:part-d-layer2-cert-infrastructure.md §H.2 Step 1]
+    // [T:Part D §H.2 Step 1]
     if let (Some(leaf), Some(ca)) = (&resp.node_cert_pem, &resp.provisioning_ca_pem) {
         match agent_core::cert::verify_cert_chain(leaf, ca) {
             Ok(()) => println!("node cert verified against provisioning CA"),

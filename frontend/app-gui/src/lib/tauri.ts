@@ -213,7 +213,7 @@ export async function sshClose(id: string): Promise<void> {
 }
 
 // A step-up proof carried on a sensitive action in a multi-user tenant — the
-// result of solving a challenge via `verifyStepUp`. [T:part-d-e7-stepup.md §H.5]
+// result of solving a challenge via `verifyStepUp`. [T:Part D §H.5]
 export interface StepUpProof {
   proofToken: string;
 }
@@ -227,13 +227,13 @@ export async function requestStepUp(purpose: string): Promise<string> {
 
 // Exchange a solved OTP challenge for a short-lived, purpose-scoped proof_token
 // — the generalized step-up interface every gated action retries with.
-// [T:part-d-e7-stepup.md §H.5]
+// [T:Part D §H.5]
 export async function verifyStepUp(purpose: string, challengeId: string, code: string): Promise<string> {
   return invoke<string>("verify_step_up", { purpose, challengeId, code });
 }
 
 // Same exchange as verifyStepUp, but against the enrolled TOTP secret — no
-// challenge_id, no email round trip. [T:part-d-e7-stepup.md §H.8 Phase 2]
+// challenge_id, no email round trip. [T:Part D §H.8 Phase 2]
 export async function verifyStepUpTotp(purpose: string, code: string): Promise<string> {
   return invoke<string>("verify_step_up_totp", { purpose, code });
 }

@@ -10,7 +10,7 @@
 ::
 :: The agent daemon is bundled as a Tauri sidecar (externalBin) and needs
 :: wintun.dll beside it at runtime; this script downloads the Microsoft-signed
-:: DLL from wintun.net (not vendored — see .gitignore). [T:part-d-infrastructure]
+:: DLL from wintun.net (not vendored — see .gitignore). [T:workspace private]
 setlocal ENABLEEXTENSIONS
 set "SCRIPT_DIR=%~dp0"
 :: packaging\windows\ -> repo root (two levels up), resolved from this script's path.

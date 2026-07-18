@@ -93,7 +93,7 @@
 	// recipient SCANNED the QR or opened `ankayma://join?token=…` — AUTO-enrolls this
 	// device. No paste box, no confirm: scan = enrolled.
 	// Founder decision 2026-06-27. (The spec only mandates "token pre-filled"; auto vs
-	// confirm is an impl choice — see part-d-invite-flow.md §Cases C/D.)
+	// confirm is an impl choice — see Part D §Cases C/D.)
 	let enrolling = $state(false);
 	let joinError = $state<string | null>(null);
 	let joinDone  = $state(false);

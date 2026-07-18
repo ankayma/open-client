@@ -107,7 +107,7 @@ pub async fn run(args: &[String]) -> Result<()> {
         token_expires_at: None,
         workload_kind: Some("BatchWorker".to_string()),
         // Ephemeral CI node — lives minutes, never dials the broker: no Layer 2
-        // cert material. [T:part-d-layer2-cert-infrastructure.md §H.3 F-x rows]
+        // cert material. [T:Part D §H.3 F-x rows]
         node_cert_pem: None,
         provisioning_ca_pem: None,
         crl_pem: None,

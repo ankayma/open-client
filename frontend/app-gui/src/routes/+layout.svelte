@@ -59,7 +59,7 @@
 				// Warm start: the running app received the deep link.
 				await listen('auth-pending', () => refreshAuth(true)),
 				// Invite deep links, handed over by Rust once authenticated: stash the
-				// token and route to the page that consumes it. [A] part-d-invite-flow.
+				// token and route to the page that consumes it. [A] Part D (invite flow).
 				await listen<string>('join-team-pending', (e) => {
 					pendingInvite.set({ type: 'join-team', token: e.payload });
 					goto('/members');

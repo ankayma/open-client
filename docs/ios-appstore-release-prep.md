@@ -128,7 +128,7 @@ App Group `group.com.ankayma.app`, both with Network Extensions + App Groups ena
 ## 7. Owner checklist — App Store Connect submission (2026-06-30)
 
 > Code-side complete (Network Extension entitlement ✅, JS↔Swift bridge ✅, `PrivacyInfo.xcprivacy`
-> ✅ commit `5c250ea`, version sync ✅ commit `ef6725a` — see §5/§6 + `part-d-infrastructure.md`
+> ✅ commit `5c250ea`, version sync ✅ commit `ef6725a` — see §5/§6 (workspace private)
 > §7). The 7 tasks below **can only be done on the Apple Developer / App Store Connect web using an
 > Account Holder/Admin account** — cannot be automated by tooling. Follow the order (2 → 6 is a
 > dependency chain; 1/3/4/5 can be done in parallel while waiting).
@@ -287,13 +287,13 @@ The least complicated approach (no need to escalate ASC API key permissions):
 Go to **TestFlight** first (build appears automatically after a few minutes of processing) — self-test
 with your own account + real device before "Submit for Review". When submitting, attach a note for the
 reviewer (**App Review Information**) pointing to how to sign in (paste a reviewer token, §7.4 of
-`part-d-infrastructure.md`, or in the "Notes" field: *"Tap 'Paste session token', use: <token>"*).
+workspace private, or in the "Notes" field: *"Tap 'Paste session token', use: <token>"*).
 
 ---
 
 ## 8. SUBMIT-DAY RUNBOOK (2026-07-05) — làm theo thứ tự
 
-> **Verdict readiness**: **Server-side + demo READY 100%** (demo-tenant riêng live, node + service demo Open/SSH được, isolation verify sạch — chi tiết + credentials ở workspace private `part-d-infrastructure.md §7.4b`). **Chặn còn lại = build nào submit + metadata ASC (owner-side).**
+> **Verdict readiness**: **Server-side + demo READY 100%** (demo-tenant riêng live, node + service demo Open/SSH được, isolation verify sạch — chi tiết + credentials ở workspace private §7.4b). **Chặn còn lại = build nào submit + metadata ASC (owner-side).**
 
 ### 8.0 QUYẾT ĐỊNH build — chọn 1 (đọc trước)
 
@@ -306,10 +306,10 @@ Nếu chọn ĐÚNG: trước khi build, commit các thay đổi client (Claude 
 
 ### 8.1 REVIEWER INFO (điền vào App Store Connect → App Review Information → Sign-In)
 
-> **User name + Password (token) = lấy từ workspace PRIVATE** `part-d-infrastructure.md §7.4b` (token demo-tenant, KHÔNG commit vào repo public này). Dùng **token demo-tenant**, KHÔNG dùng token tenant-chính (lộ node riêng).
+> **User name + Password (token) = lấy từ workspace PRIVATE** §7.4b (token demo-tenant, KHÔNG commit vào repo public này). Dùng **token demo-tenant**, KHÔNG dùng token tenant-chính (lộ node riêng).
 
 - **Sign-in required**: ✅ bật.
-- **User name / Password**: → dán từ `part-d-infrastructure.md §7.4b` (private).
+- **User name / Password**: → dán từ workspace private §7.4b (private).
 - **Notes** (khớp UI **build mới** — nếu submit build cũ, sửa "Enter a token instead" → "Paste session token"):
   ```
   This app does not use a traditional username/password login. On the Welcome
@@ -334,7 +334,7 @@ Nếu chọn ĐÚNG: trước khi build, commit các thay đổi client (Claude 
 
 ### 8.3 SAU KHI REVIEW XONG — teardown demo (đừng quên)
 
-Xoá demo-tenant + node demo để không rác — lệnh teardown đầy đủ ở workspace private `part-d-infrastructure.md §7.4b`.
+Xoá demo-tenant + node demo để không rác — lệnh teardown đầy đủ ở workspace private §7.4b.
 
 ---
 
@@ -347,7 +347,7 @@ Xoá demo-tenant + node demo để không rác — lệnh teardown đầy đủ 
   end-to-end (tasks 1→5): agent-core pump + agent-ios-ptp FFI + Swift provider + extension
   target + app TunnelManager. Extension BUILD SUCCEEDED (sim). Remaining: JS↔Swift bridge + device +
   App Store 5.4. Provisioning (2 App IDs + App Group) created. Added §5/§6.
-- 2026-06-30 — JS↔Swift bridge + device build done (see `part-d-infrastructure.md` §6-7).
+- 2026-06-30 — JS↔Swift bridge + device build done (see workspace private §6-7).
   Code-side blockers closed: version sync extension (commit `ef6725a`), `PrivacyInfo.xcprivacy`
   app+extension based on real symbol scan `nm -u` (commit `5c250ea`). Added **§7 owner
   checklist** — 7 remaining tasks that can only be done on the Apple Developer/App Store Connect web

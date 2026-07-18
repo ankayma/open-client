@@ -40,7 +40,7 @@ pub enum ApiError {
     /// flow (`verify_step_up` for a solved OTP/TOTP → `proof_token`), then
     /// retries with the proof. `required_aal` says how strong the proof must be
     /// (2 = email-OTP/TOTP, 3 = WebAuthn/YubiKey — A.1.10 no-soft-fallback).
-    /// [T:part-d-e7-stepup.md §H.5]
+    /// [T:Part D §H.5]
     StepUpRequired { purpose: String, required_aal: i32 },
 }
 
@@ -268,7 +268,7 @@ pub async fn enroll(
 /// enrollment (TH-A dynamic trust — no CA pinned in the binary, no system
 /// roots). For broker connections (AgentControl, B.5.1); CP REST calls keep
 /// `reqwest::Client::new()` with system roots — cp.ankayma.com serves a
-/// public web-PKI cert. `[T:part-d-layer2-cert-infrastructure.md §H.2 Step 1]`
+/// public web-PKI cert. `[T:Part D §H.2 Step 1]`
 ///
 /// Excluding system roots is what makes cross-PL isolation fail at the TLS
 /// layer: a broker of another product line presents a chain to a different
@@ -613,7 +613,7 @@ pub async fn list_members(
 
 /// Mint a member invite (admin). `ttl_seconds` optionally overrides the server's
 /// default member-invite TTL (clamped server-side). Gated behind a step-up proof
-/// (M-1 — part-d-e7-stepup.md H.2#6). Returns the `ankayma://join-team?…` URL.
+/// (M-1 — Part D H.2#6). Returns the `ankayma://join-team?…` URL.
 pub async fn invite_member(
     http: &reqwest::Client,
     base_url: &str,
@@ -729,7 +729,7 @@ pub async fn join_team(
 }
 
 /// Remove a member (admin). `DELETE /api/v1/members/{user_id}`. Gated behind a
-/// step-up proof (M-4 — part-d-e7-stepup.md H.2#7).
+/// step-up proof (M-4 — Part D H.2#7).
 pub async fn remove_member(
     http: &reqwest::Client,
     base_url: &str,
@@ -1161,7 +1161,7 @@ pub async fn request_step_up(
 /// `POST /api/v1/stepup/verify` (session-authed) — exchange a solved OTP
 /// challenge for a short-lived, purpose-scoped `proof_token`. This is the
 /// generalized interface every gated action now takes a proof from, instead of
-/// re-verifying `challenge_id`/`code` inline. [T:part-d-e7-stepup.md §H.5]
+/// re-verifying `challenge_id`/`code` inline. [T:Part D §H.5]
 pub async fn verify_step_up(
     http: &reqwest::Client,
     base_url: &str,
@@ -1186,7 +1186,7 @@ pub async fn verify_step_up(
 
 /// Same exchange as `verify_step_up`, but against the user's enrolled TOTP
 /// secret instead of an emailed challenge — no `challenge_id`, no email round
-/// trip. [T:part-d-e7-stepup.md §H.8 Phase 2]
+/// trip. [T:Part D §H.8 Phase 2]
 pub async fn verify_step_up_totp(
     http: &reqwest::Client,
     base_url: &str,

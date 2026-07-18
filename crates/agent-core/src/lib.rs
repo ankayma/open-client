@@ -22,7 +22,7 @@ pub mod tunnel; // WireGuard data-plane engine (boringtun)
 pub use crypto::{key_bytes_from_b64, KeyError, WgKeypair};
 
 // Layer 2 node-cert utilities (expiry warning, post-enroll chain sanity check)
-// — same seam rule as above. [T:part-d-layer2-cert-infrastructure.md §H.2]
+// — same seam rule as above. [T:Part D §H.2]
 pub use crypto::cert;
 
 // Re-export the HTTP client type so GUI/daemon share one client and never talk
@@ -35,7 +35,7 @@ pub use reqwest;
 /// resort. Duplicating this per crate is what let the daemon get the USERPROFILE
 /// fallback while the GUI kept reading an empty HOME and persisting identity to a
 /// relative `.ankayma` under an unwritable CWD. Keep it here, call it everywhere.
-/// [T:A.1.3; part-d-node-identity-device-binding.md §H.7 1.5]
+/// [T:A.1.3; Part D §H.7 1.5]
 pub fn home_root() -> String {
     std::env::var("HOME")
         .or_else(|_| std::env::var("USERPROFILE"))
