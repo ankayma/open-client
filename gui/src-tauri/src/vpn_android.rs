@@ -362,8 +362,12 @@ fn start_tunnel(
         }
     };
 
-    pump::spawn_tx(tun_fd, udp.clone(), peers.clone(), dns);
-    pump::spawn_rx(tun_fd, udp.clone(), peers.clone());
+    // spawn_tx/spawn_rx take a unified TunHandle now (was a raw fd); wrap the
+    // Android VpnService descriptor. tun_fd is i32 (Copy) so it stays usable after.
+    // `[T:agent_core::tundev::TunHandle::Fd]`
+    let tun = agent_core::tundev::TunHandle::Fd(tun_fd);
+    pump::spawn_tx(tun.clone(), udp.clone(), peers.clone(), dns);
+    pump::spawn_rx(tun, udp.clone(), peers.clone());
     pump::spawn_timers(
         udp.clone(),
         peers.clone(),
