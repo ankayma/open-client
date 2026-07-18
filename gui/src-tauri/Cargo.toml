@@ -1,6 +1,6 @@
 [package]
 name = "ankayma-gui"
-version = "1.1.4"
+version = "1.1.5"
 description = "Ankayma GUI shell (Tauri 2)"
 authors = []
 license = "LicenseRef-Elastic-2.0"
