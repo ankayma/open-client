@@ -388,9 +388,21 @@
         {/if}
       </span>
     </div>
-    {#if ciRules(group.node).length > 0 || (!group.owned && sshPeer(group.node))}
-      <!-- Node-level actions on their own row, matching the flat card layout. -->
+    {#if !group.owned || ciRules(group.node).length > 0}
+      <!-- Node-level actions on their own row. Path chain and CI/CD are per-NODE
+           (the live data-path to THIS node, and this node's deploy ledger) — the
+           same for every service on it, so they live here once, not repeated per
+           service. Only "Open" is per-domain (below). CI/CD hides when the node has
+           no deploy rule. -->
       <div class="card-actions">
+        {#if !group.owned}
+          <button
+            class="btn-secondary chain-btn"
+            disabled={probedDown(group.node)}
+            title={probedDown(group.node) ? "Unreachable — no live path to show" : "Signed data-path to this node"}
+            onclick={() => (pathChainSvc = group.services[0])}
+          >◈ path chain</button>
+        {/if}
         {#if ciRules(group.node).length > 0}
           <button class="btn-secondary ci-chip" title="CI deploy history for {group.node}" onclick={() => openCiHistory(group.node)}>🧾 CI/CD</button>
         {/if}
@@ -425,14 +437,9 @@
           {#if svc.status === "denied"}
             <span class="denied-text">access denied</span>
           {:else if !group.owned}
-            <!-- self device: no Open/path chain to yourself (see head CI/CD only). -->
+            <!-- Per-domain action only: Open. Path chain + CI/CD are node-level (in
+                 the node header above) — they're identical for every service here. -->
             <div class="child-actions">
-              <button
-                class="btn-secondary sm"
-                disabled={probedDown(svc.node)}
-                title={probedDown(svc.node) ? "Unreachable — no live path to show" : ""}
-                onclick={() => (pathChainSvc = svc)}
-              >◈ path chain</button>
               <button class="btn-primary sm" disabled={!connected || probedDown(svc.node)} title={probedDown(svc.node) ? "Unreachable — no response over the mesh" : ""} onclick={() => openSubdomain(svc.fqdn)}>Open ↗</button>
             </div>
           {/if}

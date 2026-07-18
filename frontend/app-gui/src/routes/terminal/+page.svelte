@@ -9,6 +9,7 @@
 	import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 	import '@xterm/xterm/css/xterm.css';
 	import { sshOpen, sshWrite, sshResize, sshClose, openSshTerminal, getPlatform } from '$lib/tauri';
+	import SshReceipts from '$lib/components/SshReceipts.svelte';
 
 	const nodeId = $derived($page.url.searchParams.get('node') ?? '');
 	const host = $derived($page.url.searchParams.get('host') ?? nodeId);
@@ -49,6 +50,7 @@
 	let unlistenEnd: UnlistenFn | null = null;
 	let status = $state<'connecting' | 'connected' | 'ended' | 'error'>('connecting');
 	let errorMsg = $state('');
+	let showSshLog = $state(false); // SSH access receipts modal (signed ledger)
 	let notice = $state(''); // non-fatal notice (e.g. elevate needs step-up) — keeps the shell
 	let elevated = $state(false);
 
@@ -210,12 +212,17 @@
 				<button class="extbtn" onclick={openExternal}>Mở ngoài ↗</button>
 			</div>
 		{/if}
+		<button class="sshlog" onclick={() => (showSshLog = true)} title="Signed SSH access log (ledger receipts)">🧾 Log</button>
 		{#if status === 'connected' && !elevated}
 			<button class="elevate" onclick={elevate}>Elevate ↑</button>
 		{:else}
 			<span class="spacer"></span>
 		{/if}
 	</header>
+
+	{#if showSshLog}
+		<SshReceipts node={nodeId} onclose={() => (showSshLog = false)} />
+	{/if}
 
 	<!-- Key-bar at the TOP so the on-screen keyboard (which covers the bottom)
 	     never hides it. Only the keys a virtual keyboard lacks. Touch/mobile only. -->
@@ -317,6 +324,20 @@
 		padding: 0.3rem 0.6rem;
 		font-size: 0.8rem;
 		cursor: pointer;
+	}
+	.sshlog {
+		background: transparent;
+		color: var(--c-text-dim);
+		border: 1px solid var(--c-border);
+		border-radius: 6px;
+		padding: 0.3rem 0.6rem;
+		font-size: 0.8rem;
+		cursor: pointer;
+		white-space: nowrap;
+	}
+	.sshlog:hover {
+		color: var(--c-text);
+		border-color: var(--c-text-dim);
 	}
 	.ext {
 		display: flex;

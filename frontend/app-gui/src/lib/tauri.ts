@@ -11,6 +11,7 @@ import type {
   CiPolicy,
   CiPolicyDraft,
   CiRun,
+  SshSession,
   PeerBrief,
   Subdomain,
   SubdomainCert,
@@ -157,6 +158,10 @@ export async function addCiPolicy(req: CiPolicyDraft, proof?: StepUpProof): Prom
 // narrowed to one node hostname. Read-only (A.1.8); admin/owner default.
 export async function ciHistory(node?: string): Promise<CiRun[]> {
   return invoke<CiRun[]>("ci_history", { node: node ?? null });
+}
+
+export async function sshHistory(node?: string): Promise<SshSession[]> {
+  return invoke<SshSession[]>("ssh_history", { node: node ?? null });
 }
 
 export async function deleteCiPolicy(repo: string, proof?: StepUpProof): Promise<void> {

@@ -3,8 +3,8 @@
 use crate::domain::{
     AgentEnrollRequest, AgentEnrollResponse, CiDeployRequest, CiDeployResponse, CiPolicy,
     CiPolicyReq, CiRun, EnrollRequest, EnrollResponse, MembersView, MyAccess, NodeBrief, PeerInfo,
-    PolicyView, Quota, ResolveTable, SessionInfo, SshSessionRequest, SshSessionResponse, Subdomain,
-    SubdomainCert, SubdomainCsrReq, SubdomainReq,
+    PolicyView, Quota, ResolveTable, SessionInfo, SshSession, SshSessionRequest,
+    SshSessionResponse, Subdomain, SubdomainCert, SubdomainCsrReq, SubdomainReq,
 };
 
 /// Hard upper bound for one REST round-trip to the control plane (headers +
@@ -1058,6 +1058,26 @@ pub async fn ci_history(
     };
     let resp: Resp = get_json(http, base_url, &path, session_token).await?;
     Ok(resp.runs)
+}
+
+/// [F-2 viewer] SSH session history for a node — signed `SshSessionOpened` receipts
+/// (connection-level only). Mirrors `ci_history`.
+pub async fn ssh_history(
+    http: &reqwest::Client,
+    base_url: &str,
+    session_token: &str,
+    node: Option<&str>,
+) -> Result<Vec<SshSession>, ApiError> {
+    #[derive(serde::Deserialize)]
+    struct Resp {
+        sessions: Vec<SshSession>,
+    }
+    let path = match node {
+        Some(n) => format!("/api/v1/ssh/history?node={n}"),
+        None => "/api/v1/ssh/history".to_string(),
+    };
+    let resp: Resp = get_json(http, base_url, &path, session_token).await?;
+    Ok(resp.sessions)
 }
 
 /// Create or update a CI/CD deploy policy (server upserts by `repo`).

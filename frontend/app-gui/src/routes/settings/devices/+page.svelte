@@ -56,22 +56,24 @@
 
 	// Whose device this is, for the admin roster view. Returns null when we can't
 	// name an owner (solo tenant, or a member with no roster access) -- then no
-	// label renders. "you" for my own nodes, "@login" for a teammate's.
+	// label renders. "you" for my own nodes, the owner's email (or @login) for a
+	// teammate's -- so three look-alike iPhones are told apart by who enrolled each.
 	function ownerLabel(d: PeerBrief): string | null {
 		const uid = d.owner_user_id;
 		if (!uid) return null;
-		const login = memberLogins.get(uid);
-		if (uid === myUserId) return login ? `you · @${login}` : 'you';
-		return login ? `@${login}` : null;
+		const who = memberLabels.get(uid);
+		if (uid === myUserId) return who ? `you · ${who}` : 'you';
+		return who ?? null;
 	}
 
 	let devices = $state<PeerBrief[]>([]);
 	let thisNodeId = $state<string | null>(null);
-	// user_id -> github_login, so an admin can tell whose device each node is when
-	// several members enrol lookalike hardware (e.g. three iPhones). Only an admin
-	// gets the full roster; a member sees only their own nodes, so the map is empty
-	// and no owner label is shown -- which is correct, there's nothing to disambiguate.
-	let memberLogins = $state(new Map<string, string>());
+	// user_id -> display label (email preferred, else @github_login), so an admin can
+	// tell whose device each node is when several members enrol lookalike hardware
+	// (e.g. three iPhones). Only an admin gets the full roster; a member sees only
+	// their own nodes, so the map is empty and no owner label is shown -- correct,
+	// there's nothing to disambiguate.
+	let memberLabels = $state(new Map<string, string>());
 	// My own user_id, read off this device's peer entry (PeerBrief carries owner_user_id).
 	// Lets us mark my nodes "you" instead of my own @login.
 	let myUserId = $state<string | null>(null);
@@ -103,7 +105,12 @@
 			]);
 			thisNodeId = self?.node_id ?? null;
 			devices = peers;
-			memberLogins = new Map((roster?.members ?? []).map((m) => [m.user_id, m.github_login]));
+			memberLabels = new Map(
+				(roster?.members ?? []).map((m) => [
+					m.user_id,
+					m.email ?? (m.github_login ? `@${m.github_login}` : m.user_id.slice(0, 12))
+				])
+			);
 			myUserId = peers.find((d) => d.node_id === thisNodeId)?.owner_user_id ?? null;
 			pathKnown = proof?.connected ?? false;
 			handshakeAge = new Map(

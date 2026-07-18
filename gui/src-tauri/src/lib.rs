@@ -2240,6 +2240,23 @@ async fn ci_history(
     .map_err(|e| e.to_string())
 }
 
+/// [F-2 viewer] SSH session receipts for a node — the signed half of NoKey SSH.
+#[tauri::command]
+async fn ssh_history(
+    node: Option<String>,
+    state: State<'_, AppState>,
+) -> Result<Vec<domain::SshSession>, String> {
+    let tok = state.token().ok_or("not signed in")?;
+    adapters::ssh_history(
+        &state.http,
+        &state.regional_base_url(),
+        &tok,
+        node.as_deref(),
+    )
+    .await
+    .map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 async fn add_ci_policy(
     req: CiPolicyDraft,
@@ -2900,6 +2917,7 @@ pub fn run() {
             probe_reachable,
             list_ci_policies,
             ci_history,
+            ssh_history,
             add_ci_policy,
             delete_ci_policy,
             list_nodes,

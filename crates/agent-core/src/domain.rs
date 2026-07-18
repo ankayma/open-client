@@ -358,6 +358,8 @@ pub struct SubdomainCert {
 pub struct Member {
     pub user_id: String,
     pub github_login: String,
+    #[serde(default)]
+    pub email: Option<String>,
     pub role: String,
     #[serde(default)]
     pub created_at: Option<String>,
@@ -419,6 +421,19 @@ pub struct CiRun {
     pub environment: Option<String>,
     pub outcome: Option<String>,
     pub target_host: Option<String>,
+    pub block_hash: Option<String>,
+    pub at: Option<String>,
+}
+
+/// [F-2 viewer] One SSH session from GET /api/v1/ssh/history — a read-only
+/// projection of a `SshSessionOpened` ledger event. Connection-level only
+/// (who / which-node / when), never the transcript (A.1.1). `[T:A.1.8]`
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SshSession {
+    pub session_id: Option<String>,
+    pub node_id: Option<String>,
+    pub target_host: Option<String>,
+    pub login: Option<String>,
     pub block_hash: Option<String>,
     pub at: Option<String>,
 }

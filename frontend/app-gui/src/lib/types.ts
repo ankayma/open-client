@@ -127,6 +127,7 @@ export interface SubdomainCert {
 export interface Member {
   user_id: string;
   github_login: string;
+  email?: string;
   role: string;
   created_at?: string;
   is_owner: boolean;
@@ -147,6 +148,17 @@ export interface CiRun {
   environment?: string;
   outcome?: string;
   target_host?: string;
+  block_hash?: string;
+  at?: string;
+}
+
+// [F-2 viewer] One SSH session from GET /api/v1/ssh/history — signed
+// SshSessionOpened receipt (connection-level only, no transcript).
+export interface SshSession {
+  session_id?: string;
+  node_id?: string;
+  target_host?: string;
+  login?: string;
   block_hash?: string;
   at?: string;
 }
