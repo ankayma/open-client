@@ -10,9 +10,23 @@
 # Secrets:
 #   TAURI_SIGNING_PRIVATE_KEY            minisign private key (SHARED with macOS)
 #   TAURI_SIGNING_PRIVATE_KEY_PASSWORD   password for the above
+#   COSIGN_PRIVATE_KEY   base64 of cosign.key (SHARED with release-linux — the same
+#                        key that signs the Linux SHA256SUMS). `openssl base64 -A -in cosign.key`
+#   COSIGN_PASSWORD      password for cosign.key
 #   R2_ACCESS_KEY_ID / R2_SECRET_ACCESS_KEY / R2_ENDPOINT   R2 S3-compatible API token
 #   R2_BUCKET_MACOS   bucket behind get.ankayma.com (shared; this job writes the
 #                     windows/ prefix — rename to R2_BUCKET if you prefer)
+#
+# Two INDEPENDENT authenticity layers ship beside the .exe, mirroring the Linux
+# curl|sh channel (scripts/release-linux.sh) — the Path A (direct-download) website integrity model:
+#   1. SHA256SUMS + SHA256SUMS.sig  — Cosign detached signature over the checksum
+#      manifest, verifiable with the committed cosign.pub. Works TODAY, independent
+#      of Authenticode (which is still the TODO below). Defends against a swapped
+#      .exe on get.ankayma.com since cosign.pub lives in the git repo, not on R2.
+#   2. GitHub Artifact Attestation (SLSA build provenance, Sigstore + Rekor) — the
+#      final step; ties the .exe to this exact workflow run/commit on an immutable
+#      transparency log the host operator cannot forge. Verify:
+#        gh attestation verify Ankayma_<ver>_x64-setup.exe -R ankayma/open-client
 #   TODO Azure Trusted Signing (add when the cert profile exists):
 #     AZURE_TENANT_ID / AZURE_CLIENT_ID / AZURE_CLIENT_SECRET
 #     AZURE_TS_ENDPOINT / AZURE_TS_ACCOUNT / AZURE_TS_CERT_PROFILE
@@ -27,6 +41,10 @@ jobs:
   build-windows:
     runs-on: windows-latest
     timeout-minutes: 60
+    permissions:
+      contents: read
+      id-token: write        # OIDC token for GitHub Artifact Attestations (Sigstore)
+      attestations: write     # write the build-provenance attestation
     steps:
       - uses: actions/checkout@v4
 
@@ -111,6 +129,29 @@ jobs:
           }
           EOF
 
+      # Cosign detached signature over SHA256SUMS — same model as
+      # scripts/release-linux.sh (one signature authenticates every listed file).
+      # Independent of Authenticode; verifiable with the committed cosign.pub.
+      - name: Checksums + Cosign signature (website verify — Path A)
+        shell: bash
+        env:
+          COSIGN_PRIVATE_KEY: ${{ secrets.COSIGN_PRIVATE_KEY }}
+          COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}
+          COSIGN_VERSION: v2.4.1   # [A — keep in step with release-linux.yml]
+        run: |
+          set -euo pipefail
+          curl -sSfL "https://github.com/sigstore/cosign/releases/download/${COSIGN_VERSION}/cosign-windows-amd64.exe" -o cosign.exe
+          echo "$COSIGN_PRIVATE_KEY" | base64 -d > cosign.key
+          SETUP_BASE="$(basename "$(find target/release/bundle/nsis -iname '*-setup.exe' | head -1)")"
+          cp cosign.pub publish/
+          ( cd publish && sha256sum "$SETUP_BASE" > SHA256SUMS )
+          ./cosign.exe sign-blob --yes --tlog-upload=false --key cosign.key \
+            --output-signature publish/SHA256SUMS.sig publish/SHA256SUMS
+          ./cosign.exe verify-blob --insecure-ignore-tlog --key cosign.pub \
+            --signature publish/SHA256SUMS.sig publish/SHA256SUMS
+          rm -f cosign.key
+          echo "  ✓ cosign signature verified"
+
       - name: Publish to R2 (get.ankayma.com/windows/)
         shell: bash
         env:
@@ -119,3 +160,11 @@ jobs:
           AWS_DEFAULT_REGION: auto
         run: |
           aws s3 sync publish/ "s3://${{ secrets.R2_BUCKET_MACOS }}/windows/" --endpoint-url "${{ secrets.R2_ENDPOINT }}"
+
+      # SLSA build provenance on an immutable transparency log (Sigstore + Rekor).
+      # Last step — the .exe is already published above, so a hiccup here never
+      # blocks the release; it only annotates the artifact after the fact.
+      - name: Attest build provenance (.exe)
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: "publish/*-setup.exe"

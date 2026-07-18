@@ -40,6 +40,8 @@ jobs:
     timeout-minutes: 60
     permissions:
       contents: write   # GITHUB_TOKEN needs this to create/edit the GitHub Release
+      id-token: write        # OIDC token for GitHub Artifact Attestations (Sigstore)
+      attestations: write
     steps:
       - uses: actions/checkout@v4
 
@@ -165,3 +167,13 @@ jobs:
           else
             gh release create "$TAG" "$DMG" --title "Ankayma $TAG (macOS)" --notes-file "$RUNNER_TEMP/relnotes.md"
           fi
+
+      # SLSA build provenance on the DMG (Sigstore + Rekor). Best-effort ONLY:
+      # continue-on-error keeps the job green so this can NEVER block the notarized
+      # DMG release — the DMG is already signed, notarized, published to R2 and the
+      # GitHub Release above by the time this runs. Additive to Apple notarization.
+      - name: Attest build provenance (.dmg)
+        continue-on-error: true
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: "publish/*.dmg"

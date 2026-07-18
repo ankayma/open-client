@@ -1,0 +1,165 @@
+# GitHub Actions — Android release APK for DIRECT website download (Path A — direct download),
+# published to get.ankayma.com/android/ (Cloudflare R2). Mirror of release-linux's
+# authenticity model: the APK is signed with our own release keystore (Android's
+# own on-device signature check + same-key update enforcement), and a Cosign
+# detached signature over SHA256SUMS gives host-independent authenticity for the
+# website download — verifiable with the committed cosign.pub.
+#
+# This is the sovereignty / self-host lane. It is INDEPENDENT of a future Google
+# Play listing (Play App Signing + Play Protect is the mainstream-trust lane and is
+# handled separately). Both ship the same source — a common WireGuard-client pattern.
+#
+# [A — UNVERIFIED ON FIRST RUN] Unlike the macOS/Linux/Windows workflows (validated
+# against real CI runs), this one has not executed yet. Toolchain pins mirror the
+# locally-verified Mac mini build (memory: android-build-verified-moto-g06 — NDK
+# 27.2.12479018, cargo-tauri 2.x, target aarch64). Bump pins if the first run fails.
+#
+# Required repo secrets (Settings → Secrets and variables → Actions):
+#   ANDROID_KEYSTORE_BASE64   base64 of the release keystore .jks:
+#                               keytool -genkey -v -keystore ankayma-release.jks \
+#                                 -keyalg RSA -keysize 4096 -validity 10000 -alias ankayma
+#                               openssl base64 -A -in ankayma-release.jks   # -> this secret
+#   ANDROID_KEYSTORE_PASSWORD store password
+#   ANDROID_KEY_ALIAS         key alias (e.g. ankayma)
+#   ANDROID_KEY_PASSWORD      key password (often same as the store password)
+#   COSIGN_PRIVATE_KEY        base64 of cosign.key (SHARED with release-linux/windows)
+#   COSIGN_PASSWORD           password for cosign.key
+#   R2_ACCESS_KEY_ID / R2_SECRET_ACCESS_KEY / R2_ENDPOINT   R2 S3-compatible API token
+#   R2_BUCKET_MACOS           bucket behind get.ankayma.com (shared; writes android/ prefix)
+#
+# Full setup + the out-of-band cert-fingerprint publishing step: docs/android-distribution-setup.md
+name: release-android
+
+on:
+  push:
+    tags: ["v*.*.*"]
+  workflow_dispatch: {}
+
+jobs:
+  build-android:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      id-token: write        # OIDC token for GitHub Artifact Attestations (Sigstore)
+      attestations: write
+    env:
+      # arm64-v8a covers effectively every phone since ~2017. Multi-ABI (adding
+      # armeabi-v7a/x86_64) is a later follow-up; start with the verified target.
+      TAURI_ANDROID_TARGET: aarch64
+      NDK_VERSION: "27.2.12479018"      # matches the locally-verified build
+      BUILD_TOOLS_VERSION: "34.0.0"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust (pinned via rust-toolchain.toml) + Android target
+        run: |
+          rustup show
+          rustup target add aarch64-linux-android
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Provision Android SDK bits (NDK + build-tools)
+        run: |
+          set -euo pipefail
+          # ubuntu-latest ships the cmdline-tools + a base SDK at $ANDROID_SDK_ROOT.
+          yes | sdkmanager --licenses >/dev/null 2>&1 || true
+          sdkmanager --install "ndk;${NDK_VERSION}" "build-tools;${BUILD_TOOLS_VERSION}" "platform-tools" >/dev/null
+          echo "ANDROID_NDK_HOME=${ANDROID_SDK_ROOT}/ndk/${NDK_VERSION}" >> "$GITHUB_ENV"
+          echo "NDK_HOME=${ANDROID_SDK_ROOT}/ndk/${NDK_VERSION}" >> "$GITHUB_ENV"
+
+      - name: Install frontend deps
+        working-directory: frontend/app-gui
+        run: npm ci
+
+      - name: Install cargo-tauri CLI
+        run: cargo install tauri-cli --locked --version "^2"
+
+      # gen/android is git-ignored (regenerated scaffolding) — recreate it here.
+      - name: Tauri Android init
+        working-directory: gui
+        run: cargo tauri android init
+
+      # No signingConfig in the generated Gradle → assembleRelease emits an UNSIGNED
+      # apk. We sign the artifact directly with apksigner afterwards (deterministic,
+      # independent of Tauri's Gradle internals) — the Android analogue of macOS
+      # codesign / the Windows signCommand.
+      - name: Build release APK (unsigned)
+        working-directory: gui
+        run: cargo tauri android build --apk --target "${TAURI_ANDROID_TARGET}"
+
+      - name: Sign APK (apksigner, release keystore)
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          VERSION="$(sed -n 's/.*"version": *"\(.*\)".*/\1/p' gui/src-tauri/tauri.conf.json | head -1)"
+          BT="${ANDROID_SDK_ROOT}/build-tools/${BUILD_TOOLS_VERSION}"
+          UNSIGNED="$(find gui/src-tauri/gen/android -path '*release*' -name '*-unsigned.apk' | head -1)"
+          [ -n "$UNSIGNED" ] || { echo "✗ unsigned release APK not found under gen/android" >&2; exit 1; }
+
+          echo "$ANDROID_KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/ankayma-release.jks"
+          mkdir -p publish
+          OUT="publish/Ankayma_${VERSION}_arm64.apk"
+
+          "$BT/zipalign" -f -p 4 "$UNSIGNED" "$RUNNER_TEMP/aligned.apk"
+          "$BT/apksigner" sign \
+            --ks "$RUNNER_TEMP/ankayma-release.jks" \
+            --ks-key-alias "$ANDROID_KEY_ALIAS" \
+            --ks-pass "pass:$ANDROID_KEYSTORE_PASSWORD" \
+            --key-pass "pass:$ANDROID_KEY_PASSWORD" \
+            --out "$OUT" "$RUNNER_TEMP/aligned.apk"
+          "$BT/apksigner" verify --print-certs "$OUT"
+          rm -f "$RUNNER_TEMP/ankayma-release.jks"
+          echo "APK_OUT=$OUT" >> "$GITHUB_ENV"
+
+      - name: Install cosign
+        env:
+          COSIGN_VERSION: v2.4.1   # [A — keep in step with release-linux.yml]
+        run: |
+          curl -sSfL "https://github.com/sigstore/cosign/releases/download/${COSIGN_VERSION}/cosign-linux-amd64" -o /usr/local/bin/cosign
+          chmod +x /usr/local/bin/cosign
+
+      # Cosign detached signature over SHA256SUMS — one signature authenticates the
+      # APK; verifiable with the committed cosign.pub (which lives in git, not on R2,
+      # so a swapped file on the download host is detectable).
+      - name: Checksums + Cosign signature (website verify — Path A)
+        env:
+          COSIGN_PRIVATE_KEY: ${{ secrets.COSIGN_PRIVATE_KEY }}
+          COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}
+        run: |
+          set -euo pipefail
+          echo "$COSIGN_PRIVATE_KEY" | base64 -d > cosign.key
+          cp cosign.pub publish/
+          ( cd publish && sha256sum "$(basename "$APK_OUT")" > SHA256SUMS )
+          cosign sign-blob --yes --tlog-upload=false --key cosign.key \
+            --output-signature publish/SHA256SUMS.sig publish/SHA256SUMS
+          cosign verify-blob --insecure-ignore-tlog --key cosign.pub \
+            --signature publish/SHA256SUMS.sig publish/SHA256SUMS
+          rm -f cosign.key
+          echo "  ✓ cosign signature verified"
+
+      - name: Publish to R2 (get.ankayma.com/android/)
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: auto
+        run: |
+          aws s3 sync publish/ "s3://${{ secrets.R2_BUCKET_MACOS }}/android/" --endpoint-url "${{ secrets.R2_ENDPOINT }}"
+
+      # SLSA build provenance (Sigstore + Rekor). Last step — the APK is already on
+      # R2, so a hiccup here never blocks the release.
+      - name: Attest build provenance (.apk)
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: "publish/*.apk"
