@@ -190,6 +190,20 @@
   function ciRules(node: string): CiPolicy[] {
     return ciPolicies.filter((p) => p.target_hostname === node);
   }
+
+  // `rule_ref` is access provenance like "role=member → service=X", "tag=prod → …",
+  // "* → …", or "owner (admin)". The tag only needs the short access basis — the role,
+  // the matching tag, or "owner"/"all" — so the card stays tidy. The full string is
+  // kept in the tag's title for anyone who wants the detail.
+  function shortRule(ref: string): string {
+    if (ref.startsWith("owner")) return "owner";
+    const from = ref.split("→")[0].trim();
+    if (!from || from === "*") return "all";
+    const role = from.match(/role=([^,\s]+)/);
+    if (role) return role[1];
+    const first = from.split(",")[0].trim();
+    return first.includes("=") ? first.split("=")[1] : first;
+  }
   function openCiHistory(node: string) {
     ciNode = node;
     ciRuns = null;
@@ -309,7 +323,7 @@
           </span>
         {/if}
         {#if owned}<span class="owned-badge">● owned</span>{/if}
-        <span class="tag" title={svc.rule_ref}>{svc.rule_ref.replace(/\s*\(admin\)\s*$/, "")}</span>
+        <span class="tag" title={svc.rule_ref}>{shortRule(svc.rule_ref)}</span>
       </span>
     </div>
     <code class="fqdn">{svc.fqdn}</code>
@@ -396,7 +410,7 @@
           <div class="child-info">
             <span class="child-label">
               {svc.label}
-              <span class="tag" title={svc.rule_ref}>{svc.rule_ref.replace(/\s*\(admin\)\s*$/, "")}</span>
+              <span class="tag" title={svc.rule_ref}>{shortRule(svc.rule_ref)}</span>
             </span>
             <code class="fqdn">{svc.fqdn}</code>
             {#if (svc.tags ?? []).length > 0}

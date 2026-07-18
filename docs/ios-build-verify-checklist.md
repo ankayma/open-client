@@ -63,7 +63,22 @@ echo "appicon   : $(ls "$APP" | grep -c -i appicon)  (>0)"
 - **Icon regen must pass `icons/icon_source.png`** (the canonical "An"). Regenerating from any other
   source re-introduces the swirl. postinit does this as its last step and restores `icons/` afterward.
 
-## App Store submit
+## App Store submit — getting the archive into Organizer
 
-Distribution archive + ASC metadata/privacy/Trader-status/5.4-VPN are the account holder's
-manual steps — see `docs/ios-appstore-release-prep.md`.
+`cargo tauri ios build --export-method app-store-connect` produces an App-Store-signed
+`.ipa` AND an archive at `gen/apple/build/ankayma-gui_iOS.xcarchive` — but it does **NOT**
+place that archive in `~/Library/Developer/Xcode/Archives/`, so Xcode **Organizer shows no
+new version** (this is the "missing 1.1.x" symptom). Xcode's own Product > Archive writes
+there; the tauri CLI does not. Fix — copy it in with a dated folder + versioned name:
+
+```bash
+SRC=gui/src-tauri/gen/apple/build/ankayma-gui_iOS.xcarchive
+DST="$HOME/Library/Developer/Xcode/Archives/$(date +%Y-%m-%d)/Ankayma-<VERSION>.xcarchive"
+mkdir -p "$(dirname "$DST")" && cp -R "$SRC" "$DST"
+```
+
+The archive is signed "Apple Development" at archive time — that's fine; **Organizer >
+Distribute App > App Store Connect re-signs with the distribution profile** at upload.
+Then ASC metadata/privacy/Trader-status/5.4-VPN are the account holder's manual steps —
+see `docs/ios-appstore-release-prep.md`. Verify the archive's app bundle with the checklist
+above before distributing (its `.app` is at `<archive>/Products/Applications/Ankayma.app`).
