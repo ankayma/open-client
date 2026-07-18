@@ -336,10 +336,16 @@ export async function listMembers(): Promise<MembersView> {
 // action, gated behind a step-up — pass `proof` on retry (M-1).
 export async function inviteMember(
   email: string,
+  seatType?: string,
   ttlSeconds?: number,
   proof?: StepUpProof,
 ): Promise<string> {
-  return invoke<string>("invite_member", { email, ttlSeconds, proofToken: proof?.proofToken });
+  return invoke<string>("invite_member", {
+    email,
+    seatType,
+    ttlSeconds,
+    proofToken: proof?.proofToken,
+  });
 }
 export async function joinTeam(invite: string): Promise<void> {
   return invoke("join_team", { invite });

@@ -2406,6 +2406,7 @@ async fn list_members(state: State<'_, AppState>) -> Result<domain::MembersView,
 async fn invite_member(
     state: State<'_, AppState>,
     email: String,
+    seat_type: Option<String>,
     ttl_seconds: Option<u64>,
     proof_token: Option<String>,
 ) -> Result<String, String> {
@@ -2415,6 +2416,7 @@ async fn invite_member(
         &state.regional_base_url(),
         &tok,
         email.trim(),
+        seat_type.as_deref(),
         ttl_seconds,
         proof_token.as_deref(),
     )

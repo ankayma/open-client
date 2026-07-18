@@ -118,6 +118,7 @@
 	// below 760px via CSS, so mobile keeps its native full-screen flow.
 	let signedIn = $derived($auth.status === 'authenticated');
 	let tier      = $derived($auth.status === 'authenticated' ? $auth.user.tier : '');
+	let seatType  = $derived($auth.status === 'authenticated' ? $auth.user.seat_type : '');
 	let userEmail = $derived($auth.status === 'authenticated' ? $auth.user.email : '');
 	let path      = $derived(page.url.pathname);
 
@@ -160,7 +161,11 @@
 	let avatarInitials = $derived(getInitials(userEmail));
 	let avatarBg       = $derived(AVATAR_COLORS[tier] ?? 'var(--c-surface)');
 	let avatarText     = $derived(AVATAR_TEXT[tier] ?? 'var(--c-text-dim)');
-	let tierLabel      = $derived(TIER_LABELS[tier] ?? tier);
+	// F1 team members see their seat_type appended (quota class) — F0/F0-Plus stay plain.
+	let tierLabel      = $derived(
+		(TIER_LABELS[tier] ?? tier) +
+		(tier === 'F1Starter' && seatType ? ' · ' + seatType.charAt(0).toUpperCase() + seatType.slice(1) : '')
+	);
 </script>
 
 <div class="app" class:with-sidebar={signedIn}>

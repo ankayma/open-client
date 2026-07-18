@@ -136,7 +136,10 @@ export interface Member {
   user_id: string;
   github_login: string;
   email?: string;
-  role: string;
+  role: string; // capability
+  seat_type?: SeatType; // quota class
+  seat_caps?: { nodes: number; privdomains: number };
+  used?: { nodes: number; privdomains: number };
   created_at?: string;
   is_owner: boolean;
 }

@@ -63,6 +63,14 @@
   }
 
   let inviteEmail = $state("");
+  // Commercial SeatType for the invitee (quota dimension). Node/domain caps per seat:
+  const SEAT_TYPES = [
+    { value: "user", label: "User", caps: "10 nodes · 2 domains" },
+    { value: "builder", label: "Builder", caps: "30 nodes · 10 domains" },
+    { value: "admin", label: "Admin", caps: "50 nodes · 20 domains" },
+    { value: "lite", label: "Lite", caps: "1 node · 0 domains" },
+  ];
+  let inviteSeatType = $state("user");
   async function invite() {
     if (!inviteEmail.trim()) return;
     busy = true;
@@ -71,7 +79,7 @@
       // Admin action (M-1) — a multi-user tenant gates this behind a step-up;
       // runWithStepUp drives the modal transparently. [T:Part D H.2#6]
       inviteUrl = await runWithStepUp("invite_member", (proof) =>
-        inviteMember(inviteEmail.trim(), memberTtl, proof),
+        inviteMember(inviteEmail.trim(), inviteSeatType, memberTtl, proof),
       );
     } catch (e: unknown) {
       error = e instanceof Error ? e.message : "Invite failed";
@@ -116,7 +124,11 @@
           <div class="who">
             <span class="login">{m.github_login}</span>
             <span class="role" class:admin={m.role === "admin"}>{m.role}</span>
+            {#if m.seat_type}<span class="role" style="text-transform:capitalize;">{m.seat_type}</span>{/if}
             {#if m.is_owner}<span class="owner">owner</span>{/if}
+            {#if m.used && m.seat_caps}
+              <span style="color:var(--c-text-dim);font-size:11px;flex-basis:100%;margin-top:2px;">nodes {m.used.nodes}/{m.seat_caps.nodes} · domains {m.used.privdomains}/{m.seat_caps.privdomains}</span>
+            {/if}
           </div>
           {#if isAdmin && !m.is_owner}
             <button class="remove" onclick={() => remove(m.user_id)} aria-label="Remove member"
@@ -146,6 +158,14 @@
           autocorrect="off"
           spellcheck="false"
         />
+        <div class="ttl-row">
+          <label for="seat-type">Seat type</label>
+          <select id="seat-type" bind:value={inviteSeatType}>
+            {#each SEAT_TYPES as st (st.value)}
+              <option value={st.value}>{st.label} — {st.caps}</option>
+            {/each}
+          </select>
+        </div>
         <div class="ttl-row">
           <label for="member-ttl">Invite expires in</label>
           <select id="member-ttl" bind:value={memberTtl}>

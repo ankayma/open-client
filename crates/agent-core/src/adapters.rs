@@ -667,6 +667,7 @@ pub async fn invite_member(
     base_url: &str,
     session_token: &str,
     email: &str,
+    seat_type: Option<&str>,
     ttl_seconds: Option<u64>,
     proof_token: Option<&str>,
 ) -> Result<String, ApiError> {
@@ -679,6 +680,7 @@ pub async fn invite_member(
         .bearer_auth(session_token)
         .json(&serde_json::json!({
             "email": email,
+            "seat_type": seat_type,
             "ttl_seconds": ttl_seconds,
             "proof_token": proof_token,
         }))
