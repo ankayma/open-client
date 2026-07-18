@@ -311,29 +311,6 @@
           </span>
         {/if}
       </span>
-      {#if svc.status !== "denied"}
-        <div class="head-actions">
-          {#if ciRules(svc.node).length > 0}
-            <button class="btn-secondary ci-chip" title="CI deploy history for {svc.node}" onclick={() => openCiHistory(svc.node)}>🧾 CI/CD</button>
-          {/if}
-          <!-- self device (this machine): Open/SSH/path chain to yourself are no-ops;
-               keep only CI/CD history. `owned` == the current device (hostname match). -->
-          {#if !owned && sshPeer(svc.node)}
-            <button
-              class="btn-secondary ssh-btn"
-              disabled={!connected || probedDown(svc.node)}
-              title={probedDown(svc.node) ? "Unreachable — no response over the mesh" : "SSH into " + svc.node}
-              onclick={() => sshTo(sshPeer(svc.node)!)}
-            >
-              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 17l6-6-6-6M12 19h8"/></svg>
-              SSH
-            </button>
-          {/if}
-          {#if !owned}
-            <button class="btn-primary" disabled={!connected || probedDown(svc.node)} title={probedDown(svc.node) ? "Unreachable — no response over the mesh" : ""} onclick={() => openSubdomain(svc.fqdn)}>Open ↗</button>
-          {/if}
-        </div>
-      {/if}
     </div>
     <code class="fqdn">{svc.fqdn}</code>
     {#if (svc.tags ?? []).length > 0}
@@ -346,6 +323,12 @@
         <span class="denied-text">access denied (no policy)</span>
       {:else}
         <span>→ {svc.node}</span>
+      {/if}
+    </div>
+    {#if svc.status !== "denied"}
+      <!-- Every action on one row at the card's foot — keeps the head clear so a long
+           label/rule tag can't push buttons off-screen. -->
+      <div class="card-actions">
         {#if !owned}
           <button
             class="btn-secondary chain-btn"
@@ -354,8 +337,27 @@
             onclick={() => (pathChainSvc = svc)}
           >◈ path chain</button>
         {/if}
-      {/if}
-    </div>
+        {#if ciRules(svc.node).length > 0}
+          <button class="btn-secondary ci-chip" title="CI deploy history for {svc.node}" onclick={() => openCiHistory(svc.node)}>🧾 CI/CD</button>
+        {/if}
+        <!-- self device (this machine): Open/SSH/path chain to yourself are no-ops;
+             keep only CI/CD history. `owned` == the current device (hostname match). -->
+        {#if !owned && sshPeer(svc.node)}
+          <button
+            class="btn-secondary ssh-btn"
+            disabled={!connected || probedDown(svc.node)}
+            title={probedDown(svc.node) ? "Unreachable — no response over the mesh" : "SSH into " + svc.node}
+            onclick={() => sshTo(sshPeer(svc.node)!)}
+          >
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 17l6-6-6-6M12 19h8"/></svg>
+            SSH
+          </button>
+        {/if}
+        {#if !owned}
+          <button class="btn-primary" disabled={!connected || probedDown(svc.node)} title={probedDown(svc.node) ? "Unreachable — no response over the mesh" : ""} onclick={() => openSubdomain(svc.fqdn)}>Open ↗</button>
+        {/if}
+      </div>
+    {/if}
   </div>
 {/snippet}
 
@@ -665,6 +667,8 @@
     display: flex;
     flex-direction: column;
     gap: 8px;
+    min-width: 0;
+    overflow: hidden;
   }
   .card.denied {
     opacity: 0.55;
@@ -685,7 +689,13 @@
     font-size: 15px;
     display: flex;
     align-items: center;
+    flex-wrap: wrap;
     gap: 8px;
+    min-width: 0;
+  }
+  .label .tag {
+    white-space: normal;
+    word-break: break-word;
   }
   .owned-badge {
     font-size: 11px;
@@ -746,6 +756,14 @@
     align-items: center;
     gap: 6px;
     flex-shrink: 0;
+  }
+  /* All service-card actions on one wrapping row at the card's foot. */
+  .card-actions {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px;
+    margin-top: 2px;
   }
   /* Mesh-terminal button — accent-tinted secondary. Same geometry as the
      btn-primary "Open" next to it (base padding/font/radius come from
