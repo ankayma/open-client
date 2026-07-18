@@ -258,8 +258,22 @@ pub(crate) async fn serve_dataplane(
     let _dev = dev;
 
     // [slice 2] Publish live status for the GUI (proves the data plane is up,
-    // not just enrolled). Refreshed every roster cycle below = a heartbeat.
+    // not just enrolled). Refreshed on every roster change below; the heartbeat
+    // just after keeps the LIVE stats (handshake age, bytes) fresh in between.
     write_status(&state.node_id, &state.overlay_ip, state.listen_port, &peers);
+
+    // Background heartbeat (shared with the iOS extension): rewrite the snapshot every
+    // 15s so path-proof stats don't go stale between roster changes — the roster-cycle
+    // write alone lagged up to a full minute, so a completed handshake stayed invisible.
+    // [T:F-5 handshake age]
+    agent_core::status::spawn_status_heartbeat(
+        std::path::PathBuf::from(status_path()),
+        state.node_id.clone(),
+        state.overlay_ip.clone(),
+        state.listen_port,
+        peers.clone(),
+        Duration::from_secs(15),
+    );
 
     // DNS answers via the loopback resolver below (fed by /etc/resolver/<zone>),
     // never on the tun fd itself — no DnsResponder needed here (iOS-only, no
@@ -931,68 +945,19 @@ fn status_path() -> String {
     format!("{home}/.ankayma/agent-status.json")
 }
 
-#[derive(serde::Serialize)]
-struct StatusPeer {
-    hostname: String,
-    overlay_ip: String,
-    endpoint: Option<String>,
-    /// Endpoint is known ⇒ direct WireGuard (no relay). False until handshake
-    /// completes for a responder-only peer; flips to false for relay peers when
-    /// relay lands (A.1.12). [T:A.1.1]
-    direct: bool,
-    /// Seconds since the last WireGuard handshake, or absent if none yet.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    last_handshake_secs: Option<u64>,
-    tx_bytes: u64,
-    rx_bytes: u64,
-}
-
-#[derive(serde::Serialize)]
-struct DataplaneStatus {
-    pid: u32,
-    node_id: String,
-    overlay_ip: String,
-    listen_port: u16,
-    updated_at: u64, // unix seconds — GUI treats a stale file as "down"
-    peers: Vec<StatusPeer>,
-}
-
-/// Write the live status file (best-effort; never fail the data plane on a write
-/// error). Called at startup and on every roster refresh = a heartbeat.
+/// Write the live status file the GUI reads for the F-5 path-proof panel. Thin wrapper over
+/// the shared `agent_core::status` writer — the SAME snapshot format the iOS extension emits,
+/// so both platforms surface one set of per-peer stats. Called on roster changes for an
+/// instant update; the background heartbeat (`spawn_status_heartbeat`, started once at
+/// startup) keeps handshake age + byte counters fresh between roster changes.
 fn write_status(node_id: &str, overlay_ip: &str, listen_port: u16, peers: &Peers) {
-    let updated_at = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    let list: Vec<StatusPeer> = peers
-        .lock()
-        .expect("peers lock")
-        .iter()
-        .map(|p| {
-            let ep = p.endpoint();
-            let (hs, tx, rx) = p.stats();
-            StatusPeer {
-                hostname: p.peer.hostname.clone(),
-                overlay_ip: p.peer.overlay_ip.to_string(),
-                endpoint: ep.map(|e| e.to_string()),
-                direct: ep.is_some(),
-                last_handshake_secs: hs.map(|d| d.as_secs()),
-                tx_bytes: tx as u64,
-                rx_bytes: rx as u64,
-            }
-        })
-        .collect();
-    let status = DataplaneStatus {
-        pid: std::process::id(),
-        node_id: node_id.to_string(),
-        overlay_ip: overlay_ip.to_string(),
+    agent_core::status::write_status(
+        std::path::Path::new(&status_path()),
+        node_id,
+        overlay_ip,
         listen_port,
-        updated_at,
-        peers: list,
-    };
-    if let Ok(bytes) = serde_json::to_vec_pretty(&status) {
-        let _ = std::fs::write(status_path(), bytes);
-    }
+        peers,
+    );
 }
 
 /// Reuse a persisted identity if present; otherwise generate a keypair, enroll

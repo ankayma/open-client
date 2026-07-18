@@ -573,7 +573,9 @@ async fn try_reauth_via_device_key(app: &AppHandle, state: &AppState) -> Option<
     let session = adapters::session_refresh(&state.http, &base, &node_id, &proof)
         .await
         .ok()?;
-    let info = adapters::session_info(&state.http, &base, &session).await.ok()?;
+    let info = adapters::session_info(&state.http, &base, &session)
+        .await
+        .ok()?;
     state.set_email(Some(info.email.clone()));
     state.update_region(&info.region);
     save_session_to_disk(&state.data_dir, &session);
@@ -1057,6 +1059,32 @@ async fn probe_reachable(targets: Vec<String>) -> Result<Vec<bool>, String> {
     .map_err(|e| format!("probe task failed: {e}"))
 }
 
+/// Path of the data-plane status snapshot the GUI reads for path-proof. On iOS the Packet
+/// Tunnel extension (a SEPARATE process) writes it into the App Group container, so the app
+/// must read from there, not its own sandbox HOME; the `connect`-side config passes the
+/// SAME path to the extension so both agree. Every other platform uses the daemon's
+/// `~/.ankayma/agent-status.json`. [T:F-5]
+pub(crate) fn status_snapshot_path() -> std::path::PathBuf {
+    #[cfg(target_os = "ios")]
+    {
+        extern "C" {
+            fn ankayma_app_group_dir(buf: *mut std::os::raw::c_char, len: usize);
+        }
+        let mut buf = [0i8; 1024];
+        // SAFETY: valid buffer + length; Swift strlcpy's a NUL-terminated path in (or leaves
+        // it empty when the App Group container is unavailable).
+        unsafe { ankayma_app_group_dir(buf.as_mut_ptr(), buf.len()) };
+        let dir = unsafe { std::ffi::CStr::from_ptr(buf.as_ptr()) }
+            .to_string_lossy()
+            .to_string();
+        if !dir.is_empty() {
+            return std::path::PathBuf::from(dir).join("agent-status.json");
+        }
+        // else fall through to the home path (unavailable container → best-effort).
+    }
+    std::path::PathBuf::from(agent_core::home_root()).join(".ankayma/agent-status.json")
+}
+
 /// verify the connection is real and peer-to-peer without trusting the GUI alone.
 /// vendor_on_data_path is computed from peer states — honest per P.3, not hardcoded.
 #[tauri::command]
@@ -1069,11 +1097,10 @@ async fn get_path_proof(state: State<'_, AppState>) -> Result<PathProof, String>
         peers: vec![],
     };
 
-    // HOME on unix, USERPROFILE on Windows — the F-5 path proof reads the same
-    // status file the daemon writes; a bare HOME is unset on Windows, so this
-    // returned "HOME not set" and the panel never showed live evidence.
-    let home = agent_core::home_root();
-    let path = std::path::Path::new(&home).join(".ankayma/agent-status.json");
+    // The F-5 path proof reads the same status snapshot the data plane writes. On iOS the
+    // extension writes it into the App Group container (a separate process from this app);
+    // every other platform reads the daemon's `~/.ankayma/agent-status.json`.
+    let path = status_snapshot_path();
     let Ok(bytes) = std::fs::read(&path) else {
         return Ok(not_connected());
     };
@@ -1105,7 +1132,9 @@ async fn get_path_proof(state: State<'_, AppState>) -> Result<PathProof, String>
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
-    let connected = now.saturating_sub(s.updated_at) <= 15;
+    // Fresh if written within 45s: the daemon/extension heartbeat rewrites every 15s, so
+    // 3× the heartbeat tolerates a missed tick without flapping "connected" off. [T:F-5]
+    let connected = now.saturating_sub(s.updated_at) <= 45;
 
     // vendor_on_data_path: computed from relay state of each peer (P.3 honest).
     // Currently always false — relay not yet implemented. Becomes correct automatically

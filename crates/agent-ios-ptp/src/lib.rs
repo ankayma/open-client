@@ -211,6 +211,16 @@ struct Config {
     /// The resolved names themselves, already fetched by the app.
     #[serde(default)]
     resolve: Vec<ResolveEntry>,
+    /// This node's control-plane id — written into the status snapshot for the GUI (not
+    /// used for routing). Absent on an older app → the overlay IP stands in. [T:F-5]
+    #[serde(default)]
+    node_id: Option<String>,
+    /// Where to write the data-plane status snapshot: the App Group container path the app
+    /// supplies, so the GUI (a SEPARATE process — app vs extension sandbox) can read live
+    /// per-peer handshake/byte stats for the F-5 path-proof panel. Absent → no heartbeat,
+    /// path-proof stays empty (older app), unchanged. [T:F-5, A.1.1 metadata only]
+    #[serde(default)]
+    status_path: Option<String>,
 }
 
 fn default_port() -> u16 {
@@ -230,6 +240,10 @@ struct Prepared {
     /// them are raced per query — Tailscale-style — so one dead/blocked public
     /// resolver doesn't take the whole forward path down.
     upstreams: Vec<SocketAddr>,
+    /// Node id for the status snapshot (falls back to the overlay).
+    node_id: String,
+    /// App Group path for the status heartbeat; `None` disables it.
+    status_path: Option<String>,
 }
 
 /// Parse `upstream_dns` entries (bare IPs) into `ip:53` targets, dropping
@@ -276,6 +290,7 @@ fn prepare(config_json: &str) -> Result<Prepared, String> {
             forward,
         }
     });
+    let node_id = cfg.node_id.unwrap_or_else(|| cfg.overlay_ip.clone());
     Ok(Prepared {
         static_private: StaticSecret::from(key),
         self_overlay,
@@ -283,6 +298,8 @@ fn prepare(config_json: &str) -> Result<Prepared, String> {
         peers: cfg.peers,
         dns,
         upstreams,
+        node_id,
+        status_path: cfg.status_path,
     })
 }
 
@@ -375,6 +392,21 @@ fn start_inner(fd: i32, config_json: &str, bound_if: u32) -> Result<Box<PtpHandl
         p.static_private.clone(),
         index.clone(),
     );
+
+    // Status heartbeat (the SAME writer the desktop daemon uses): if the app supplied an
+    // App Group path, rewrite the snapshot every 15s so the GUI process can read live
+    // per-peer handshake age + bytes. This is the only status source on iOS — the extension
+    // runs no HTTP loop — so without it the F-5 path-proof panel has no data. [T:F-5]
+    if let Some(sp) = p.status_path.clone() {
+        agent_core::status::spawn_status_heartbeat(
+            std::path::PathBuf::from(sp),
+            p.node_id.clone(),
+            p.self_overlay.to_string(),
+            p.listen_port,
+            peers.clone(),
+            std::time::Duration::from_secs(15),
+        );
+    }
 
     Ok(Box::new(PtpHandle {
         _udp: udp,

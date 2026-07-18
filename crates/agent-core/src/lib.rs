@@ -12,6 +12,7 @@ pub mod pump; // reusable WireGuard packet pump over a tun fd (daemon + iOS exte
 pub mod ssh_client; // F-2 NoKeySSH client transport (russh) — CLI + GUI + iOS terminal
 pub mod ssh_grant; // F-2 root-elevation grant (Ed25519 sign/verify) — CP issues, node verifies
 pub mod ssh_server; // F-2 NoKeySSH embedded server (russh + PTY) — runs on target nodes
+pub mod status; // data-plane status snapshot + heartbeat (daemon + iOS extension) → GUI path-proof
 pub mod tundev; // fd-level tun packet I/O (per-platform framing; macOS+iOS shared)
 pub mod tunnel; // WireGuard data-plane engine (boringtun)
 

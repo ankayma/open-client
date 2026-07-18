@@ -19,6 +19,24 @@ public func ankayma_device_name(_ buf: UnsafeMutablePointer<CChar>, _ len: Int) 
     }
 }
 
+/// The App Group container path — the shared sandbox the app AND the Packet Tunnel
+/// extension both reach. The Rust layer joins "agent-status.json" onto it: the extension
+/// writes the data-plane status snapshot there and the app reads it for the F-5 path-proof
+/// panel (the two are separate processes, so a shared file is the only bridge). Copied into
+/// `buf` (max `len` incl NUL); left EMPTY when the container is unavailable so Rust falls
+/// back gracefully. Must use the same App Group id as TunnelManager/PacketTunnelProvider.
+@_cdecl("ankayma_app_group_dir")
+public func ankayma_app_group_dir(_ buf: UnsafeMutablePointer<CChar>, _ len: Int) {
+    guard len > 0 else { return }
+    buf[0] = 0
+    guard let url = FileManager.default.containerURL(
+        forSecurityApplicationGroupIdentifier: "group.com.ankayma.app"
+    ) else { return }
+    url.path.withCString { src in
+        _ = strlcpy(buf, src, len)
+    }
+}
+
 /// Start the tunnel with a resolved config JSON (NUL-terminated UTF-8). Returns 0 if
 /// accepted, -1 on a decoding error. The async install/start runs fire-and-forget;
 /// progress + failures surface through `ankayma_vpn_status` and the device console.

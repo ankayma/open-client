@@ -79,12 +79,13 @@ pub struct VpnStatus {
 /// offline enrollment check) just omits `zone`/`resolve`; it never blocks connect.
 #[cfg(any(target_os = "ios", target_os = "android"))]
 async fn build_config(state: &AppState) -> Result<String, String> {
-    let (private_b64, overlay_ip, enroll_peers) = {
+    let (private_b64, overlay_ip, node_id, enroll_peers) = {
         let guard = state.node.lock().expect("node lock poisoned");
         let node = guard.as_ref().ok_or("not enrolled yet")?;
         (
             node.private_b64.clone(),
             node.overlay_ip.clone(),
+            node.node_id.clone(),
             node.peers.clone(),
         )
     };
@@ -96,13 +97,15 @@ async fn build_config(state: &AppState) -> Result<String, String> {
     // the complete peer set to the extension. Self is dropped (it's the tun
     // address, not a dialable peer). Falls back to the enroll snapshot on error.
     let peers: Vec<agent_core::domain::PeerInfo> = match state.token() {
-        Some(tok) => match agent_core::adapters::peers(&state.http, &state.regional_base_url(), &tok).await {
-            Ok(list) => list
-                .into_iter()
-                .filter(|p| p.overlay_ip != overlay_ip)
-                .collect(),
-            Err(_) => enroll_peers,
-        },
+        Some(tok) => {
+            match agent_core::adapters::peers(&state.http, &state.regional_base_url(), &tok).await {
+                Ok(list) => list
+                    .into_iter()
+                    .filter(|p| p.overlay_ip != overlay_ip)
+                    .collect(),
+                Err(_) => enroll_peers,
+            }
+        }
         None => enroll_peers,
     };
     // Reflect the ACTUAL roster handed to the tunnel back into app state so the UI
@@ -113,7 +116,12 @@ async fn build_config(state: &AppState) -> Result<String, String> {
     }
     let (zone, resolve): (Option<String>, Vec<serde_json::Value>) = match state.token() {
         Some(tok) => {
-            match agent_core::adapters::resolve_subdomains(&state.http, &state.regional_base_url(), &tok).await
+            match agent_core::adapters::resolve_subdomains(
+                &state.http,
+                &state.regional_base_url(),
+                &tok,
+            )
+            .await
             {
                 Ok(t) => {
                     let names = t
@@ -128,9 +136,24 @@ async fn build_config(state: &AppState) -> Result<String, String> {
         }
         None => (None, Vec::new()),
     };
+    // Where the extension should write the data-plane status snapshot: iOS hands it the App
+    // Group container path (so this app — a separate process — can read it for the F-5
+    // path-proof panel); other platforms don't run this Packet Tunnel extension. [T:F-5]
+    let status_path: Option<String> = {
+        #[cfg(target_os = "ios")]
+        {
+            Some(crate::status_snapshot_path().to_string_lossy().to_string())
+        }
+        #[cfg(not(target_os = "ios"))]
+        {
+            None
+        }
+    };
     let cfg = serde_json::json!({
         "private_key_b64": private_b64,
         "overlay_ip": overlay_ip,
+        "node_id": node_id,
+        "status_path": status_path,
         "listen_port": 51820u16,
         "peers": peers,
         "zone": zone,
