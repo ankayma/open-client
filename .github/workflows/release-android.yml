@@ -67,10 +67,15 @@ jobs:
           distribution: temurin
           java-version: "17"
 
+      # Puts cmdline-tools (sdkmanager) on PATH. GitHub's ubuntu-latest image stopped
+      # shipping sdkmanager on PATH by default → the manual step below was exit-127
+      # ("sdkmanager: command not found"). This action is drift-proof going forward.
+      - uses: android-actions/setup-android@v3
+
       - name: Provision Android SDK bits (NDK + build-tools)
         run: |
           set -euo pipefail
-          # ubuntu-latest ships the cmdline-tools + a base SDK at $ANDROID_SDK_ROOT.
+          # sdkmanager is now on PATH (setup-android@v3 above).
           yes | sdkmanager --licenses >/dev/null 2>&1 || true
           sdkmanager --install "ndk;${NDK_VERSION}" "build-tools;${BUILD_TOOLS_VERSION}" "platform-tools" >/dev/null
           echo "ANDROID_NDK_HOME=${ANDROID_SDK_ROOT}/ndk/${NDK_VERSION}" >> "$GITHUB_ENV"
