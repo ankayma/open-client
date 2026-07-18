@@ -5,12 +5,15 @@
 	import { listCiPolicies, deleteCiPolicy } from '$lib/tauri';
 	import { runWithStepUp } from '$lib/stepup';
 	import type { CiPolicy } from '$lib/types';
+	import LedgerReceipts from '$lib/components/LedgerReceipts.svelte';
 
 	let policies = $state<CiPolicy[]>([]);
 	let loading = $state(true);
 	let error = $state('');
 	let confirmRepo = $state<string | null>(null);
 	let deleting = $state(false);
+	// [F-5] Node whose signed ledger receipts are open (from a rule's deploy target).
+	let receiptsNode = $state<string | null>(null);
 
 	async function load() {
 		loading = true;
@@ -85,6 +88,14 @@
 							<span class="target">→ {p.target_hostname ?? '—'}</span>
 						</div>
 					</button>
+					{#if p.target_hostname}
+						<button
+							class="ledger-btn"
+							aria-label="Activity & receipts"
+							title="Activity & receipts — signed ledger for {p.target_hostname}"
+							onclick={() => (receiptsNode = p.target_hostname ?? null)}
+						>🧾</button>
+					{/if}
 					<button class="del" aria-label="Delete rule" onclick={() => (confirmRepo = p.repo)}>
 						<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M3 6h18M8 6V4h8v2M19 6l-1 14H6L5 6" /></svg>
 					</button>
@@ -106,6 +117,10 @@
 			</div>
 		</div>
 	</div>
+{/if}
+
+{#if receiptsNode}
+	<LedgerReceipts node={receiptsNode} onclose={() => (receiptsNode = null)} />
 {/if}
 
 <style>
@@ -268,6 +283,18 @@
 	}
 	.del:hover {
 		color: var(--c-danger);
+	}
+	.ledger-btn {
+		align-self: stretch;
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		padding: 0 12px;
+		font-size: 16px;
+		opacity: 0.75;
+	}
+	.ledger-btn:hover {
+		opacity: 1;
 	}
 	.overlay {
 		position: fixed;
