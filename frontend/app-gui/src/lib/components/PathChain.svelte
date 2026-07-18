@@ -7,8 +7,16 @@
     ledgerEntry?: string;
     ledgerTime?: string;
     onclose?: () => void;
+    /**
+     * [F-5] Drill into this node's signed activity (ledger receipts). Path chain
+     * proves the live data-path (A.1.1); the ledger proves the actions (A.1.8).
+     * They are two distinct artifacts, joined by this one link — a bare tunnel is
+     * not a ledgered event, so the link points at the node's activity, never at
+     * "the ledger entry for this connection". `[T:A.1.1 + A.1.8]`
+     */
+    onactivity?: () => void;
   }
-  let { node = '', peer = null, ledgerEntry = '', ledgerTime = '', onclose }: Props = $props();
+  let { node = '', peer = null, ledgerEntry = '', ledgerTime = '', onclose, onactivity }: Props = $props();
 
   function fmtBytes(n: number): string {
     if (n < 1024) return `${n} B`;
@@ -111,6 +119,13 @@
         Traffic flows through a vendor-operated relay encrypted end-to-end — vendor cannot read content.
         See <strong>Pricing &amp; Plans</strong> for direct P2P options.
       </p>
+    {/if}
+    {#if onactivity}
+      <button class="activity-link" onclick={onactivity}>
+        <span>Activity &amp; receipts</span>
+        <span class="activity-arrow">↗</span>
+      </button>
+      <p class="activity-hint">Signed ledger receipts for actions on this node.</p>
     {/if}
   </div>
 </div>
@@ -251,6 +266,39 @@
     background: var(--c-bg);
     border-radius: 6px;
     margin-top: 4px;
+  }
+
+  .activity-link {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    width: 100%;
+    margin-top: 12px;
+    padding: 11px 14px;
+    background: var(--c-bg);
+    border: 1px solid var(--c-border);
+    border-radius: 8px;
+    color: var(--c-accent);
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: border-color 0.15s, background 0.15s;
+  }
+
+  .activity-link:hover {
+    border-color: var(--c-accent);
+    background: color-mix(in srgb, var(--c-accent) 8%, var(--c-bg));
+  }
+
+  .activity-arrow {
+    font-weight: 400;
+  }
+
+  .activity-hint {
+    font-size: 11px;
+    color: var(--c-text-dim);
+    text-align: center;
+    margin: 6px 0 0;
   }
 
   @media (min-width: 760px) {

@@ -447,6 +447,12 @@
     node={pathChainSvc.node}
     peer={pathChainPeer}
     onclose={() => (pathChainSvc = null)}
+    onactivity={() => {
+      // [F-5] One link from live path-proof → this node's signed ledger receipts.
+      const n = pathChainSvc?.node;
+      pathChainSvc = null;
+      if (n) openCiHistory(n);
+    }}
   />
 {/if}
 
@@ -468,7 +474,7 @@
       onkeydown={(e) => e.stopPropagation()}
     >
       <div class="ci-head">
-        <span class="ci-title">🧾 CI deploys → {ciNode}</span>
+        <span class="ci-title">🧾 Activity &amp; receipts → {ciNode}</span>
         <button class="ci-close" onclick={() => (ciNode = null)}>✕</button>
       </div>
 
@@ -503,6 +509,12 @@
                 <span class="ci-run-repo">{run.repo}{run.ref ? ` @ ${run.ref}` : ""}</span>
                 <span class="ci-run-meta">{run.at ?? ""}{run.run_id ? ` · ${run.run_id}` : ""}</span>
               </div>
+              {#if run.block_hash}
+                <span
+                  class="ci-run-ledger"
+                  title="Tamper-evident ledger block · {run.block_hash}"
+                >🔒 ledger #{run.block_hash.slice(0, 8)}</span>
+              {/if}
             </div>
           {/each}
         </div>
@@ -896,6 +908,19 @@
     color: var(--c-text-dim);
     font-family: "SF Mono", "Fira Code", monospace;
     word-break: break-all;
+  }
+  .ci-run-ledger {
+    margin-left: auto;
+    flex-shrink: 0;
+    align-self: center;
+    font-size: 10px;
+    font-family: "SF Mono", "Fira Code", monospace;
+    color: var(--sec-allow);
+    background: color-mix(in srgb, var(--sec-allow) 12%, transparent);
+    border-radius: 5px;
+    padding: 3px 7px;
+    white-space: nowrap;
+    cursor: default;
   }
   .ci-note {
     font-size: 12px;
