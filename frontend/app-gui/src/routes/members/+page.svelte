@@ -13,7 +13,6 @@
   let error = $state("");
 
   let inviteUrl = $state("");
-  let joinInput = $state("");
   let busy = $state(false);
 
   let isAdmin = $derived(data?.your_role === "admin");
@@ -76,23 +75,6 @@
       );
     } catch (e: unknown) {
       error = e instanceof Error ? e.message : "Invite failed";
-    } finally {
-      busy = false;
-    }
-  }
-
-  async function join() {
-    if (!joinInput.trim()) return;
-    busy = true;
-    error = "";
-    try {
-      // Accept a full ankayma://join-team?token=… link or a bare token.
-      const m = joinInput.match(/token=([^&\s]+)/);
-      await joinTeam(m ? m[1] : joinInput.trim());
-      joinInput = "";
-      await load();
-    } catch (e: unknown) {
-      error = e instanceof Error ? e.message : "Join failed";
     } finally {
       busy = false;
     }
@@ -183,20 +165,6 @@
       </section>
     {/if}
 
-    <section class="panel">
-      <h3>Join a team</h3>
-      <p class="hint">Paste an invite link from an admin.</p>
-      <div class="join-row">
-        <input
-          bind:value={joinInput}
-          placeholder="ankayma://join-team?token=…"
-          autocapitalize="none"
-          autocorrect="off"
-          spellcheck="false"
-        />
-        <button class="btn" onclick={join} disabled={busy || !joinInput.trim()}>Join</button>
-      </div>
-    </section>
   {/if}
 </main>
 
@@ -384,19 +352,6 @@
     color: var(--c-text-dim);
     font-size: 13px;
     padding: 6px 10px;
-  }
-  .join-row {
-    display: flex;
-    gap: 8px;
-  }
-  .join-row input {
-    flex: 1;
-    background: var(--c-bg);
-    border: 1px solid var(--c-border);
-    border-radius: 8px;
-    padding: 10px 12px;
-    color: var(--c-text);
-    font-size: 13px;
   }
   .email-input {
     width: 100%;
