@@ -135,6 +135,42 @@ pub async fn session_info(
     get_json(http, base_url, "/api/v1/session", session_token).await
 }
 
+/// Ask the control plane for a hosted checkout URL for `plan` (e.g. "F0-Plus", "F1-25").
+/// `POST /api/v1/billing/checkout`. Billing logic lives in the control plane `[T:A.1.1]`:
+/// the client only forwards the plan key and opens the returned URL. The CP stamps the
+/// caller's tenant into the checkout from the bearer session, so the paid webhook can
+/// activate the right tenant without the client handling any billing identity.
+pub async fn billing_checkout(
+    http: &reqwest::Client,
+    base_url: &str,
+    session_token: &str,
+    plan: &str,
+) -> Result<String, ApiError> {
+    #[derive(serde::Serialize)]
+    struct Req<'a> {
+        plan: &'a str,
+    }
+    #[derive(serde::Deserialize)]
+    struct Resp {
+        url: String,
+    }
+    let resp = http
+        .post(url(base_url, "/api/v1/billing/checkout"))
+        .bearer_auth(session_token)
+        .json(&Req { plan })
+        .timeout(CP_REST_TIMEOUT)
+        .send()
+        .await
+        .map_err(|e| ApiError::Transport(e.to_string()))?;
+    if !resp.status().is_success() {
+        return Err(status_error(resp).await);
+    }
+    resp.json::<Resp>()
+        .await
+        .map(|r| r.url)
+        .map_err(|e| ApiError::Decode(e.to_string()))
+}
+
 /// One relay in the vendor-operated fleet map. The agent dials `endpoint` (`host:port`)
 /// as a NAT-fallback transport, addressing peers by WireGuard public key
 /// `[T:A.1.1 relay-block + Decision D-T1]`.

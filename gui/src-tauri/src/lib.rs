@@ -2191,10 +2191,19 @@ async fn track_event(
     Ok(())
 }
 
+/// Open a Lemon Squeezy hosted checkout for `plan` (e.g. "F0-Plus", "F1-25"). Account-first:
+/// the control plane stamps THIS caller's tenant into the checkout from the bearer session,
+/// so the paid webhook activates the right tenant — the client never handles a variant id or
+/// billing identity. Billing logic lives in the control plane [T:A.1.1]; we forward the plan
+/// key, get a URL, and open it in the system browser.
 #[tauri::command]
-async fn open_stripe_checkout() -> Result<(), String> {
-    // [A] stub — Stripe integration pending (milestone 1.3)
-    Err("Not yet implemented — Stripe pending (milestone 1.3)".into())
+async fn open_billing_checkout(state: State<'_, AppState>, plan: String) -> Result<(), String> {
+    let tok = state.token().ok_or("not signed in")?;
+    let checkout_url =
+        adapters::billing_checkout(&state.http, &state.regional_base_url(), &tok, &plan)
+            .await
+            .map_err(|e| e.to_string())?;
+    open_url(&checkout_url)
 }
 
 // --- CI/CD deploy policy (F0) — feature-03b-gui-spec.md §1.4 ---
@@ -2945,7 +2954,7 @@ pub fn run() {
             ssh_close,
             get_dataplane_status,
             track_event,
-            open_stripe_checkout,
+            open_billing_checkout,
             list_subdomains,
             create_subdomain,
             delete_subdomain,
