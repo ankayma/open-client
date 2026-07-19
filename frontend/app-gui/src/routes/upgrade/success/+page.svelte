@@ -8,7 +8,7 @@
 		// [A] stub — real upgrade: control-plane webhook updates tier, agent-core refreshes quota
 		// Here we just fire the funnel event and let the dashboard refresh quota on next poll
 		try {
-			await trackEvent('upgrade_success', { tier: 'F0Plus' });
+			await trackEvent('upgrade_success', { tier: 'F0-Plus' });
 		} catch { /* non-blocking */ }
 
 		// Auto-navigate to dashboard after 3s

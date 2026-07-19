@@ -156,19 +156,19 @@
 	}
 
 	const TIER_LABELS: Record<string, string> = {
-		F0:        'F0',
-		F0Plus:    'F0+',
-		F1Starter: 'F1 Starter',
+		'F0':         'F0',
+		'F0-Plus':    'F0+',
+		'F1-Starter': 'F1 Starter',
 	};
 	const AVATAR_COLORS: Record<string, string> = {
-		F0:        'var(--c-surface)',
-		F0Plus:    'color-mix(in srgb, var(--c-accent) 30%, var(--c-surface))',
-		F1Starter: 'var(--c-accent)',
+		'F0':         'var(--c-surface)',
+		'F0-Plus':    'color-mix(in srgb, var(--c-accent) 30%, var(--c-surface))',
+		'F1-Starter': 'var(--c-accent)',
 	};
 	const AVATAR_TEXT: Record<string, string> = {
-		F0:        'var(--c-text-dim)',
-		F0Plus:    'var(--c-text)',
-		F1Starter: '#fff',
+		'F0':         'var(--c-text-dim)',
+		'F0-Plus':    'var(--c-text)',
+		'F1-Starter': '#fff',
 	};
 
 	let avatarInitials = $derived(getInitials(userEmail));
@@ -177,7 +177,7 @@
 	// F1 team members see their seat_type appended (quota class) — F0/F0-Plus stay plain.
 	let tierLabel      = $derived(
 		(TIER_LABELS[tier] ?? tier) +
-		(tier === 'F1Starter' && seatType ? ' · ' + seatType.charAt(0).toUpperCase() + seatType.slice(1) : '')
+		(tier === 'F1-Starter' && seatType ? ' · ' + seatType.charAt(0).toUpperCase() + seatType.slice(1) : '')
 	);
 </script>
 

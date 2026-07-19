@@ -2,7 +2,11 @@
 
 export type ProductLine = "Personal" | "Enterprise";
 
-export type Tier = "F0" | "F0Plus" | "F1Starter";
+// Canonical tier strings as the control plane emits them (hyphenated). The client
+// speaks the CP's language — do NOT re-spell these camelCase, or every `tier === …`
+// comparison silently misses and tier-gated UI (seat caps, upgrade CTA) never fires.
+// [T:tier-feature-set canonical "F0" | "F0-Plus" | "F1-Starter"]
+export type Tier = "F0" | "F0-Plus" | "F1-Starter";
 
 // Commercial SeatType — the QUOTA dimension (per-member), orthogonal to `role`
 // (capability). Part B §B.1.8 SeatType, choice A.

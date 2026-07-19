@@ -2,8 +2,8 @@
 	import { onMount } from 'svelte';
 	import { goto } from '$app/navigation';
 	import { getVersion } from '@tauri-apps/api/app';
-	import { auth } from '$lib/stores';
-	import { signOut, getNodeInfo } from '$lib/tauri';
+	import { auth, quota } from '$lib/stores';
+	import { signOut, getNodeInfo, getQuota } from '$lib/tauri';
 	import type { NodeInfo } from '$lib/types';
 
 	let signing_out = $state(false);
@@ -12,11 +12,29 @@
 	// shipped build (was hard-coded to 0.1.0 and went stale). [T:tauri-api-app@2]
 	let appVersion = $state('');
 
+	// Upgrade ladder per Pricing SSOT (pricing.md §4 — cửa chuyển tier): every tier
+	// below the top has a path up (F0→F0-Plus→F1 team→grow/add-admin). All route to
+	// /upgrade, the plan picker. Previously the banner only rendered for F0, so a paid
+	// F0-Plus user had no visible way to start a team. [T:pricing.md §4]
+	const UPGRADE: Record<string, { title: string; sub: string; cta: string }> = {
+		'F0': { title: 'Upgrade to F0-Plus', sub: '$9/mo · more nodes, private domains, raw TCP & step-up 2FA', cta: 'Upgrade' },
+		'F0-Plus': { title: 'Start a team — F1', sub: 'Invite people and keep your $9 seat — you become the admin', cta: 'See team plans' },
+		'F1-Starter': { title: 'Grow your team', sub: 'Add seats up to 25, or an extra admin (+$9/mo)', cta: 'Manage plan' }
+	};
+	let upgrade = $derived($auth.status === 'authenticated' ? UPGRADE[$auth.user.tier] : undefined);
+
 	onMount(async () => {
 		try {
 			nodeInfo = await getNodeInfo();
 		} catch {
 			// daemon not connected or not enrolled
+		}
+		try {
+			// Node quota is enforced tenant-/seat-wide by the control plane — show the
+			// real used/limit, not a hard-coded number (BM R8.1: quota reads from config).
+			quota.set(await getQuota());
+		} catch {
+			// not enrolled / offline — leave the last known value
 		}
 		try {
 			appVersion = await getVersion();
@@ -60,7 +78,7 @@
 					<span class="label">Seat type</span>
 					<span class="value">
 						<span class="tier-badge">{({ admin: 'Admin', builder: 'Builder', user: 'User', lite: 'Lite' })[$auth.user.seat_type] ?? $auth.user.seat_type}</span>
-						{#if $auth.user.tier === 'F1Starter'}
+						{#if $auth.user.tier === 'F1-Starter'}
 							<span style="color:var(--c-text-dim);font-size:12px;margin-left:6px;">· {$auth.user.seat_node_cap} nodes · {$auth.user.seat_privdomain_cap} domains</span>
 						{/if}
 					</span>
@@ -70,15 +88,21 @@
 				<span class="label">Role</span>
 				<span class="value">{$auth.user.role === 'admin' ? 'Admin' : 'Member'}</span>
 			</div>
+			{#if $quota}
+				<div class="row">
+					<span class="label">Nodes</span>
+					<span class="value">{$quota.nodes_used} / {$quota.nodes_limit}</span>
+				</div>
+			{/if}
 		</section>
 
-		{#if $auth.user.tier === 'F0'}
+		{#if upgrade}
 			<section class="upgrade-banner">
 				<div>
-					<strong>F0-Plus — $9/mo</strong>
-					<span>More bandwidth · Multiple subdomains · Raw TCP</span>
+					<strong>{upgrade.title}</strong>
+					<span>{upgrade.sub}</span>
 				</div>
-				<button class="upgrade-btn" onclick={() => goto('/upgrade')}>Upgrade</button>
+				<button class="upgrade-btn" onclick={() => goto('/upgrade')}>{upgrade.cta}</button>
 			</section>
 		{/if}
 	{/if}
