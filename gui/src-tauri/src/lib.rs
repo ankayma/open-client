@@ -887,6 +887,21 @@ async fn sign_out(app: AppHandle, state: State<'_, AppState>) -> Result<(), Stri
     clear_session_from_disk(&state.data_dir);
     state.set_token(None);
     state.set_email(None);
+    // Tear the DATA PLANE down, not just the control-plane handoff. `disconnect_inner`
+    // only drops the in-memory node; the desktop helper daemon (and the mobile in-app
+    // tunnel) keep the OLD tenant's mesh alive otherwise. Symptom: sign out, enroll a
+    // fresh token, and the new node inherits the previous session's peers. The power
+    // toggle stops the daemon explicitly (ConnectionCard); sign-out must do the same.
+    // Best-effort — a failed teardown must never block sign-out (a stuck session that
+    // cannot be dropped is worse than a lingering daemon we already logged).
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    if let Err(e) = stop_dataplane_inner() {
+        log::warn!("could not stop data plane on sign-out: {e}");
+    }
+    #[cfg(any(target_os = "ios", target_os = "android"))]
+    if let Err(e) = vpn::vpn_disconnect() {
+        log::warn!("could not stop tunnel on sign-out: {e}");
+    }
     disconnect_inner(&state);
     // Forget the enrolled MESH identity. Otherwise, signing in to a DIFFERENT tenant
     // (or as a different user) on the same device would carry the previous tenant's
