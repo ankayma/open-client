@@ -64,10 +64,10 @@
 			<h1>Upgrade to F0-Plus</h1>
 			<p class="price">${price} <span class="per">/ month</span></p>
 			<ul class="features">
-				<li><span class="check">✓</span><div><strong>More bandwidth</strong><span>10× the free tier quota</span></div></li>
-				<li><span class="check">✓</span><div><strong>Multiple subdomains</strong><span>Custom subdomains for each service</span></div></li>
+				<li><span class="check">✓</span><div><strong>50 mesh nodes</strong><span>5× the free tier — 10 → 50 devices</span></div></li>
+				<li><span class="check">✓</span><div><strong>20 private domains</strong><span>Branded names only your mesh resolves — 5 → 20</span></div></li>
 				<li><span class="check">✓</span><div><strong>Raw TCP tunneling</strong><span>Any protocol, not just HTTP/S</span></div></li>
-				<li><span class="check">✓</span><div><strong>DLP basic</strong><span>PII and payment card detection</span></div></li>
+				<li><span class="check">✓</span><div><strong>Step-up 2FA</strong><span>TOTP second factor, optional YubiKey</span></div></li>
 				<li><span class="check">✓</span><div><strong>Your existing mesh continues</strong><span>No re-enrollment, same keys</span></div></li>
 			</ul>
 		{:else}
