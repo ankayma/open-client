@@ -1,17 +1,24 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
 	import { goto } from '$app/navigation';
-	import { auth, quota } from '$lib/stores';
+	import { auth } from '$lib/stores';
 	import { trackEvent } from '$lib/tauri';
 
-	onMount(async () => {
-		// [A] stub — real upgrade: control-plane webhook updates tier, agent-core refreshes quota
-		// Here we just fire the funnel event and let the dashboard refresh quota on next poll
-		try {
-			await trackEvent('upgrade_success', { tier: 'F0-Plus' });
-		} catch { /* non-blocking */ }
+	// Reflect the tier the webhook actually granted — the account may have landed on
+	// F0-Plus or on F1 Team, so read it live instead of assuming one plan. [T:pricing.md §1]
+	let tier = $derived($auth.status === 'authenticated' ? $auth.user.tier : '');
+	let isTeam = $derived(tier === 'F1-Starter');
+	let planName = $derived(isTeam ? 'F1 Team' : tier === 'F0-Plus' ? 'F0-Plus' : tier || 'your new plan');
+	let features = $derived(
+		isTeam
+			? ['Everything in F0-Plus', 'Invite your team', 'Shared policies & roles', 'Admin console']
+			: ['50 mesh nodes', '20 private domains', 'Raw TCP tunneling', 'Step-up 2FA (TOTP / YubiKey)']
+	);
 
-		// Auto-navigate to dashboard after 3s
+	onMount(() => {
+		// Funnel event, tagged with the tier actually granted (not a hard-coded guess).
+		trackEvent('upgrade_success', { tier: tier || 'unknown' }).catch(() => {});
+		// Auto-navigate to dashboard after 3s.
 		setTimeout(() => goto('/services'), 3000);
 	});
 </script>
@@ -25,26 +32,16 @@
 			</svg>
 		</div>
 
-		<h1>You're on F0-Plus</h1>
-		<p class="sub">Your subscription is active. Enjoy 10× bandwidth, multiple subdomains, and raw TCP tunneling.</p>
+		<h1>You're on {planName}</h1>
+		<p class="sub">Your subscription is active. Your existing mesh continues — same keys, no re-enrollment.</p>
 
 		<div class="features">
-			<div class="feature">
-				<span class="dot"></span>
-				<span>10× the free-tier bandwidth</span>
-			</div>
-			<div class="feature">
-				<span class="dot"></span>
-				<span>Multiple custom subdomains</span>
-			</div>
-			<div class="feature">
-				<span class="dot"></span>
-				<span>Raw TCP tunneling</span>
-			</div>
-			<div class="feature">
-				<span class="dot"></span>
-				<span>DLP basic — PII + payment card detection</span>
-			</div>
+			{#each features as f}
+				<div class="feature">
+					<span class="dot"></span>
+					<span>{f}</span>
+				</div>
+			{/each}
 		</div>
 
 		<p class="redirect-note">Taking you to your dashboard…</p>

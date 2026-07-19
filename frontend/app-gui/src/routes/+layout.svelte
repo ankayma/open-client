@@ -95,11 +95,36 @@
 		// — e.g. an upgrade that completed in the external browser checkout — reflects
 		// without a re-login. Do NOT navigate (the user may be mid-task on another page);
 		// that's why we can't just call refreshAuth here (it goto()s /services).
+		const prevTier = $auth.status === 'authenticated' ? $auth.user.tier : '';
 		try {
 			const s = await checkAuthState();
-			if (s.status === 'authenticated') auth.set(s);
+			if (s.status === 'authenticated') {
+				auth.set(s);
+				celebrateIfUpgraded(prevTier, s.user.tier);
+			}
 		} catch {
 			// Tauri unavailable / transient — keep the current cached session.
+		}
+	}
+
+	// The external-browser checkout can't redirect into the app, so we detect the
+	// upgrade ourselves: if a checkout was in flight (flag set on the /upgrade page) and
+	// our tier has now changed, the LS webhook landed — show the success screen once.
+	function celebrateIfUpgraded(prevTier: string, newTier: string) {
+		let raw: string | null = null;
+		try { raw = localStorage.getItem('ankayma_pending_upgrade'); } catch { return; }
+		if (!raw) return;
+		// Drop a stale flag (checkout abandoned) so it can't fire on an unrelated later
+		// tier change — e.g. a manual downgrade weeks on.
+		let ts = 0;
+		try { ts = JSON.parse(raw).ts ?? 0; } catch { /* legacy/plain flag → treat as fresh */ }
+		if (ts && Date.now() - ts > 3_600_000) {
+			try { localStorage.removeItem('ankayma_pending_upgrade'); } catch { /* ignore */ }
+			return;
+		}
+		if (newTier && newTier !== prevTier) {
+			try { localStorage.removeItem('ankayma_pending_upgrade'); } catch { /* ignore */ }
+			goto('/upgrade/success');
 		}
 	}
 

@@ -26,6 +26,11 @@
 		loading = true;
 		error = '';
 		try {
+			// Mark that a checkout is in flight. The checkout opens in the EXTERNAL browser,
+			// so LS can't redirect back into the app — instead, when the app regains focus
+			// and sees our tier has changed, the layout shows the success screen. The ts lets
+			// a stale flag (abandoned checkout) expire. [T:layout onFocus]
+			try { localStorage.setItem('ankayma_pending_upgrade', JSON.stringify({ plan, ts: Date.now() })); } catch { /* private mode */ }
 			// Account-first: the control plane stamps our tenant into the checkout from the
 			// session, so the paid webhook activates the right tenant. [T:A.1.1]
 			await invoke('open_billing_checkout', { plan });
