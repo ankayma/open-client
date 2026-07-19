@@ -86,8 +86,21 @@
 		});
 	});
 
-	function onFocus() {
-		if ($auth.status !== 'authenticated') refreshAuth(true);
+	async function onFocus() {
+		if ($auth.status !== 'authenticated') {
+			refreshAuth(true);
+			return;
+		}
+		// Already signed in: pull the latest session so a tier/seat change made ELSEWHERE
+		// — e.g. an upgrade that completed in the external browser checkout — reflects
+		// without a re-login. Do NOT navigate (the user may be mid-task on another page);
+		// that's why we can't just call refreshAuth here (it goto()s /services).
+		try {
+			const s = await checkAuthState();
+			if (s.status === 'authenticated') auth.set(s);
+		} catch {
+			// Tauri unavailable / transient — keep the current cached session.
+		}
 	}
 
 	onDestroy(() => {
