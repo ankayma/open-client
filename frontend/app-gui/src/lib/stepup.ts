@@ -94,7 +94,7 @@ export async function runWithStepUp<T>(
   }
 
   let factor: "totp" | "otp" = (await totpStatus().catch(() => false)) ? "totp" : "otp";
-  let challengeId = factor === "otp" ? await requestStepUp(purpose) : "";
+  let challengeId = "";
 
   return await new Promise<T>((resolve, reject) => {
     const patch = (p: Partial<StepUpState>) =>
@@ -110,10 +110,8 @@ export async function runWithStepUp<T>(
       cooldownUntil = Date.now() + secs * 1000;
       return cooldownUntil;
     };
-    // OTP factor already emailed a code above (challengeId request) → start the
-    // first cooldown now. TOTP factor has sent nothing yet, so no cooldown until
-    // the user falls back to email.
-    if (factor === "otp") armCooldown();
+    // Cooldown is armed AFTER the first emailed send succeeds (below), not here —
+    // so a failed initial send doesn't lock the Resend button.
 
     const submit = async (code: string) => {
       const trimmed = code.trim();
@@ -164,16 +162,34 @@ export async function runWithStepUp<T>(
       reject(new Error("Step-up cancelled"));
     };
 
+    // Open the modal IMMEDIATELY once the server demands step-up — the OTP UI must
+    // always appear. Previously the emailed-OTP request ran BEFORE the modal, so a
+    // send failure rejected the whole flow and the user saw only a bare "Failed…"
+    // with no OTP prompt. Now the modal shows first; the initial send runs async and
+    // any error surfaces inside it (with Resend). `sending` true for OTP until the
+    // first code is on its way.
     stepUp.set({
       purpose,
       requiredAal,
       factor,
-      sending: false,
+      sending: factor === "otp",
       error: null,
       submit,
       resend,
-      resendCooldownUntil: cooldownUntil,
+      resendCooldownUntil: 0,
       cancel,
     });
+    // OTP factor: request the first emailed challenge now (non-blocking). TOTP factor
+    // needs no send — the user types their authenticator code straight away.
+    if (factor === "otp") {
+      requestStepUp(purpose)
+        .then((cid) => {
+          challengeId = cid;
+          patch({ sending: false, resendCooldownUntil: armCooldown() });
+        })
+        .catch((e) =>
+          patch({ sending: false, error: e instanceof Error ? e.message : String(e) }),
+        );
+    }
   });
 }
