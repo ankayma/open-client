@@ -32,6 +32,10 @@
 		} catch (e) {
 			console.error(e);
 			error = String(e);
+		} finally {
+			// Reset on BOTH paths: on success the checkout has opened in the browser, so the
+			// button must stop spinning — it previously only reset on error, so a successful
+			// open left it stuck on "Opening checkout…".
 			loading = false;
 		}
 	}
