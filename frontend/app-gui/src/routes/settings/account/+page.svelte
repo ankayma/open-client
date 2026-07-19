@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
 	import { goto } from '$app/navigation';
+	import { invoke } from '@tauri-apps/api/core';
 	import { getVersion } from '@tauri-apps/api/app';
 	import { auth, quota } from '$lib/stores';
 	import { signOut, getNodeInfo, getQuota } from '$lib/tauri';
@@ -8,6 +9,23 @@
 
 	let signing_out = $state(false);
 	let nodeInfo = $state<NodeInfo | null>(null);
+	let addingAdmin = $state(false);
+	let addonError = $state('');
+
+	// Buy one +$9 admin add-on (Model B): a distinct add-on subscription the control plane
+	// maps to `admins_included += 1` (and member cap +1). Opens the LS checkout in the
+	// browser like any other plan. [T:pricing.md §2 Admin thêm]
+	async function addAdminSeat() {
+		addingAdmin = true;
+		addonError = '';
+		try {
+			await invoke('open_billing_checkout', { plan: 'admin-addon' });
+		} catch (e) {
+			addonError = String(e);
+		} finally {
+			addingAdmin = false;
+		}
+	}
 	// Read the real bundle version at runtime so it can never drift from the
 	// shipped build (was hard-coded to 0.1.0 and went stale). [T:tauri-api-app@2]
 	let appVersion = $state('');
@@ -102,8 +120,18 @@
 					<strong>{upgrade.title}</strong>
 					<span>{upgrade.sub}</span>
 				</div>
-				<button class="upgrade-btn" onclick={() => goto('/upgrade')}>{upgrade.cta}</button>
+				<div class="banner-actions">
+					<button class="upgrade-btn" onclick={() => goto('/upgrade')}>{upgrade.cta}</button>
+					{#if $auth.user.tier === 'F1-Starter'}
+						<button class="addon-btn" onclick={addAdminSeat} disabled={addingAdmin}>
+							{addingAdmin ? 'Opening…' : 'Add admin +$9'}
+						</button>
+					{/if}
+				</div>
 			</section>
+			{#if addonError}
+				<p class="addon-error">{addonError}</p>
+			{/if}
 		{/if}
 	{/if}
 
@@ -256,6 +284,13 @@
 		color: var(--c-text-dim);
 	}
 
+	.banner-actions {
+		display: flex;
+		flex-direction: column;
+		gap: 8px;
+		flex-shrink: 0;
+	}
+
 	.upgrade-btn {
 		background: var(--c-accent);
 		color: #fff;
@@ -265,6 +300,29 @@
 		font-weight: 600;
 		white-space: nowrap;
 		flex-shrink: 0;
+	}
+
+	.addon-btn {
+		background: transparent;
+		color: var(--c-accent);
+		border: 1px solid color-mix(in srgb, var(--c-accent) 40%, transparent);
+		padding: 8px 18px;
+		border-radius: 8px;
+		font-size: 13px;
+		font-weight: 600;
+		white-space: nowrap;
+	}
+
+	.addon-btn:disabled {
+		opacity: 0.6;
+		cursor: not-allowed;
+	}
+
+	.addon-error {
+		font-size: 12px;
+		color: var(--c-danger, #e5484d);
+		text-align: center;
+		margin-top: -8px;
 	}
 
 	.sign-out-btn {
