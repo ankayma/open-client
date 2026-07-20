@@ -33,6 +33,28 @@ export async function checkAuthState(): Promise<AuthState> {
   return invoke<AuthState>("check_auth_state");
 }
 
+// Read commands can hit an expired session (4h TTL) — overnight on mobile, or the first
+// load after a cold start. Instead of surfacing a dead "control-plane returned HTTP 401"
+// with a Retry that reuses the same stale token, transparently re-authenticate via the
+// device key (`check_auth_state` performs the device-key re-auth in Rust, incl. the
+// cold-start disk fallback) and retry the call ONCE. Self-heals regardless of whether the
+// webview fired a focus/visibility event. [T:decision/session-reauth-device-key-2026-07-18]
+async function invokeWithReauth<T>(
+  cmd: string,
+  args?: Record<string, unknown>,
+): Promise<T> {
+  try {
+    return await invoke<T>(cmd, args);
+  } catch (e) {
+    const msg = String(e);
+    if (msg.includes("401") || msg.toLowerCase().includes("unauthorized")) {
+      const s = await invoke<AuthState>("check_auth_state");
+      if (s.status === "authenticated") return await invoke<T>(cmd, args);
+    }
+    throw e;
+  }
+}
+
 export async function signInGithub(nonce: string): Promise<void> {
   return invoke("sign_in_github", { nonce });
 }
@@ -54,7 +76,7 @@ export async function signOut(): Promise<void> {
 }
 
 export async function getConnectionStatus(): Promise<ConnectionState> {
-  return invoke<ConnectionState>("get_connection_status");
+  return invokeWithReauth<ConnectionState>("get_connection_status");
 }
 
 export async function connect(): Promise<void> {
@@ -119,16 +141,16 @@ export async function getPlatform(): Promise<string> {
 }
 
 export async function getQuota(): Promise<Quota> {
-  return invoke<Quota>("get_quota");
+  return invokeWithReauth<Quota>("get_quota");
 }
 
 export async function getNodeInfo(): Promise<NodeInfo> {
-  return invoke<NodeInfo>("get_node_info");
+  return invokeWithReauth<NodeInfo>("get_node_info");
 }
 
 // [F-5 "Prove it"] Surface the data path: peer-to-peer, vendor off the path (A.1.1).
 export async function getPathProof(): Promise<PathProof> {
-  return invoke<PathProof>("get_path_proof");
+  return invokeWithReauth<PathProof>("get_path_proof");
 }
 
 // Active reachability: TCP-probe overlay IPs (connect/refused → reachable, timeout →
@@ -147,7 +169,7 @@ export async function trackEvent(
 
 // [03b] CI/CD deploy policy (F0). Every call is session-authed in agent-core.
 export async function listCiPolicies(): Promise<CiPolicy[]> {
-  return invoke<CiPolicy[]>("list_ci_policies");
+  return invokeWithReauth<CiPolicy[]>("list_ci_policies");
 }
 
 export async function addCiPolicy(req: CiPolicyDraft, proof?: StepUpProof): Promise<void> {
@@ -169,7 +191,7 @@ export async function deleteCiPolicy(repo: string, proof?: StepUpProof): Promise
 }
 
 export async function listNodes(): Promise<PeerBrief[]> {
-  return invoke<PeerBrief[]>("list_nodes");
+  return invokeWithReauth<PeerBrief[]>("list_nodes");
 }
 
 // [F-2] Open an external terminal (Terminal.app / iTerm2 / any `.command`-capable
@@ -329,7 +351,7 @@ export async function getSubdomainCert(fqdn: string): Promise<SubdomainCert> {
 
 // F1 team membership.
 export async function listMembers(): Promise<MembersView> {
-  return invoke<MembersView>("list_members");
+  return invokeWithReauth<MembersView>("list_members");
 }
 // Invite a member BY EMAIL — the join link is delivered to that email (Part D §A).
 // `ttlSeconds` (optional) overrides the server's default member-invite TTL. Admin
@@ -401,5 +423,5 @@ export async function submitPolicy(body: string, proof?: StepUpProof): Promise<v
   return invoke("submit_policy", { body, proofToken: proof?.proofToken });
 }
 export async function myAccess(): Promise<MyAccess> {
-  return invoke<MyAccess>("my_access");
+  return invokeWithReauth<MyAccess>("my_access");
 }

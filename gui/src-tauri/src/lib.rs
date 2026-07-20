@@ -453,6 +453,21 @@ fn load_stored_keypair_from(dir: &std::path::Path) -> Option<WgKeypair> {
     })
 }
 
+/// The persisted node identity — `(node_id, wg_public_b64)` — recovered from agent.json.
+/// Device-key re-auth needs both; on a COLD START `state.node` is empty (the node is only
+/// put in memory by a Connect this run), so without this the app would force a fresh
+/// sign-in after every kill/relaunch even though the durable identity is on disk. `[T:A.1.10]`
+fn load_stored_node_identity(dir: &std::path::Path) -> Option<(String, String)> {
+    let bytes = std::fs::read(dir.join("agent.json")).ok()?;
+    #[derive(serde::Deserialize)]
+    struct Stored {
+        node_id: String,
+        public_b64: String,
+    }
+    let s: Stored = serde_json::from_slice(&bytes).ok()?;
+    (!s.node_id.is_empty() && !s.public_b64.is_empty()).then_some((s.node_id, s.public_b64))
+}
+
 /// Real control-plane enrollment. Idempotent: a no-op if already enrolled
 /// in-process, otherwise enrolls with the persisted keypair when one exists.
 ///
@@ -566,10 +581,21 @@ fn apply_connection_change(app: &AppHandle) {
 /// in memory (never connected this run), or the CP rejects the proof (device revoked /
 /// legacy). None → the caller does a real logout + disconnect.
 async fn try_reauth_via_device_key(app: &AppHandle, state: &AppState) -> Option<User> {
+    // Node identity: the in-memory enrolled node if we connected this run, else recover it
+    // from the persisted handoff (agent.json). The disk fallback is what makes re-auth work
+    // on a COLD START — after the app is killed and reopened, `state.node` is empty, but the
+    // durable node_id + WG pubkey (and the machine key) are still on disk, so we re-mint a
+    // session with no second sign-in. [T:decision/session-reauth-device-key-2026-07-18 + A.1.10]
     let (node_id, wg_pubkey) = {
-        let node = state.node.lock().ok()?;
-        let n = node.as_ref()?;
-        (n.node_id.clone(), n.public_b64.clone())
+        let held = state
+            .node
+            .lock()
+            .ok()
+            .and_then(|n| n.as_ref().map(|n| (n.node_id.clone(), n.public_b64.clone())));
+        match held {
+            Some(pair) => pair,
+            None => load_stored_node_identity(&handoff_state_dir(state))?,
+        }
     };
     let machine = machine_key::MachineKey::load_or_create(&handoff_state_dir(state)).ok()?;
     let proof = machine.proof_now(&wg_pubkey).ok()?;

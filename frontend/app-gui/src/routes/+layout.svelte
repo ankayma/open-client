@@ -75,6 +75,11 @@
 		// Universal catch-all: clicking "Allow" brings the app to the foreground —
 		// re-check then, regardless of whether any event arrived.
 		window.addEventListener('focus', onFocus);
+		// iOS/Android resume: the webview does NOT reliably fire `focus` when the app comes
+		// back from background (overnight). `visibilitychange` does — it's what triggers the
+		// device-key re-auth after the 4h session TTL lapses while suspended, instead of
+		// leaving every API call stuck on 401. [T:decision/session-reauth-device-key-2026-07-18]
+		document.addEventListener('visibilitychange', onVisibility);
 
 		// Apply saved theme and wire up persistence
 		unsubTheme = activeTheme.subscribe((t) => {
@@ -85,6 +90,10 @@
 			localStorage.setItem('ankayma_lang', l);
 		});
 	});
+
+	function onVisibility() {
+		if (document.visibilityState === 'visible') onFocus();
+	}
 
 	async function onFocus() {
 		if ($auth.status !== 'authenticated') {
@@ -101,6 +110,10 @@
 			if (s.status === 'authenticated') {
 				auth.set(s);
 				celebrateIfUpgraded(prevTier, s.user.tier);
+				// Refetch the node quota too — the number is cached from the account page's
+				// mount, so after a tier change (or a session re-auth on resume) it would
+				// otherwise show a stale limit (e.g. 50 after a downgrade to F0's 10).
+				getQuota().then((q) => quota.set(q)).catch(() => {});
 			}
 		} catch {
 			// Tauri unavailable / transient — keep the current cached session.
@@ -131,6 +144,7 @@
 	onDestroy(() => {
 		for (const off of unlisteners) off();
 		window.removeEventListener('focus', onFocus);
+		document.removeEventListener('visibilitychange', onVisibility);
 		unsubTheme?.();
 		unsubLang?.();
 	});
