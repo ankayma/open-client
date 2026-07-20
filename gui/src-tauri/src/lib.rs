@@ -587,11 +587,10 @@ async fn try_reauth_via_device_key(app: &AppHandle, state: &AppState) -> Option<
     // durable node_id + WG pubkey (and the machine key) are still on disk, so we re-mint a
     // session with no second sign-in. [T:decision/session-reauth-device-key-2026-07-18 + A.1.10]
     let (node_id, wg_pubkey) = {
-        let held = state
-            .node
-            .lock()
-            .ok()
-            .and_then(|n| n.as_ref().map(|n| (n.node_id.clone(), n.public_b64.clone())));
+        let held = state.node.lock().ok().and_then(|n| {
+            n.as_ref()
+                .map(|n| (n.node_id.clone(), n.public_b64.clone()))
+        });
         match held {
             Some(pair) => pair,
             None => load_stored_node_identity(&handoff_state_dir(state))?,
