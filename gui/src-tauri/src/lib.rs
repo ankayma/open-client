@@ -2536,6 +2536,27 @@ async fn remove_member(
     .map_err(|e| e.to_string())
 }
 
+/// Admin resets a member's TOTP (admin-mediated recovery, H.9). Called WITHOUT a
+/// proof first → CP returns STEP_UP_REQUIRED:manage_member_factor → runWithStepUp
+/// supplies the admin's proof. [T:e7-recovery-model-2026-07-20.md]
+#[tauri::command]
+async fn reset_member_totp(
+    user_id: String,
+    state: State<'_, AppState>,
+    proof_token: Option<String>,
+) -> Result<(), String> {
+    let tok = state.token().ok_or("not signed in")?;
+    adapters::reset_member_totp(
+        &state.http,
+        &state.regional_base_url(),
+        &tok,
+        &user_id,
+        proof_token.as_deref(),
+    )
+    .await
+    .map_err(|e| e.to_string())
+}
+
 // ── PolicyBlock access + my-access ────────────────────────────────────────────
 
 #[tauri::command]
@@ -3036,6 +3057,7 @@ pub fn run() {
             invite_member,
             join_team,
             remove_member,
+            reset_member_totp,
             get_policy,
             submit_policy,
             my_access,

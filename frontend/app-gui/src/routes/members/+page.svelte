@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { get } from "svelte/store";
-  import { listMembers, inviteMember, joinTeam, removeMember } from "$lib/tauri";
+  import { listMembers, inviteMember, joinTeam, removeMember, resetMemberTotp } from "$lib/tauri";
   import { pendingInvite, auth } from "$lib/stores";
   import { runWithStepUp } from "$lib/stepup";
   import type { MembersView } from "$lib/types";
@@ -98,6 +98,21 @@
     }
   }
 
+  // Admin-mediated factor recovery (H.9): a member who lost their authenticator
+  // and can't self-recover asks out-of-band; the admin resets it here so they can
+  // re-enroll. Gated by the admin's OWN step-up. [T:e7-recovery-model-2026-07-20]
+  async function resetTotp(userId: string, login: string) {
+    if (!confirm(`Reset ${login}'s authenticator? They'll sign in with an emailed code and set up a new one.`))
+      return;
+    try {
+      await runWithStepUp("manage_member_factor", (proof) => resetMemberTotp(userId, proof));
+      error = "";
+    } catch (e: unknown) {
+      if (e instanceof Error && e.message === "Step-up cancelled") return;
+      error = e instanceof Error ? e.message : "Reset failed";
+    }
+  }
+
   function copy(text: string) {
     navigator.clipboard?.writeText(text);
   }
@@ -131,9 +146,16 @@
             {/if}
           </div>
           {#if isAdmin && !m.is_owner}
-            <button class="remove" onclick={() => remove(m.user_id)} aria-label="Remove member"
-              >Remove</button
-            >
+            <div class="actions">
+              <button
+                class="reset"
+                onclick={() => resetTotp(m.user_id, m.github_login)}
+                aria-label="Reset member authenticator">Reset 2FA</button
+              >
+              <button class="remove" onclick={() => remove(m.user_id)} aria-label="Remove member"
+                >Remove</button
+              >
+            </div>
           {/if}
         </li>
       {/each}
@@ -302,6 +324,24 @@
   }
   .remove:hover {
     background: color-mix(in srgb, var(--c-danger) 22%, var(--c-surface));
+  }
+  .actions {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+  }
+  .reset {
+    font-size: 13px;
+    padding: 5px 10px;
+    border-radius: 6px;
+    background: transparent;
+    color: var(--c-text-dim);
+    border: 1px solid var(--c-border);
+    transition: background 0.12s;
+  }
+  .reset:hover {
+    background: var(--c-surface);
+    color: var(--c-text);
   }
   .panel {
     background: var(--c-surface);

@@ -805,6 +805,35 @@ pub async fn remove_member(
     Ok(())
 }
 
+/// Admin resets a member's TOTP (the admin-mediated recovery path, H.9).
+/// `POST /api/v1/members/{user_id}/totp/disable`, gated by the admin's own
+/// `manage_member_factor` step-up proof (passed as a query param, matching the
+/// server's `Query<StepUpQuery>`). [T:e7-recovery-model-2026-07-20.md]
+pub async fn reset_member_totp(
+    http: &reqwest::Client,
+    base_url: &str,
+    session_token: &str,
+    user_id: &str,
+    proof_token: Option<&str>,
+) -> Result<(), ApiError> {
+    let base = url(base_url, &format!("/api/v1/members/{user_id}/totp/disable"));
+    let endpoint = match proof_token {
+        Some(p) => format!("{base}?proof_token={p}"),
+        None => base,
+    };
+    let resp = http
+        .post(endpoint)
+        .bearer_auth(session_token)
+        .timeout(CP_REST_TIMEOUT)
+        .send()
+        .await
+        .map_err(|e| ApiError::Transport(e.to_string()))?;
+    if !resp.status().is_success() {
+        return Err(status_error(resp).await);
+    }
+    Ok(())
+}
+
 // ── PolicyBlock authz + my-access ─────────────────────────────────────────────
 
 /// Read the active PolicyBlock + chain status. `GET /api/v1/policies`.

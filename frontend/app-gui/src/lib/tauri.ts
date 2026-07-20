@@ -397,6 +397,13 @@ export async function removeMember(userId: string, proof?: StepUpProof): Promise
   return invoke("remove_member", { userId, proofToken: proof?.proofToken });
 }
 
+// Admin resets a member's TOTP (admin-mediated recovery, H.9) — the member then
+// re-enrolls a fresh authenticator. Gated by the admin's own manage_member_factor
+// step-up (runWithStepUp supplies the proof). [T:e7-recovery-model-2026-07-20]
+export async function resetMemberTotp(userId: string, proof?: StepUpProof): Promise<void> {
+  return invoke("reset_member_totp", { userId, proofToken: proof?.proofToken });
+}
+
 // Mint a single-use `ankayma://join?token=…` node-enrollment link. `ttlSeconds`
 // (optional) overrides the server default; the control plane clamps the range. In a
 // multi-user tenant the server gates this behind a step-up — pass `proof` on retry.
