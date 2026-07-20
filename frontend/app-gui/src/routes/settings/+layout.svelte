@@ -33,6 +33,12 @@
 		{/each}
 	</nav>
 	{@render children()}
+	<!-- Language switch — mobile only (the desktop sidebar already carries one). Below
+	     760px the sidebar is hidden, so Settings is where a phone user changes language. -->
+	<div class="lang-switch">
+		<button class:active={lang === 'en'} onclick={() => activeLang.set('en')}>EN</button>
+		<button class:active={lang === 'vn'} onclick={() => activeLang.set('vn')}>VN</button>
+	</div>
 </div>
 
 <style>
@@ -68,10 +74,33 @@
 		color: var(--c-accent);
 	}
 
+	.lang-switch {
+		display: flex;
+		gap: 6px;
+		justify-content: center;
+		padding: 16px 16px calc(var(--safe-bottom) + 16px);
+		margin-top: auto;
+	}
+	.lang-switch button {
+		padding: 7px 20px;
+		border-radius: 999px;
+		font-size: 13px;
+		font-weight: 600;
+		color: var(--c-text-dim);
+		background: var(--c-surface);
+		border: 1px solid var(--c-border);
+	}
+	.lang-switch button.active {
+		background: color-mix(in srgb, var(--c-accent) 14%, transparent);
+		border-color: color-mix(in srgb, var(--c-accent) 35%, transparent);
+		color: var(--c-accent);
+	}
+
 	@media (min-width: 760px) {
-		/* Desktop already shows this subnav in the sidebar (routes/+layout.svelte) —
-		   avoid the redundant second control at that breakpoint. */
-		.tabs {
+		/* Desktop already shows this subnav + language control in the sidebar
+		   (routes/+layout.svelte) — avoid the redundant second controls at that breakpoint. */
+		.tabs,
+		.lang-switch {
 			display: none;
 		}
 	}

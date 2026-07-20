@@ -1,8 +1,8 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { goto } from "$app/navigation";
-  import { myAccess, openSubdomain, getNodeInfo, listNodes, listCiPolicies, ciHistory, getPathProof, probeReachable } from "$lib/tauri";
-  import type { MyAccess, AccessService, PeerBrief, CiPolicy, CiRun, PathProof, PathPeer } from "$lib/types";
+  import { myAccess, openSubdomain, getNodeInfo, listNodes, listCiPolicies, ciHistory, sshHistory, getPathProof, probeReachable } from "$lib/tauri";
+  import type { MyAccess, AccessService, PeerBrief, CiPolicy, CiRun, SshSession, PathProof, PathPeer } from "$lib/types";
   import { connection, myRole } from "$lib/stores";
   import ConnectionCard from "$lib/components/ConnectionCard.svelte";
   import PathChain from "$lib/components/PathChain.svelte";
@@ -185,11 +185,64 @@
   // [F-1 viewer] CI/CD chip + history modal state.
   let ciPolicies = $state<CiPolicy[]>([]);
   let ciNode = $state<string | null>(null);
+  // "ci" = the CICD chip (deploys only) · "all" = Activity & receipts (deploys + SSH).
+  let ciMode = $state<"ci" | "all">("all");
   let ciRuns = $state<CiRun[] | null>(null);
+  let sshSessions = $state<SshSession[] | null>(null);
   let ciErr = $state("");
+  // Which receipt is expanded (keyed by block hash). Tap-to-reveal, because a phone has no
+  // hover — the signed detail (exact time, issuer, run/session id, full block) must be
+  // reachable by touch, not only a desktop title tooltip.
+  let openReceipt = $state<string | null>(null);
   function ciRules(node: string): CiPolicy[] {
     return ciPolicies.filter((p) => p.target_hostname === node);
   }
+
+  // Unified node ledger: EVERY signed action on this node — CI deploys AND SSH sessions —
+  // newest first. "Who did what, when", each anchored to its append-only ledger block, so
+  // the receipts pane isn't just deploys. [T:A.1.8 append-only ledger]
+  type Activity = {
+    kind: "deploy" | "ssh";
+    who: string; // repo (no ref — moved to detail) or login@host
+    action: string;
+    ok: boolean;
+    at?: string;
+    hash?: string;
+    ref?: string;
+    issuer?: string;
+    environment?: string;
+    refId?: string; // run_id (deploy) or session_id (ssh)
+  };
+  let activity = $derived.by((): Activity[] | null => {
+    if (ciRuns === null && sshSessions === null) return null; // both still loading
+    const out: Activity[] = [];
+    for (const r of ciRuns ?? []) {
+      out.push({
+        kind: "deploy",
+        who: r.repo ?? "?",
+        action: r.outcome === "allow" ? "deployed" : "deploy denied",
+        ok: r.outcome === "allow",
+        at: r.at,
+        hash: r.block_hash,
+        ref: r.ref,
+        issuer: r.issuer,
+        environment: r.environment,
+        refId: r.run_id,
+      });
+    }
+    for (const s of sshSessions ?? []) {
+      out.push({
+        kind: "ssh",
+        who: `${s.login ?? "?"}${s.target_host ? `@${s.target_host}` : ""}`,
+        action: "SSH session",
+        ok: true,
+        at: s.at,
+        hash: s.block_hash,
+        refId: s.session_id,
+      });
+    }
+    return out.sort((a, b) => (b.at ?? "").localeCompare(a.at ?? "")); // newest first
+  });
 
   // `rule_ref` is access provenance like "role=member → service=X", "tag=prod → …",
   // "* → …", or "owner (admin)". The tag only needs the short access basis — the role,
@@ -204,13 +257,49 @@
     const first = from.split(",")[0].trim();
     return first.includes("=") ? first.split("=")[1] : first;
   }
-  function openCiHistory(node: string) {
+  // GitHub-style relative time ("15m ago", "1d ago") — the absolute timestamp stays on
+  // hover (title). Far easier to scan than a full ISO string in the deploy ledger.
+  function timeAgo(iso?: string): string {
+    if (!iso) return "";
+    const t = new Date(iso).getTime();
+    if (Number.isNaN(t)) return iso;
+    const s = Math.floor((Date.now() - t) / 1000);
+    if (s < 45) return "just now";
+    const m = Math.floor(s / 60);
+    if (m < 60) return `${m}m ago`;
+    const h = Math.floor(m / 60);
+    if (h < 24) return `${h}h ago`;
+    const d = Math.floor(h / 24);
+    if (d < 30) return `${d}d ago`;
+    const mo = Math.floor(d / 30);
+    if (mo < 12) return `${mo}mo ago`;
+    return `${Math.floor(mo / 12)}y ago`;
+  }
+  // Exact local time, minute precision — "2026-07-18 20:46". Cleaner than the raw ISO
+  // (microseconds + tz) for the receipt detail.
+  function formatTime(iso?: string): string {
+    if (!iso) return "";
+    const d = new Date(iso);
+    if (Number.isNaN(d.getTime())) return iso;
+    const p = (n: number) => String(n).padStart(2, "0");
+    return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+  }
+  function openCiHistory(node: string, mode: "ci" | "all" = "all") {
     ciNode = node;
+    ciMode = mode;
     ciRuns = null;
+    // "ci" mode never merges SSH — seed it empty so the deploys render on their own.
+    sshSessions = mode === "all" ? null : [];
     ciErr = "";
     ciHistory(node)
       .then((r) => (ciRuns = r))
       .catch((e) => (ciErr = String(e)));
+    // SSH ledger only for the full Activity view; failing = no session receipts to merge.
+    if (mode === "all") {
+      sshHistory(node)
+        .then((s) => (sshSessions = s))
+        .catch(() => (sshSessions = []));
+    }
   }
 
   // `proof` is polled on mount (loadProof) for the reachability badges; the path
@@ -316,12 +405,10 @@
   <div class="card" class:denied={svc.status === "denied"} class:owned>
     <div class="card-head">
       <span class="label">
-        {svc.label}
-        {#if !owned && reachOf(svc.node) !== "unknown"}
-          <span class="reach {reachOf(svc.node)}" title={REACH_TITLE[reachOf(svc.node)]}>
-            {reachOf(svc.node) === "online" ? "●" : "○"} {REACH_LABEL[reachOf(svc.node)]}
-          </span>
+        {#if !owned}
+          <span class="reach-dot {reachOf(svc.node)}" title={REACH_TITLE[reachOf(svc.node)]}>{reachOf(svc.node) === "online" ? "●" : "○"}</span>
         {/if}
+        {svc.label}
         {#if owned}<span class="owned-badge">● owned</span>{/if}
         <span class="tag" title={svc.rule_ref}>{shortRule(svc.rule_ref)}</span>
       </span>
@@ -349,10 +436,10 @@
             disabled={probedDown(svc.node)}
             title={probedDown(svc.node) ? "Unreachable — no live path to show" : ""}
             onclick={() => (pathChainSvc = svc)}
-          >◈ path chain</button>
+          >◈ path</button>
         {/if}
         {#if ciRules(svc.node).length > 0}
-          <button class="btn-secondary ci-chip" title="CI deploy history for {svc.node}" onclick={() => openCiHistory(svc.node)}>🧾 CI/CD</button>
+          <button class="btn-secondary ci-chip" title="CI deploy history for {svc.node}" onclick={() => openCiHistory(svc.node, "ci")}>🧾 CICD</button>
         {/if}
         <!-- self device (this machine): Open/SSH/path chain to yourself are no-ops;
              keep only CI/CD history. `owned` == the current device (hostname match). -->
@@ -379,13 +466,11 @@
   <div class="card node-card" class:owned={group.owned}>
     <div class="card-head">
       <span class="label">
+        {#if !group.owned}
+          <span class="reach-dot {reachOf(group.node)}" title={REACH_TITLE[reachOf(group.node)]}>{reachOf(group.node) === "online" ? "●" : "○"}</span>
+        {/if}
         {group.node}
         {#if group.owned}<span class="owned-badge">● owned</span>{/if}
-        {#if !group.owned && reachOf(group.node) !== "unknown"}
-          <span class="reach {reachOf(group.node)}" title={REACH_TITLE[reachOf(group.node)]}>
-            {reachOf(group.node) === "online" ? "●" : "○"} {REACH_LABEL[reachOf(group.node)]}
-          </span>
-        {/if}
       </span>
     </div>
     {#if !group.owned || ciRules(group.node).length > 0}
@@ -401,10 +486,10 @@
             disabled={probedDown(group.node)}
             title={probedDown(group.node) ? "Unreachable — no live path to show" : "Signed data-path to this node"}
             onclick={() => (pathChainSvc = group.services[0])}
-          >◈ path chain</button>
+          >◈ path</button>
         {/if}
         {#if ciRules(group.node).length > 0}
-          <button class="btn-secondary ci-chip" title="CI deploy history for {group.node}" onclick={() => openCiHistory(group.node)}>🧾 CI/CD</button>
+          <button class="btn-secondary ci-chip" title="CI deploy history for {group.node}" onclick={() => openCiHistory(group.node, "ci")}>🧾 CICD</button>
         {/if}
         {#if !group.owned && sshPeer(group.node)}
           <button
@@ -481,7 +566,7 @@
       onkeydown={(e) => e.stopPropagation()}
     >
       <div class="ci-head">
-        <span class="ci-title">🧾 Activity &amp; receipts → {ciNode}</span>
+        <span class="ci-title">{ciMode === "ci" ? "🧾 CI deploys" : "🧾 Activity &amp; receipts"} → {ciNode}</span>
         <button class="ci-close" onclick={() => (ciNode = null)}>✕</button>
       </div>
 
@@ -495,37 +580,52 @@
         {/each}
       </div>
 
-      {#if ciErr}
-        {#if ciErr.includes("404")}
-          <!-- Older control plane without /ci/history — honest note, not an error
-               (A.1.20 graceful degrade: rules still render above). -->
-          <p class="ci-note">Run history needs the updated control plane — the rules above are active; history lands after the next server deploy.</p>
-        {:else}
-          <p class="ci-note err">Could not load run history: {ciErr}</p>
-        {/if}
-      {:else if ciRuns === null}
-        <p class="ci-note">Loading run history…</p>
-      {:else if ciRuns.length === 0}
-        <p class="ci-note">No deploy runs yet — the first CI run on a rule above will land here, with a signed receipt.</p>
+      <!-- Deploy 404 on an older control plane degrades gracefully (A.1.20): rules render
+           above, SSH sessions still merge below. Only a NON-404 CI error is surfaced hard. -->
+      {#if ciErr && !ciErr.includes("404")}
+        <p class="ci-note err">Could not load deploy history: {ciErr}</p>
+      {:else if ciErr.includes("404")}
+        <p class="ci-note">Deploy history needs the updated control plane — rules above are active; it lands after the next server deploy.</p>
+      {/if}
+      {#if activity === null}
+        <p class="ci-note">Loading activity…</p>
+      {:else if activity.length === 0}
+        <p class="ci-note">{ciMode === "ci" ? "No deploy runs yet — the first CI run on a rule above lands here, with a signed receipt." : "No signed activity yet — deploys and SSH sessions land here, each with a receipt."}</p>
       {:else}
         <div class="ci-runs">
-          {#each ciRuns as run (run.block_hash)}
-            <div class="ci-run">
-              <span class="ci-run-outcome" class:allow={run.outcome === "allow"}>{run.outcome === "allow" ? "✓" : "✕"}</span>
-              <div class="ci-run-main">
-                <span class="ci-run-repo">{run.repo}{run.ref ? ` @ ${run.ref}` : ""}</span>
-                <span class="ci-run-meta">{run.at ?? ""}{run.run_id ? ` · ${run.run_id}` : ""}</span>
-              </div>
-              {#if run.block_hash}
-                <span
-                  class="ci-run-ledger"
-                  title="Tamper-evident ledger block · {run.block_hash}"
-                >🔒 ledger #{run.block_hash.slice(0, 8)}</span>
+          {#each activity as a (a.hash ?? `${a.kind}-${a.at}`)}
+            {@const key = a.hash ?? `${a.kind}-${a.at}`}
+            <div class="ci-entry">
+              <button
+                type="button"
+                class="ci-run"
+                aria-expanded={openReceipt === key}
+                onclick={() => (openReceipt = openReceipt === key ? null : key)}
+              >
+                <span class="ci-run-outcome" class:allow={a.ok}>{a.kind === "ssh" ? "🔑" : a.ok ? "✓" : "✕"}</span>
+                <div class="ci-run-main">
+                  <span class="ci-run-repo">{a.who}</span>
+                  <span class="ci-run-meta">{a.action} · {timeAgo(a.at)}</span>
+                </div>
+                {#if a.hash}
+                  <span class="ci-run-ledger">🔒 #{a.hash.slice(0, 8)}</span>
+                {/if}
+                <span class="ci-run-chevron" class:open={openReceipt === key}>⌄</span>
+              </button>
+              {#if openReceipt === key}
+                <div class="ci-run-detail">
+                  <div><span class="dk">time</span> {formatTime(a.at)}</div>
+                  {#if a.ref}<div><span class="dk">ref</span> {a.ref}</div>{/if}
+                  {#if a.issuer}<div><span class="dk">issued by</span> {a.issuer}</div>{/if}
+                  {#if a.environment}<div><span class="dk">env</span> {a.environment}</div>{/if}
+                  {#if a.refId}<div><span class="dk">{a.kind === "ssh" ? "session" : "run"}</span> {a.refId}</div>{/if}
+                  {#if a.hash}<div class="ci-run-block"><span class="dk">block</span> {a.hash}</div>{/if}
+                </div>
               {/if}
             </div>
           {/each}
         </div>
-        <p class="ci-note">Every run is a ledger entry — re-verify any receipt with its run id.</p>
+        <p class="ci-note">{ciMode === "ci" ? "Tap a deploy for its signed receipt — re-verify with its run id." : "Tap an entry for its signed receipt — re-verify with its id."}</p>
       {/if}
     </div>
   </div>
@@ -761,6 +861,16 @@
     background: color-mix(in srgb, var(--c-text-dim) 10%, transparent);
     border: 1px solid color-mix(in srgb, var(--c-text-dim) 22%, transparent);
   }
+  /* Reachability shown as just a leading dot (green = reachable, gray = not), placed
+     before the node name — the "reachable"/"unreachable" text was redundant with it. */
+  .reach-dot {
+    font-size: 10px;
+    margin-right: 6px;
+    cursor: help;
+    vertical-align: middle;
+    color: var(--c-text-dim); /* default gray (unreachable / not yet probed) */
+  }
+  .reach-dot.online { color: #34c759; } /* green only when reachable now */
   .fqdn {
     font-family: "SF Mono", "Fira Code", monospace;
     font-size: 12px;
@@ -891,6 +1001,40 @@
     display: flex;
     align-items: flex-start;
     gap: 10px;
+    width: 100%;
+    text-align: left;
+    background: none;
+    border: none;
+    padding: 4px 0;
+    cursor: pointer;
+    color: inherit;
+  }
+  .ci-run-chevron {
+    align-self: center;
+    color: var(--c-text-dim);
+    font-size: 14px;
+    transition: transform 0.15s;
+    flex-shrink: 0;
+  }
+  .ci-run-chevron.open { transform: rotate(180deg); }
+  .ci-run-detail {
+    margin: 2px 0 8px 30px;
+    padding: 8px 10px;
+    background: color-mix(in srgb, var(--c-text-dim) 8%, transparent);
+    border-radius: 8px;
+    font-size: 11px;
+    color: var(--c-text-dim);
+    line-height: 1.6;
+    word-break: break-word;
+  }
+  .ci-run-block {
+    font-family: 'SF Mono', 'Fira Code', monospace;
+    word-break: break-all;
+  }
+  .ci-run-detail .dk {
+    display: inline-block;
+    min-width: 62px;
+    color: color-mix(in srgb, var(--c-text-dim) 70%, transparent);
   }
   .ci-run-outcome {
     color: var(--c-danger);
@@ -983,6 +1127,7 @@
     display: flex;
     flex-wrap: wrap;
     gap: 6px;
+    justify-content: flex-end;
   }
   :global(.btn-primary.sm),
   :global(.btn-secondary.sm) {

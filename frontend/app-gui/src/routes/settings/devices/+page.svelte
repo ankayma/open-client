@@ -8,7 +8,8 @@
 	import { connection, quota } from '$lib/stores';
 	import { listNodes, getNodeInfo, deleteNode, getQuota, getPathProof, listMembers } from '$lib/tauri';
 	import { runWithStepUp } from '$lib/stepup';
-	import type { PeerBrief } from '$lib/types';
+	import PathChain from '$lib/components/PathChain.svelte';
+	import type { PeerBrief, PathProof } from '$lib/types';
 
 	// A peer counts as live only if WireGuard handshook with it this recently.
 	// WireGuard rekeys well inside two minutes on an active tunnel, so three is
@@ -87,6 +88,13 @@
 	// False when the data plane cannot be read at all (not connected, or a
 	// platform with no daemon status file). Every peer is then `unknown`.
 	let pathKnown = $state(false);
+	// Signed data-path proof in state so the "path" button can open the mesh chain to a
+	// node (shows a path only when the tunnel is connected AND that node is handshaking).
+	let pathProof = $state<PathProof | null>(null);
+	let pathNode = $state<PeerBrief | null>(null);
+	let pathPeer = $derived(
+		pathNode ? (pathProof?.peers.find((p) => p.hostname === pathNode!.hostname) ?? null) : null
+	);
 
 	async function load() {
 		loading = true;
@@ -113,6 +121,7 @@
 			);
 			myUserId = peers.find((d) => d.node_id === thisNodeId)?.owner_user_id ?? null;
 			pathKnown = proof?.connected ?? false;
+			pathProof = proof;
 			handshakeAge = new Map(
 				(proof?.peers ?? []).map((p) => [p.overlay_ip, p.last_handshake_secs])
 			);
@@ -155,13 +164,26 @@
 		}
 	}
 
+	// Client-side keyword filter (UI-only, no CP call) — the roster gets long once a team
+	// shares many devices, so let the user narrow by hostname / IP / owner.
+	let search = $state('');
 	// This device on top, then by hostname.
 	let sorted = $derived(
-		[...devices].sort((a, b) => {
-			if (a.node_id === thisNodeId) return -1;
-			if (b.node_id === thisNodeId) return 1;
-			return a.hostname.localeCompare(b.hostname);
-		})
+		[...devices]
+			.filter((d) => {
+				const q = search.trim().toLowerCase();
+				if (!q) return true;
+				return (
+					d.hostname.toLowerCase().includes(q) ||
+					d.overlay_ip.toLowerCase().includes(q) ||
+					(ownerLabel(d) ?? '').toLowerCase().includes(q)
+				);
+			})
+			.sort((a, b) => {
+				if (a.node_id === thisNodeId) return -1;
+				if (b.node_id === thisNodeId) return 1;
+				return a.hostname.localeCompare(b.hostname);
+			})
 	);
 
 	let atLimit = $derived($quota ? $quota.nodes_used >= $quota.nodes_limit : false);
@@ -210,7 +232,7 @@
 			<p>{error}</p>
 			<button class="btn" onclick={load}>Retry</button>
 		</div>
-	{:else if sorted.length === 0}
+	{:else if devices.length === 0}
 		<div class="state">
 			<p class="muted">No devices in your mesh yet.</p>
 			<button class="btn" onclick={() => goto('/add-device')}>Add a device</button>
@@ -219,44 +241,69 @@
 		{#if sshError}
 			<p class="ssh-error">{sshError}</p>
 		{/if}
-		<ul class="device-list">
-			{#each sorted as d (d.node_id)}
-				<li class="device">
-					<span
-						class="dot"
-						class:online={liveness(d) === 'live'}
-						title={livenessTitle(d)}
-						aria-label={livenessTitle(d)}
-					></span>
-					<div class="info">
-						<div class="name-row">
+		<!-- Inline keyword search over the roster (client-side only). -->
+		<div class="search-box">
+			<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>
+			<input type="text" placeholder="Search devices…" bind:value={search} spellcheck="false" autocapitalize="off" autocorrect="off" />
+			{#if search}
+				<button class="search-clear" aria-label="Clear search" onclick={() => (search = '')}>
+					<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
+				</button>
+			{/if}
+		</div>
+		{#if sorted.length === 0}
+			<p class="muted no-match">No devices match “{search}”.</p>
+		{:else}
+			<ul class="device-list">
+				{#each sorted as d (d.node_id)}
+					<!-- 3 lines: [dot · hostname · ×] / [This device · owner] / [IPv6 · SSH]. -->
+					<li class="device">
+						<div class="dev-line1">
+							<span
+								class="dot"
+								class:online={liveness(d) === 'live'}
+								title={livenessTitle(d)}
+								aria-label={livenessTitle(d)}
+							></span>
 							<span class="name">{d.hostname}</span>
+							<button
+								class="remove-btn"
+								aria-label="Remove device"
+								onclick={() => (confirmNode = d)}
+							>
+								<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
+							</button>
+						</div>
+						<div class="dev-line2">
 							{#if d.node_id === thisNodeId}<span class="badge">This device</span>{/if}
 							{#if ownerLabel(d)}<span class="owner" title="Owner">{ownerLabel(d)}</span>{/if}
+							{#if d.node_id !== thisNodeId}
+								<span class="dev-line2-actions">
+									<button
+										class="path-btn"
+										aria-label="Data path to {d.hostname}"
+										title="Signed data-path to this node"
+										onclick={() => (pathNode = d)}
+									>◈ path</button>
+									<button
+										class="ssh-btn"
+										aria-label="SSH into {d.hostname}"
+										title="SSH into {d.hostname}"
+										onclick={() => sshTo(d)}
+									>
+										<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 17l6-6-6-6M12 19h8"/></svg>
+										SSH
+									</button>
+								</span>
+							{/if}
 						</div>
-						<span class="ip">{d.overlay_ip}</span>
-					</div>
-					{#if d.node_id !== thisNodeId}
-						<button
-							class="ssh-btn"
-							aria-label="SSH into {d.hostname}"
-							title="SSH into {d.hostname}"
-							onclick={() => sshTo(d)}
-						>
-							<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 17l6-6-6-6M12 19h8"/></svg>
-							SSH
-						</button>
-					{/if}
-					<button
-						class="remove-btn"
-						aria-label="Remove device"
-						onclick={() => (confirmNode = d)}
-					>
-						<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
-					</button>
-				</li>
-			{/each}
-		</ul>
+						<div class="dev-line3">
+							<span class="ip">{d.overlay_ip}</span>
+						</div>
+					</li>
+				{/each}
+			</ul>
+		{/if}
 	{/if}
 </main>
 
@@ -289,6 +336,10 @@
 			</div>
 		</div>
 	</div>
+{/if}
+
+{#if pathNode}
+	<PathChain node={pathNode.hostname} peer={pathPeer} onclose={() => (pathNode = null)} />
 {/if}
 
 <style>
@@ -400,13 +451,79 @@
 
 	.device {
 		display: flex;
-		align-items: flex-start;
-		gap: 12px;
+		flex-direction: column;
+		align-items: stretch;
+		gap: 6px;
 		padding: 14px 16px;
 		border-bottom: 1px solid var(--c-border);
 		min-width: 0;
 	}
 	.device:last-child { border-bottom: none; }
+	.dev-line1 {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+	}
+	.dev-line1 .name { flex: 1; min-width: 0; }
+	.dev-line2 {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+	}
+	.dev-line2-actions {
+		margin-left: auto;
+		display: flex;
+		align-items: center;
+		gap: 8px;
+		flex-shrink: 0;
+	}
+	.path-btn {
+		display: inline-flex;
+		align-items: center;
+		gap: 6px;
+		font-size: 13px;
+		font-weight: 500;
+		padding: 7px 14px;
+		border-radius: var(--radius);
+		flex-shrink: 0;
+		color: var(--c-text-dim);
+		background: var(--btn-secondary-bg);
+		border: 1px solid var(--c-border);
+	}
+	.dev-line3 {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+	}
+	.dev-line3 .ip { flex: 1; min-width: 0; }
+	.search-box {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+		padding: 9px 12px;
+		margin-bottom: 10px;
+		background: var(--c-surface);
+		border: 1px solid var(--c-border);
+		border-radius: var(--radius);
+		color: var(--c-text-dim);
+	}
+	.search-box input {
+		flex: 1;
+		min-width: 0;
+		background: transparent;
+		border: none;
+		outline: none;
+		color: var(--c-text);
+		font-size: 14px;
+	}
+	.search-box input::placeholder { color: var(--c-text-dim); }
+	.search-clear {
+		display: flex;
+		align-items: center;
+		color: var(--c-text-dim);
+		flex-shrink: 0;
+	}
+	.no-match { padding: 12px 4px; font-size: 13px; }
 
 	/* Hollow = we have no data-plane evidence about this device, which is not the
 	   same as knowing it is off. A filled grey dot would assert "offline" -- a
@@ -426,13 +543,6 @@
 		box-shadow: 0 0 8px var(--sec-allow);
 	}
 
-	.info {
-		display: flex;
-		flex-direction: column;
-		gap: 2px;
-		min-width: 0;
-		flex: 1;
-	}
 
 	.name-row {
 		display: flex;
