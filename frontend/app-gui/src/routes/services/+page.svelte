@@ -20,7 +20,11 @@
   let myNodeId = $state<string | null>(null);
   let peers = $state<PeerBrief[]>([]);
   let proof = $state<PathProof | null>(null);
-  // hostname → reachable, from the active TCP probe (authoritative "reachable NOW").
+  // overlay_ip → reachable, from the active TCP probe (authoritative "reachable NOW").
+  // Keyed by overlay IP, not hostname: the overlay is a node's canonical mesh identity
+  // (unique + stable), whereas a default hostname ("localhost.localdomain") collides
+  // across nodes and the iOS path-proof snapshot can carry a hostname that has since
+  // drifted from the live roster. [T:A.1.1 overlay = identity]
   let reachMap = $state<Map<string, boolean>>(new Map());
 
   onMount(() => {
@@ -76,7 +80,7 @@
       const results = await probeReachable(ips);
       const m = new Map<string, boolean>();
       pr.peers.forEach((p, i) => {
-        m.set(p.hostname, (m.get(p.hostname) ?? false) || !!results[i]);
+        m.set(p.overlay_ip, (m.get(p.overlay_ip) ?? false) || !!results[i]);
       });
       reachMap = m;
     } catch {
@@ -89,13 +93,22 @@
   // Honest per P.3: a null/stale handshake means "not handshaking now" (agent down,
   // asleep, or NAT with no relay yet) — we say "no handshake", not "offline".
   type Reach = "online" | "stale" | "unknown";
+  // A service node (my-access carries only its hostname) → its overlay IP, resolved via
+  // the FRESH roster the SSH button already trusts (`peers`). The overlay is the join key
+  // for reachability + path-proof: if SSH reaches a node, its overlay is in the pump, so
+  // it is in `proof.peers` too — even when the snapshot's hostname has drifted. Null until
+  // the roster loads (callers fall back to a hostname match). [T:A.1.1 overlay = identity]
+  function overlayOf(node: string): string | null {
+    return peers.find((p) => p.hostname === node)?.overlay_ip ?? null;
+  }
   function reachOf(node: string): Reach {
     if (!connected) return "unknown";
-    // Prefer the active probe (authoritative NOW); fall back to handshake age until
-    // the first probe lands.
-    if (reachMap.has(node)) return reachMap.get(node) ? "online" : "stale";
+    const ip = overlayOf(node);
+    // Prefer the active probe (authoritative NOW), keyed by overlay IP; fall back to
+    // handshake age until the first probe lands.
+    if (ip && reachMap.has(ip)) return reachMap.get(ip) ? "online" : "stale";
     if (!proof) return "unknown";
-    const matches = proof.peers.filter((p) => p.hostname === node);
+    const matches = proof.peers.filter((p) => (ip ? p.overlay_ip === ip : p.hostname === node));
     if (matches.length === 0) return "unknown";
     const best = matches.reduce((a, b) => {
       const av = a.last_handshake_secs ?? Infinity;
@@ -110,7 +123,8 @@
   // "no handshake yet"). Actions are disabled only on this, so a not-yet-probed node
   // stays clickable (no deadlock while the first probe is in flight).
   function probedDown(node: string): boolean {
-    return reachMap.get(node) === false;
+    const ip = overlayOf(node);
+    return ip ? reachMap.get(ip) === false : false;
   }
   const REACH_LABEL = { online: "reachable", stale: "unreachable", unknown: "" } as const;
   const REACH_TITLE = {
@@ -305,10 +319,20 @@
   // `proof` is polled on mount (loadProof) for the reachability badges; the path
   // chain modal reuses that same live snapshot — no separate load/null needed.
 
-  // Find the WireGuard peer that backs the selected service node.
-  const pathChainPeer: PathPeer | null = $derived(
-    proof?.peers.find((p) => p.hostname === pathChainSvc?.node) ?? null
-  );
+  // Find the WireGuard peer that backs the selected service node. Join on the overlay IP
+  // (canonical mesh identity) resolved via the fresh roster — robust to a hostname that
+  // collides or has drifted in the connect-time path-proof snapshot. Fall back to a direct
+  // hostname match while the roster is still loading. [T:A.1.1]
+  const pathChainPeer: PathPeer | null = $derived.by(() => {
+    const node = pathChainSvc?.node;
+    if (!node || !proof) return null;
+    const ip = overlayOf(node);
+    return (
+      (ip ? proof.peers.find((p) => p.overlay_ip === ip) : undefined) ??
+      proof.peers.find((p) => p.hostname === node) ??
+      null
+    );
+  });
 </script>
 
 <main>

@@ -92,8 +92,11 @@
 	// node (shows a path only when the tunnel is connected AND that node is handshaking).
 	let pathProof = $state<PathProof | null>(null);
 	let pathNode = $state<PeerBrief | null>(null);
+	// Join on overlay_ip, the node's canonical mesh identity (unique + stable) — not the
+	// hostname, which collides across default-named nodes and can drift from the value in
+	// the connect-time path-proof snapshot. `pathNode` already carries its overlay_ip. [T:A.1.1]
 	let pathPeer = $derived(
-		pathNode ? (pathProof?.peers.find((p) => p.hostname === pathNode!.hostname) ?? null) : null
+		pathNode ? (pathProof?.peers.find((p) => p.overlay_ip === pathNode!.overlay_ip) ?? null) : null
 	);
 
 	async function load() {
