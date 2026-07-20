@@ -1,11 +1,9 @@
 # GitHub Actions — macOS signed+notarized DMG + Tauri auto-update artifacts.
 #
-# Why GitHub Actions and not the existing .gitlab-ci.yml: this repo's CI lives on
-# GitLab (origin remote); the macOS pipeline needs a real macos-14 runner, which
-# GitLab.com doesn't offer for this project. `github` remote (public mirror,
-# github.com/ankayma/open-client) is the trigger surface for this workflow — push
-# the release tag there too, not just to GitLab, or this never runs. [A — confirm
-# GitHub mirror push is part of the release runbook once this first executes]
+# Runs on GitHub Actions: the macOS pipeline needs a real macos-14 runner. All CI
+# lives on GitHub now (see .github/workflows/ci.yml for per-commit lint/test) —
+# push the release tag to the `github` remote (public mirror,
+# github.com/ankayma/open-client) to trigger this workflow.
 #
 # Reuses scripts/release-macos.sh as-is (Part D release pipeline §3.2, already
 # working) — this workflow only supplies the signing/notarization secrets it

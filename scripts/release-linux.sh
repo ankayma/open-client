@@ -11,7 +11,8 @@
 # CI-pinned image. On Linux it builds natively with musl-tools. [T:A.1.21] toolchain
 # is pinned by rust-toolchain.toml (1.96.0).
 #
-# Signing (same model as .gitlab-ci.yml): we sign the SHA256SUMS manifest once; that
+# Signing (same model the GitHub release workflow uses): we sign the SHA256SUMS
+# manifest once; that
 # one signature authenticates every listed binary. Requires the Cosign key:
 #   COSIGN_PASSWORD   password for cosign.key   (env, never hard-coded)
 #   cosign.key        repo-root private key (git-ignored / provided out of band)

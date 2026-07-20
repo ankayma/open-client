@@ -17,7 +17,8 @@
 // `libc::getpeereid` is a BSD/macOS-only symbol (Linux has no equivalent, it uses
 // SO_PEERCRED instead), so this whole binary is gated behind target_os = "macos".
 // It still needs to exist as a no-op on other platforms because it's a Cargo
-// workspace member and `cargo test --workspace` runs on Linux CI (.gitlab-ci.yml).
+// workspace member and `cargo test --workspace` runs on Linux CI (GitHub Actions,
+// .github/workflows/ci.yml).
 #[cfg(not(target_os = "macos"))]
 fn main() {
     eprintln!("ankayma-helper is macOS-only");

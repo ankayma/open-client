@@ -1,0 +1,45 @@
+# GitHub Actions — per-commit CI: lint (fmt + clippy) + test.
+#
+# Runs on every push and pull request. Mirrors the checks that previously lived
+# in .gitlab-ci.yml (removed — releases are GitHub-only now). The release-*
+# workflows stay tags-only; this is the fast per-commit safety net.
+#
+# GUI (ankayma-gui / Tauri) is excluded from clippy/test here: it needs
+# per-platform system libs (webkit2gtk/gtk/libsoup) and its own Tauri toolchain.
+# `cargo fmt --all` still covers every crate, GUI included.
+name: ci
+
+on:
+  push:
+  pull_request:
+
+env:
+  RUSTFLAGS: "-D warnings"
+  CARGO_TERM_COLOR: always
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust (pinned via rust-toolchain.toml) + rustfmt + clippy
+        run: |
+          rustup show
+          rustup component add rustfmt clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: fmt --check (all crates)
+        run: cargo fmt --all -- --check
+      - name: clippy (logic crates; GUI excluded — see header)
+        run: cargo clippy --workspace --exclude ankayma-gui --all-targets --locked -- -D warnings
+
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust (pinned via rust-toolchain.toml)
+        run: rustup show
+      - uses: Swatinem/rust-cache@v2
+      - name: test (logic crates; GUI built separately)
+        run: cargo test --workspace --exclude ankayma-gui --locked

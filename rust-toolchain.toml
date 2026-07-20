@@ -1,6 +1,6 @@
 [toolchain]
 # [T:A.1.21] Pinned to the exact version the release host builds with
 # (VPS rustc 1.96.0, 2026-05-25) — deterministic, not a floating "stable".
-# Bump deliberately + re-verify on the build host; keep the CI image tag in
-# .gitlab-ci.yml (rust:1.96-slim) in sync with this.
+# Bump deliberately + re-verify on the build host. GitHub CI (.github/workflows/)
+# installs this exact channel via `rustup show`, so it stays in sync automatically.
 channel = "1.96.0"
