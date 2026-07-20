@@ -1350,18 +1350,16 @@ pub async fn totp_enroll(
         .map_err(|e| ApiError::Decode(e.to_string()))
 }
 
-/// `POST /api/v1/stepup/totp/confirm` — prove the enrolled secret works;
-/// returns the 10 one-time backup codes (H.9 recovery), shown once.
+/// `POST /api/v1/stepup/totp/confirm` — prove the enrolled secret works and mark
+/// it confirmed. No backup-codes returned (removed 2026-07-20, e7-recovery-model:
+/// a lost authenticator recovers via the email-OTP AAL2 path or an admin/vendor
+/// disable, not a code-on-paper).
 pub async fn totp_confirm(
     http: &reqwest::Client,
     base_url: &str,
     session_token: &str,
     code: &str,
-) -> Result<Vec<String>, ApiError> {
-    #[derive(serde::Deserialize)]
-    struct Resp {
-        backup_codes: Vec<String>,
-    }
+) -> Result<(), ApiError> {
     let resp = http
         .post(url(base_url, "/api/v1/stepup/totp/confirm"))
         .bearer_auth(session_token)
@@ -1373,10 +1371,32 @@ pub async fn totp_confirm(
     if !resp.status().is_success() {
         return Err(status_error(resp).await);
     }
-    resp.json::<Resp>()
+    Ok(())
+}
+
+/// `POST /api/v1/stepup/totp/disable` — remove the caller's own confirmed TOTP
+/// factor. Gated server-side by a `manage_auth_factor` step-up proof (the caller
+/// proves a current factor, or the AAL2 email-OTP "lost-authenticator" path at
+/// F0-Plus/F1). A missing/insufficient proof surfaces as the usual
+/// `STEP_UP_REQUIRED:...` status, which the GUI's `runWithStepUp` handles.
+pub async fn totp_disable(
+    http: &reqwest::Client,
+    base_url: &str,
+    session_token: &str,
+    proof_token: Option<&str>,
+) -> Result<(), ApiError> {
+    let resp = http
+        .post(url(base_url, "/api/v1/stepup/totp/disable"))
+        .bearer_auth(session_token)
+        .json(&serde_json::json!({ "proof_token": proof_token }))
+        .timeout(CP_REST_TIMEOUT)
+        .send()
         .await
-        .map(|r| r.backup_codes)
-        .map_err(|e| ApiError::Decode(e.to_string()))
+        .map_err(|e| ApiError::Transport(e.to_string()))?;
+    if !resp.status().is_success() {
+        return Err(status_error(resp).await);
+    }
+    Ok(())
 }
 
 // ── WebAuthn / YubiKey (E-7 StepUp Phase 3 — AAL3) ────────────────────────────

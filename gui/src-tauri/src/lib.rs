@@ -1330,11 +1330,31 @@ async fn totp_enroll(state: State<'_, AppState>) -> Result<(String, String), Str
 }
 
 #[tauri::command]
-async fn totp_confirm(state: State<'_, AppState>, code: String) -> Result<Vec<String>, String> {
+async fn totp_confirm(state: State<'_, AppState>, code: String) -> Result<(), String> {
     let tok = state.token().ok_or("not signed in")?;
     adapters::totp_confirm(&state.http, &state.regional_base_url(), &tok, &code)
         .await
         .map_err(|e| e.to_string())
+}
+
+/// Disable the caller's own TOTP factor. Called WITHOUT a proof first: the CP
+/// returns STEP_UP_REQUIRED (`manage_auth_factor`), the GUI's `runWithStepUp`
+/// runs the step-up (TOTP, or the AAL2 email "lost-authenticator" path at
+/// F0-Plus/F1) and retries WITH the proof. [T:e7-recovery-model-2026-07-20]
+#[tauri::command]
+async fn totp_disable(
+    state: State<'_, AppState>,
+    proof_token: Option<String>,
+) -> Result<(), String> {
+    let tok = state.token().ok_or("not signed in")?;
+    adapters::totp_disable(
+        &state.http,
+        &state.regional_base_url(),
+        &tok,
+        proof_token.as_deref(),
+    )
+    .await
+    .map_err(|e| e.to_string())
 }
 
 // ── WebAuthn / YubiKey (Settings → Security + step-up AAL3) ──────────────────
@@ -2990,6 +3010,7 @@ pub fn run() {
             totp_status,
             totp_enroll,
             totp_confirm,
+            totp_disable,
             webauthn_status,
             webauthn_register_start,
             webauthn_register_finish,

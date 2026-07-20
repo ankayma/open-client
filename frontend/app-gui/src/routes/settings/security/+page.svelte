@@ -5,17 +5,18 @@
 	// button that does nothing is worse than no button (P.3 honest gap).
 	import { onMount } from 'svelte';
 	import { connection } from '$lib/stores';
-	import { totpStatus, totpEnroll, totpConfirm, webauthnStatus } from '$lib/tauri';
+	import { totpStatus, totpEnroll, totpConfirm, totpDisable, webauthnStatus } from '$lib/tauri';
+	import { runWithStepUp } from '$lib/stepup';
 	import { registerSecurityKey, webauthnAvailable } from '$lib/webauthn';
 
 	// idle: not enrolled, offer setup. enrolling: secret shown, awaiting a code
-	// to confirm. backupCodes: just confirmed — show the 10 one-time codes,
-	// exactly once (never retrievable again). enrolled: a confirmed factor exists.
-	let totpState = $state<'loading' | 'idle' | 'enrolling' | 'backupCodes' | 'enrolled'>('loading');
+	// to confirm. enrolled: a confirmed factor exists. No backup-codes step
+	// (removed 2026-07-20, e7-recovery-model): a lost authenticator recovers via
+	// the email-OTP AAL2 path or an admin/vendor disable.
+	let totpState = $state<'loading' | 'idle' | 'enrolling' | 'enrolled'>('loading');
 	let otpauthUrl = $state('');
 	let secret = $state('');
 	let confirmCode = $state('');
-	let backupCodes = $state<string[]>([]);
 	let totpError = $state('');
 	let busy = $state(false);
 
@@ -70,11 +71,30 @@
 		busy = true;
 		totpError = '';
 		try {
-			backupCodes = await totpConfirm(confirmCode.trim());
+			await totpConfirm(confirmCode.trim());
 			confirmCode = '';
-			totpState = 'backupCodes';
+			totpState = 'enrolled';
 		} catch (e) {
 			totpError = e instanceof Error ? e.message : 'Incorrect code';
+		} finally {
+			busy = false;
+		}
+	}
+
+	// Remove the confirmed TOTP factor. Gated by a `manage_auth_factor` step-up:
+	// runWithStepUp drives the modal (the user's own TOTP, or the AAL2 email
+	// "lost-authenticator" fallback at F0-Plus/F1) and retries with the proof.
+	// This is also the escape hatch for a stale/unwanted enrollment.
+	// [T:e7-recovery-model-2026-07-20.md]
+	async function disableTotp() {
+		busy = true;
+		totpError = '';
+		try {
+			await runWithStepUp('manage_auth_factor', (proof) => totpDisable(proof));
+			totpState = 'idle';
+		} catch (e) {
+			if (e instanceof Error && e.message === 'Step-up cancelled') return;
+			totpError = e instanceof Error ? e.message : 'Could not disable the authenticator';
 		} finally {
 			busy = false;
 		}
@@ -119,6 +139,18 @@
 				<span class="label">Authenticator app</span>
 				<span class="value">Enabled</span>
 			</div>
+			<div class="row">
+				<span class="value dim">
+					Lost your authenticator? Disable it here to set up a new one — you'll confirm with your
+					current code, or an emailed code if you've lost access.
+				</span>
+			</div>
+			<div class="row">
+				<button class="su-danger" onclick={disableTotp} disabled={busy}>
+					{busy ? 'Working…' : 'Disable authenticator app'}
+				</button>
+			</div>
+			{#if totpError}<p class="err">{totpError}</p>{/if}
 		{:else if totpState === 'idle'}
 			<div class="row">
 				<span class="value dim">
@@ -150,19 +182,6 @@
 				<button class="su-primary" onclick={confirmEnroll} disabled={busy || !confirmCode.trim()}>
 					{busy ? 'Verifying…' : 'Confirm'}
 				</button>
-			</div>
-		{:else if totpState === 'backupCodes'}
-			<div class="row totp-setup">
-				<p class="hint">
-					Save these backup codes somewhere safe — each works once if you lose your authenticator
-					app. They will not be shown again.
-				</p>
-				<div class="backup-codes">
-					{#each backupCodes as c (c)}
-						<span class="mono">{c}</span>
-					{/each}
-				</div>
-				<button class="su-primary" onclick={() => (totpState = 'enrolled')}>Done</button>
 			</div>
 		{/if}
 	</section>
@@ -298,22 +317,6 @@
 		text-align: center;
 	}
 
-	.backup-codes {
-		display: grid;
-		grid-template-columns: 1fr 1fr;
-		gap: 8px;
-		background: var(--c-bg);
-		border: 1px solid var(--c-border);
-		border-radius: 8px;
-		padding: 12px;
-	}
-
-	.backup-codes .mono {
-		font-family: 'SF Mono', 'Fira Code', monospace;
-		font-size: 13px;
-		text-align: center;
-	}
-
 	.err {
 		color: var(--c-danger);
 		font-size: 13px;
@@ -328,6 +331,19 @@
 		border-radius: 8px;
 	}
 	.su-primary:disabled {
+		opacity: 0.5;
+	}
+
+	.su-danger {
+		font-size: 14px;
+		font-weight: 600;
+		color: var(--c-danger);
+		background: transparent;
+		border: 1px solid var(--c-danger);
+		padding: 10px 16px;
+		border-radius: 8px;
+	}
+	.su-danger:disabled {
 		opacity: 0.5;
 	}
 </style>

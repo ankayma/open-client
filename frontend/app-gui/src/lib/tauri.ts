@@ -278,10 +278,18 @@ export async function totpEnroll(): Promise<[string, string]> {
   return invoke<[string, string]>("totp_enroll");
 }
 
-// Prove the enrolled secret works; returns the 10 one-time backup codes
-// (H.9 recovery) — shown once, never retrievable again.
-export async function totpConfirm(code: string): Promise<string[]> {
-  return invoke<string[]>("totp_confirm", { code });
+// Prove the enrolled secret works and mark TOTP confirmed. No backup-codes
+// (removed 2026-07-20, e7-recovery-model): a lost authenticator recovers via the
+// email-OTP AAL2 path or an admin/vendor disable.
+export async function totpConfirm(code: string): Promise<void> {
+  return invoke("totp_confirm", { code });
+}
+
+// Disable the caller's own TOTP factor. Invoked WITHOUT a proof first; the CP
+// returns STEP_UP_REQUIRED (manage_auth_factor) and `runWithStepUp` supplies the
+// proof (TOTP, or the AAL2 email "lost-authenticator" path at F0-Plus/F1).
+export async function totpDisable(proof?: StepUpProof): Promise<void> {
+  return invoke("totp_disable", { proofToken: proof?.proofToken });
 }
 
 // WebAuthn / YubiKey (E-7 StepUp Phase 3 — AAL3). The actual register/assert

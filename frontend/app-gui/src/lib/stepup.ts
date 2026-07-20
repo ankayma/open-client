@@ -60,6 +60,7 @@ const PURPOSE_LABEL: Record<string, string> = {
   manage_ci_policy: "change this deploy rule",
   manage_subdomain: "change this private-domain mapping",
   manage_policy: "change this access policy",
+  manage_auth_factor: "remove a sign-in factor",
 };
 export function purposeLabel(p: string): string {
   return PURPOSE_LABEL[p] ?? p;
