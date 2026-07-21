@@ -149,6 +149,27 @@ async fn build_config(state: &AppState) -> Result<String, String> {
             None
         }
     };
+    // Relay fallback (Decision D-T1): the synchronous Packet Tunnel has no CP client
+    // and no async runtime, so fetch this PL's relay fleet map HERE and hand the first
+    // enabled relay's endpoint + this node's service token to the extension (the desktop
+    // daemon does the equivalent inline in `serve_dataplane`). Empty map / no token /
+    // fetch error → None → direct-only, unchanged. The token only rides along when there
+    // is a relay to authenticate to, and never leaves the App Group container.
+    // [T:A.1.1 relay-block + A.1.6 verify + part-d-transport-connectivity §5]
+    let (relay_endpoint, relay_token): (Option<String>, Option<String>) = match state.token() {
+        Some(tok) => {
+            let ep = agent_core::adapters::relay_map(&state.http, &state.regional_base_url(), &tok)
+                .await
+                .ok()
+                .and_then(|map| map.into_iter().next())
+                .map(|r| r.endpoint);
+            match ep {
+                Some(e) => (Some(e), Some(tok)),
+                None => (None, None),
+            }
+        }
+        None => (None, None),
+    };
     let cfg = serde_json::json!({
         "private_key_b64": private_b64,
         "overlay_ip": overlay_ip,
@@ -156,6 +177,8 @@ async fn build_config(state: &AppState) -> Result<String, String> {
         "status_path": status_path,
         "listen_port": 51820u16,
         "peers": peers,
+        "relay_endpoint": relay_endpoint,
+        "service_token": relay_token,
         "zone": zone,
         "dns_ip": magic_dns_ip(&overlay_ip),
         // Upstreams for the pump's forwarding resolver (matchDomains=[""] routes ALL

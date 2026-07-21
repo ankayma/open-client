@@ -221,6 +221,16 @@ struct Config {
     /// path-proof stays empty (older app), unchanged. [T:F-5, A.1.1 metadata only]
     #[serde(default)]
     status_path: Option<String>,
+    /// This PL's relay endpoint (`host:port`), when the control plane published a fleet
+    /// map. The app fetches the map (this extension has no CP client / async runtime) and
+    /// hands the chosen relay here. Absent/None → direct-only, unchanged. [T:D-T1, §D.9.3]
+    #[serde(default)]
+    relay_endpoint: Option<String>,
+    /// This node's control-plane service token, needed to authenticate the relay
+    /// ClientHello — the relay re-verifies membership with the CP (fail-closed, A.1.6).
+    /// Only present when `relay_endpoint` is; stays inside the App Group container.
+    #[serde(default)]
+    service_token: Option<String>,
 }
 
 fn default_port() -> u16 {
@@ -244,6 +254,10 @@ struct Prepared {
     node_id: String,
     /// App Group path for the status heartbeat; `None` disables it.
     status_path: Option<String>,
+    /// Relay endpoint (`host:port`) to keep a NAT-fallback leg to; `None` → direct-only.
+    relay_endpoint: Option<String>,
+    /// Service token for the relay ClientHello; `None` → no relay leg.
+    service_token: Option<String>,
 }
 
 /// Parse `upstream_dns` entries (bare IPs) into `ip:53` targets, dropping
@@ -300,6 +314,8 @@ fn prepare(config_json: &str) -> Result<Prepared, String> {
         upstreams,
         node_id,
         status_path: cfg.status_path,
+        relay_endpoint: cfg.relay_endpoint,
+        service_token: cfg.service_token,
     })
 }
 
@@ -384,9 +400,38 @@ fn start_inner(fd: i32, config_json: &str, bound_if: u32) -> Result<Box<PtpHandl
     );
 
     let tun = agent_core::tundev::TunHandle::Fd(fd);
-    // relay = None: NAT-fallback relay not activated yet (Decision D-T1) — direct-UDP
-    // only, unchanged behaviour, until the control plane distributes a relay endpoint.
-    pump::spawn_tx(tun.clone(), udp.clone(), peers.clone(), None, p.dns);
+    // Relay fallback (Decision D-T1, "Tailscale-lite"): when the app fed us a relay
+    // endpoint + token, keep a relay leg up so peers with no dialable endpoint (the
+    // common mobile↔mobile / mobile↔NAT case) are still reachable — `send_ciphertext`
+    // routes to the relay exactly when a peer has no direct endpoint. Sync `connect`
+    // (std `TcpStream`) fits this runtime-less extension. Absent/unreachable → None →
+    // prior direct-UDP-only behaviour, unchanged. [T:A.1.1 relay-block + §D.9.3]
+    let relay: Option<std::sync::Arc<agent_core::relay_transport::RelayClient>> =
+        match (p.relay_endpoint.as_deref(), p.service_token.as_deref()) {
+            (Some(endpoint), Some(token)) => {
+                let my_pubkey = agent_core::tunnel::PublicKey::from(&p.static_private).to_bytes();
+                match agent_core::relay_transport::RelayClient::connect(
+                    endpoint,
+                    my_pubkey,
+                    token.as_bytes().to_vec(),
+                ) {
+                    Ok((client, inbound)) => {
+                        let client = std::sync::Arc::new(client);
+                        pump::spawn_relay_rx(tun.clone(), client.clone(), inbound, peers.clone());
+                        ios_pump_log(&format!("relay leg up via {endpoint}"));
+                        Some(client)
+                    }
+                    // Fail-open to direct-only: an unreachable relay must not block the
+                    // data plane (A.1.6 fail-closed is the relay's own contract, not ours).
+                    Err(e) => {
+                        ios_pump_log(&format!("relay unreachable, direct-only: {e}"));
+                        None
+                    }
+                }
+            }
+            _ => None,
+        };
+    pump::spawn_tx(tun.clone(), udp.clone(), peers.clone(), relay, p.dns);
     pump::spawn_rx(tun, udp.clone(), peers.clone());
     pump::spawn_timers(
         udp.clone(),
