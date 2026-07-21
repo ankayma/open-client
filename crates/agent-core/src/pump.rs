@@ -73,6 +73,12 @@ fn plog(msg: &str) {
     }
 }
 
+/// Public diagnostic line — same sink as the pump's own logs, so the `disco` driver's
+/// lines reach the iOS log hook too (not just stdout).
+pub fn plog_public(msg: &str) {
+    plog(msg);
+}
+
 /// Tear down an established session after this much *data* silence — tunnels are
 /// ephemeral, not process-lifetime. `[T:A.1.7 — idle timeout 5-10 min]` The next
 /// outbound packet re-handshakes on demand (boringtun queues it and emits a fresh

@@ -283,6 +283,9 @@ pub(crate) async fn serve_dataplane(
     // map and, if the control plane published one, keep a relay leg up for NAT-fallback
     // reachability. Empty map → relay = None → exact prior direct-UDP-only behaviour, so
     // a PL with no relay deployed is unchanged. `[T:A.1.1 relay-block + part-d-transport-connectivity §5]`
+    // The relay's STUN address, derived from the chosen relay endpoint (G-2). Set when a
+    // relay is picked; drives endpoint discovery below.
+    let mut relay_stun_addr: Option<std::net::SocketAddr> = None;
     let relay: Option<Arc<agent_core::relay_transport::RelayClient>> = {
         let token = ctx.service_token.read().unwrap().clone();
         match adapters::relay_map(
@@ -296,6 +299,7 @@ pub(crate) async fn serve_dataplane(
                 // One region today → pin the first enabled relay; RTT-based home-relay
                 // selection lands when the fleet spans ≥2 regions (§D.9.6). `[A]`
                 let picked = &map[0];
+                relay_stun_addr = agent_core::disco::stun_addr_for(&picked.endpoint);
                 let my_pubkey = agent_core::tunnel::PublicKey::from(&static_private).to_bytes();
                 match agent_core::relay_transport::RelayClient::connect(
                     &picked.endpoint,
@@ -335,6 +339,20 @@ pub(crate) async fn serve_dataplane(
         index.clone(),
         relay,
     );
+
+    // [G-2] STUN endpoint discovery on the WG socket. Register the demux sink, then run
+    // discovery against the relay's STUN reflector — learning our public reflexive endpoint
+    // (the candidate a peer dials to hole-punch a direct path, G-3). Only when a relay is
+    // present (hence a co-located STUN reflector). `[T:nat-traversal-disco-design §4]`
+    if let Some(stun_addr) = relay_stun_addr {
+        let (stun_tx, stun_rx) = std::sync::mpsc::channel();
+        pump::set_stun_sink(stun_tx);
+        let reflexive: agent_core::disco::Reflexive = Arc::new(std::sync::Mutex::new(None));
+        let udp_disco = udp.clone();
+        std::thread::spawn(move || {
+            agent_core::disco::run_discovery(udp_disco, stun_addr, stun_rx, reflexive);
+        });
+    }
 
     // [F-3] Private DNS for branded names while the overlay is up: resolve the
     // tenant's `<name> → overlay_ip` table locally so a browser on this enrolled

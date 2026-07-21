@@ -3,6 +3,7 @@
 pub mod adapters; // concrete impls of ports
 pub mod application; // use cases, orchestration
 pub mod dataplane; // overlay peer model + packet routing helpers (testable)
+pub mod disco; // NAT-traversal driver: STUN discovery + hole-punch on the WG socket (G-2/G-3)
 pub mod dns; // F-3 private-DNS responder + raw IP/UDP framing (daemon + iOS extension)
 pub mod domain; // pure business logic, no I/O
 pub mod machine_key; // stable per-device identity proven at enrollment (Ed25519)
