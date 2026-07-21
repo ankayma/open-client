@@ -65,6 +65,19 @@ fn stun_divert(pkt: &[u8], src: std::net::SocketAddr) -> bool {
     false
 }
 
+/// Rendezvous frames arriving over the RELAY (a peer's CallMeMaybe: `(sender pubkey,
+/// their STUN-reflexive endpoint)`) are handed here, off the boringtun path — the
+/// Tailscale disco-over-DERP model, carried by our DERP-style relay. `[T:disco §4]`
+static RENDEZVOUS_SINK: std::sync::OnceLock<
+    std::sync::mpsc::Sender<([u8; 32], std::net::SocketAddr)>,
+> = std::sync::OnceLock::new();
+
+/// Register the rendezvous sink (idempotent). Until set, rendezvous frames are still
+/// diverted off the WG path (never fed to boringtun) — just dropped.
+pub fn set_rendezvous_sink(tx: std::sync::mpsc::Sender<([u8; 32], std::net::SocketAddr)>) {
+    let _ = RENDEZVOUS_SINK.set(tx);
+}
+
 /// Emit a diagnostic line to the installed hook, else stdout.
 fn plog(msg: &str) {
     match LOG_HOOK.get() {
@@ -280,11 +293,6 @@ fn peer_by_pubkey(peers: &Peers, pubkey: [u8; 32]) -> Option<Arc<PeerEntry>> {
     g.iter().find(|p| p.peer.public_key == pubkey).cloned()
 }
 
-fn peer_by_node_id(peers: &Peers, node_id: &str) -> Option<Arc<PeerEntry>> {
-    let g = peers.lock().expect("peers lock");
-    g.iter().find(|p| p.peer.node_id == node_id).cloned()
-}
-
 /// G-3 hole-punch cadence: a short burst of handshake initiations opens the NAT mapping.
 /// ~200-250ms × ~10 over ~2s, then concede to the relay (Nebula-style linear cadence).
 /// `[T:decision/nat-traversal-disco-design-2026-07-21 §2(B)]`
@@ -292,22 +300,26 @@ const PUNCH_TRIES: u32 = 8;
 const PUNCH_INTERVAL: Duration = Duration::from_millis(250);
 
 /// Fire a burst of WireGuard handshake initiations DIRECTLY at `target` — the peer's
-/// server-reflexive endpoint learned via CP rendezvous (G-3) — to open the NAT mapping.
-/// The peer bursts back simultaneously (its own rendezvous); the first init to survive
-/// both NATs completes the handshake on the direct 5-tuple, and the rx pump's roaming
-/// (`set_endpoint` on the authenticated reply) upgrades the peer to direct. No relay
-/// teardown and no session reset — WireGuard is keyed by the static pubkey, not the
-/// 5-tuple. Best-effort: send errors are dropped (WG/relay retransmit). Blocks for the
-/// burst; run on its own thread. `[T:nat-traversal-disco-design §2(B),(C)]`
-pub fn punch_toward(peers: &Peers, node_id: &str, udp: &UdpSocket, target: SocketAddr) {
-    let Some(entry) = peer_by_node_id(peers, node_id) else {
+/// server-reflexive endpoint learned via a relay rendezvous frame (G-3, Tailscale
+/// CallMeMaybe-over-DERP model) — to open the NAT mapping. The peer bursts back
+/// simultaneously (its own rendezvous); the first init to survive both NATs completes the
+/// handshake on the direct 5-tuple, and the rx pump's roaming (`set_endpoint` on the
+/// authenticated reply) upgrades the peer to direct. No relay teardown and no session
+/// reset — WireGuard is keyed by the static pubkey, not the 5-tuple. Best-effort: send
+/// errors are dropped (WG/relay retransmit). Blocks for the burst; own thread.
+/// `[T:nat-traversal-disco-design §2(B),(C)]`
+pub fn punch_toward_pubkey(peers: &Peers, pubkey: [u8; 32], udp: &UdpSocket, target: SocketAddr) {
+    let Some(entry) = peer_by_pubkey(peers, pubkey) else {
         return;
     };
     // Already direct? Nothing to punch.
     if entry.endpoint().is_some() {
         return;
     }
-    plog(&format!("hole-punch → {target} (peer {node_id})"));
+    plog(&format!(
+        "hole-punch → {target} (peer {})",
+        entry.peer.node_id
+    ));
     let mut buf = [0u8; 2048];
     for _ in 0..PUNCH_TRIES {
         // Stop early if roaming already upgraded us to a direct path.
@@ -692,6 +704,16 @@ pub fn spawn_relay_rx(
         let mut out = [0u8; 2048];
         // Sender drops when the relay connection closes → recv() ends the loop.
         while let Ok(RelayInbound { src, payload }) = inbound.recv() {
+            // [G-3] Rendezvous demux FIRST: a CallMeMaybe frame (magic prefix + the
+            // sender's reflexive endpoint) is diverted to the disco driver; everything
+            // else is WireGuard ciphertext for boringtun. Fail-safe — WG ciphertext never
+            // starts with the magic, so this can't drop a data frame. `[T:disco §4]`
+            if let Some(their_ep) = crate::disco::parse_rendezvous(&payload) {
+                if let Some(tx) = RENDEZVOUS_SINK.get() {
+                    let _ = tx.send((src, their_ep));
+                }
+                continue;
+            }
             // The relay names the exact sender key, so demux is a direct lookup —
             // no trial-decapsulation. An unknown key (revoked/stale) is dropped.
             let Some(entry) = peer_by_pubkey(&peers, src) else {

@@ -83,11 +83,125 @@ pub fn run_discovery(
     }
 }
 
+// ── G-3 hole-punch rendezvous, carried over the relay (Tailscale CallMeMaybe-over-DERP) ──
+//
+// Our relay is DERP-style (routes by WG pubkey, bidirectional, already held open in the
+// extension by boringtun), so the rendezvous "here is my endpoint, punch now" frame rides
+// it directly — the exact substrate Tailscale's CallMeMaybe uses. No control-plane round
+// trip, and it works identically on desktop and inside the iOS Packet Tunnel (both hold a
+// relay leg). `[T:decision/nat-traversal-disco-design + iOS-signaling research 2026-07-21]`
+
+use crate::pump::Peers;
+use crate::relay_transport::RelayClient;
+use std::collections::HashMap;
+
+/// Frame magic. First byte `0x52` ('R') is disjoint from WireGuard message types (1-4), so
+/// a relay payload is a rendezvous frame ONLY on an exact prefix match — never a WG frame.
+const RENDEZVOUS_MAGIC: [u8; 4] = *b"RZV1";
+/// How often we re-advertise our endpoint to relay-only peers (initiator). Short so a
+/// freshly-discovered reflexive endpoint reaches peers quickly; both sides converge.
+const INITIATE_INTERVAL: Duration = Duration::from_secs(5);
+/// Per-peer debounce for reacting to an inbound rendezvous — breaks the reciprocation
+/// ping-pong into a couple of overlapping bursts, then quiets (STUN-storm pitfall).
+const RENDEZVOUS_DEBOUNCE: Duration = Duration::from_secs(5);
+
+/// Encode a rendezvous frame: our STUN-reflexive endpoint, for a peer to punch toward.
+pub fn encode_rendezvous(my_endpoint: SocketAddr) -> Vec<u8> {
+    let mut m = Vec::with_capacity(28);
+    m.extend_from_slice(&RENDEZVOUS_MAGIC);
+    m.extend_from_slice(my_endpoint.to_string().as_bytes());
+    m
+}
+
+/// Parse a rendezvous frame off a relay payload → the sender's endpoint. `None` for
+/// anything else (WireGuard ciphertext) — the strict magic prefix is collision-free vs WG.
+pub fn parse_rendezvous(payload: &[u8]) -> Option<SocketAddr> {
+    let rest = payload.strip_prefix(&RENDEZVOUS_MAGIC[..])?;
+    std::str::from_utf8(rest).ok()?.parse().ok()
+}
+
+fn relay_only_pubkeys(peers: &Peers) -> Vec<[u8; 32]> {
+    peers
+        .lock()
+        .expect("peers lock")
+        .iter()
+        .filter(|p| p.endpoint().is_none())
+        .map(|p| p.peer.public_key)
+        .collect()
+}
+
+/// Drive relay-carried rendezvous. Two jobs in one loop:
+/// - **Initiator**: every `INITIATE_INTERVAL`, send our reflexive endpoint over the relay
+///   to each relay-only peer (no direct endpoint yet).
+/// - **Responder**: on an inbound rendezvous (`src pubkey`, their endpoint), hole-punch
+///   toward it and reciprocate once (debounced) so both NATs open together.
+///
+/// Exits when the pump drops the rendezvous sink (agent shutdown). Blocks — own thread.
+pub fn run_rendezvous(
+    relay: Arc<RelayClient>,
+    peers: Peers,
+    udp: Arc<UdpSocket>,
+    reflexive: Reflexive,
+    rendezvous_rx: Receiver<([u8; 32], SocketAddr)>,
+) {
+    let mut last_initiate: Option<Instant> = None;
+    let mut recent: HashMap<[u8; 32], Instant> = HashMap::new();
+    loop {
+        if last_initiate.map_or(true, |t| t.elapsed() >= INITIATE_INTERVAL) {
+            if let Some(my_ep) = *reflexive.lock().expect("reflexive lock") {
+                let frame = encode_rendezvous(my_ep);
+                for pk in relay_only_pubkeys(&peers) {
+                    relay.send(pk, &frame);
+                }
+            }
+            last_initiate = Some(Instant::now());
+        }
+        match rendezvous_rx.recv_timeout(RECV_TICK) {
+            Ok((src_pubkey, their_ep)) => {
+                let now = Instant::now();
+                let react = match recent.get(&src_pubkey) {
+                    Some(t) if t.elapsed() < RENDEZVOUS_DEBOUNCE => false,
+                    _ => {
+                        recent.insert(src_pubkey, now);
+                        true
+                    }
+                };
+                if react {
+                    // Punch burst blocks → own thread.
+                    let (peers_c, udp_c) = (peers.clone(), udp.clone());
+                    std::thread::spawn(move || {
+                        crate::pump::punch_toward_pubkey(&peers_c, src_pubkey, &udp_c, their_ep);
+                    });
+                    // Reciprocate so the peer punches back at the same moment.
+                    if let Some(my_ep) = *reflexive.lock().expect("reflexive lock") {
+                        relay.send(src_pubkey, &encode_rendezvous(my_ep));
+                    }
+                }
+            }
+            Err(RecvTimeoutError::Timeout) => {}
+            Err(RecvTimeoutError::Disconnected) => return,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::net::Ipv4Addr;
     use std::sync::mpsc;
+
+    #[test]
+    fn rendezvous_roundtrips_and_is_disjoint_from_wireguard() {
+        let ep = SocketAddr::from((Ipv4Addr::new(203, 0, 113, 5), 51820));
+        assert_eq!(parse_rendezvous(&encode_rendezvous(ep)), Some(ep));
+        // WireGuard message types 1-4 must never parse as a rendezvous frame.
+        for t in [1u8, 2, 3, 4] {
+            let mut wg = vec![0u8; 64];
+            wg[0] = t;
+            assert!(parse_rendezvous(&wg).is_none());
+        }
+        assert!(parse_rendezvous(b"RZV1not-an-addr").is_none());
+    }
 
     #[test]
     fn derives_stun_addr_from_relay_endpoint() {
