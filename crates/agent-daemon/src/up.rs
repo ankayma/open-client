@@ -285,7 +285,13 @@ pub(crate) async fn serve_dataplane(
     // a PL with no relay deployed is unchanged. `[T:A.1.1 relay-block + part-d-transport-connectivity §5]`
     let relay: Option<Arc<agent_core::relay_transport::RelayClient>> = {
         let token = ctx.service_token.read().unwrap().clone();
-        match adapters::relay_map(&ctx.http, &ctx.control_plane, &token).await {
+        match adapters::relay_map(
+            &ctx.http,
+            &ctx.control_plane,
+            &adapters::NodeServiceToken(token.clone()),
+        )
+        .await
+        {
             Ok(map) if !map.is_empty() => {
                 // One region today → pin the first enabled relay; RTT-based home-relay
                 // selection lands when the fleet spans ≥2 regions (§D.9.6). `[A]`
@@ -467,9 +473,11 @@ pub(crate) async fn serve_dataplane(
                 // this covers "accepted but headers never arrive"). The response
                 // BODY stays unbounded on purpose — SSE_SESSION_CAP bounds it.
                 const SSE_CONNECT_CAP: Duration = Duration::from_secs(30);
+                // Bind the token so it outlives the stored (later-awaited) future.
+                let svc = adapters::NodeServiceToken(svc_token.clone());
                 let subscribe = tokio::time::timeout(
                     SSE_CONNECT_CAP,
-                    adapters::subscribe_peer_events(&http, &cp, &svc_token),
+                    adapters::subscribe_peer_events(&http, &cp, &svc),
                 );
                 match subscribe.await.unwrap_or_else(|_elapsed| {
                     Err(agent_core::adapters::ApiError::Transport(format!(
@@ -1373,7 +1381,14 @@ fn spawn_token_renewal(
             // until roughly the renewal interval has elapsed.
             tokio::time::sleep(TOKEN_RENEW_INTERVAL).await;
             let current = token_cell.read().unwrap().clone();
-            match adapters::renew_service_token(&http, &control_plane, &node_id, &current).await {
+            match adapters::renew_service_token(
+                &http,
+                &control_plane,
+                &node_id,
+                &adapters::NodeServiceToken(current.clone()),
+            )
+            .await
+            {
                 Ok((new_token, new_expiry)) => {
                     // Publish for the refresh loop FIRST, then persist for restarts.
                     if let Ok(mut w) = token_cell.write() {

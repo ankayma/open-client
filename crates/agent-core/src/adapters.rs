@@ -7,6 +7,21 @@ use crate::domain::{
     SshSessionResponse, Subdomain, SubdomainCert, SubdomainCsrReq, SubdomainReq,
 };
 
+/// The D.11 scoped NODE service token (opaque `nst_…`). Authenticates node-scoped
+/// control-plane routes (relay map, peer-events SSE, token renewal, CSR submit) which the
+/// control plane serves ONLY to a node — they reject the user session token. A distinct
+/// type from the session token so the compiler rejects passing one where the other is
+/// required, closing the recurring session/node mixup at compile time rather than at a
+/// runtime 401. `[T:part-d-token-identity-model.md §2.1]`
+#[derive(Clone, Debug)]
+pub struct NodeServiceToken(pub String);
+
+impl NodeServiceToken {
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
 /// Hard upper bound for one REST round-trip to the control plane (headers +
 /// body). This is what keeps a long-running daemon's refresh loop alive: with no
 /// bound, one half-open TCP connection on a plain GET freezes the loop FOREVER —
@@ -187,13 +202,13 @@ pub struct RelayEndpoint {
 pub async fn relay_map(
     http: &reqwest::Client,
     base_url: &str,
-    session_token: &str,
+    token: &NodeServiceToken,
 ) -> Result<Vec<RelayEndpoint>, ApiError> {
     #[derive(serde::Deserialize)]
     struct Resp {
         relays: Vec<RelayEndpoint>,
     }
-    let resp: Resp = get_json(http, base_url, "/api/v1/relay/map", session_token).await?;
+    let resp: Resp = get_json(http, base_url, "/api/v1/relay/map", token.as_str()).await?;
     Ok(resp.relays)
 }
 
@@ -583,7 +598,7 @@ pub async fn register_subdomain(
 pub async fn submit_subdomain_csr(
     http: &reqwest::Client,
     base_url: &str,
-    service_token: &str,
+    service_token: &NodeServiceToken,
     fqdn: &str,
     csr_pem: &str,
 ) -> Result<(), ApiError> {
@@ -592,7 +607,7 @@ pub async fn submit_subdomain_csr(
     };
     let resp = http
         .post(url(base_url, &format!("/api/v1/subdomain/{fqdn}/csr")))
-        .bearer_auth(service_token)
+        .bearer_auth(service_token.as_str())
         .json(&req)
         .timeout(CP_REST_TIMEOUT)
         .send()
@@ -939,7 +954,7 @@ pub async fn agent_enroll(
 pub async fn subscribe_peer_events(
     http: &reqwest::Client,
     base_url: &str,
-    node_service_token: &str,
+    node_service_token: &NodeServiceToken,
 ) -> Result<reqwest::Response, ApiError> {
     // NO .timeout() here — reqwest's per-request timeout spans the WHOLE
     // response including the streamed body [T:reqwest@0.12-RequestBuilder::timeout],
@@ -948,7 +963,7 @@ pub async fn subscribe_peer_events(
     // caps each SSE session at 60s (SSE_SESSION_CAP) before a full resync.
     let resp = http
         .get(url(base_url, "/api/v1/peers/events"))
-        .bearer_auth(node_service_token)
+        .bearer_auth(node_service_token.as_str())
         .header("accept", "text/event-stream")
         .send()
         .await
@@ -966,7 +981,7 @@ pub async fn renew_service_token(
     http: &reqwest::Client,
     base_url: &str,
     node_id: &str,
-    current_service_token: &str,
+    current_service_token: &NodeServiceToken,
 ) -> Result<(String, Option<String>), ApiError> {
     #[derive(serde::Deserialize)]
     struct Resp {
@@ -978,7 +993,7 @@ pub async fn renew_service_token(
             base_url,
             &format!("/api/v1/nodes/{node_id}/service-token"),
         ))
-        .bearer_auth(current_service_token)
+        .bearer_auth(current_service_token.as_str())
         .timeout(CP_REST_TIMEOUT)
         .send()
         .await

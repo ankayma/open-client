@@ -162,12 +162,15 @@ async fn build_config(state: &AppState) -> Result<String, String> {
     let (relay_endpoint, relay_token): (Option<String>, Option<String>) =
         match crate::load_stored_service_token(&crate::handoff_state_dir(state)) {
             Some(tok) => {
-                let ep =
-                    agent_core::adapters::relay_map(&state.http, &state.regional_base_url(), &tok)
-                        .await
-                        .ok()
-                        .and_then(|map| map.into_iter().next())
-                        .map(|r| r.endpoint);
+                let ep = agent_core::adapters::relay_map(
+                    &state.http,
+                    &state.regional_base_url(),
+                    &agent_core::adapters::NodeServiceToken(tok.clone()),
+                )
+                .await
+                .ok()
+                .and_then(|map| map.into_iter().next())
+                .map(|r| r.endpoint);
                 match ep {
                     Some(e) => (Some(e), Some(tok)),
                     None => (None, None),
