@@ -431,7 +431,13 @@ fn start_inner(fd: i32, config_json: &str, bound_if: u32) -> Result<Box<PtpHandl
             }
             _ => None,
         };
-    pump::spawn_tx(tun.clone(), udp.clone(), peers.clone(), relay, p.dns);
+    pump::spawn_tx(
+        tun.clone(),
+        udp.clone(),
+        peers.clone(),
+        relay.clone(),
+        p.dns,
+    );
     pump::spawn_rx(tun, udp.clone(), peers.clone());
     pump::spawn_timers(
         udp.clone(),
@@ -440,6 +446,32 @@ fn start_inner(fd: i32, config_json: &str, bound_if: u32) -> Result<Box<PtpHandl
         index.clone(),
         None,
     );
+
+    // [G-2/G-3] STUN discovery + relay-carried hole-punch rendezvous — the SAME agent-core
+    // driver the desktop daemon uses, run HERE in the extension because it holds the
+    // persistent relay leg. On iOS the app suspends when backgrounded, so signaling that
+    // rides the relay (not the control plane) keeps working while backgrounded — the reason
+    // this is the correct design, not the app. `[T:iOS-signaling research 2026-07-21]`
+    if let (Some(client), Some(endpoint)) = (relay.clone(), p.relay_endpoint.as_deref()) {
+        if let Some(stun_addr) = agent_core::disco::stun_addr_for(endpoint) {
+            let reflexive: agent_core::disco::Reflexive =
+                std::sync::Arc::new(std::sync::Mutex::new(None));
+            // STUN endpoint discovery on the WG socket.
+            let (stun_tx, stun_rx) = std::sync::mpsc::channel();
+            pump::set_stun_sink(stun_tx);
+            let (udp_d, refl_d) = (udp.clone(), reflexive.clone());
+            std::thread::spawn(move || {
+                agent_core::disco::run_discovery(udp_d, stun_addr, stun_rx, refl_d);
+            });
+            // Rendezvous + hole-punch, carried over the relay leg above.
+            let (rzv_tx, rzv_rx) = std::sync::mpsc::channel();
+            pump::set_rendezvous_sink(rzv_tx);
+            let (peers_r, udp_r) = (peers.clone(), udp.clone());
+            std::thread::spawn(move || {
+                agent_core::disco::run_rendezvous(client, peers_r, udp_r, reflexive, rzv_rx);
+            });
+        }
+    }
 
     // Status heartbeat (the SAME writer the desktop daemon uses): if the app supplied an
     // App Group path, rewrite the snapshot every 15s so the GUI process can read live
