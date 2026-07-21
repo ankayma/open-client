@@ -39,6 +39,32 @@ pub fn set_log_hook(f: fn(&str)) {
     let _ = LOG_HOOK.set(f);
 }
 
+/// STUN packets arriving on the shared WG socket are handed here (endpoint discovery /
+/// hole-punch, G-2/G-3), off the boringtun path. `OnceLock` set once at startup; the
+/// discovery driver owns the receiver. `[T:decision/nat-traversal-disco-design-2026-07-21]`
+static STUN_SINK: std::sync::OnceLock<std::sync::mpsc::Sender<(Vec<u8>, std::net::SocketAddr)>> =
+    std::sync::OnceLock::new();
+
+/// Register the STUN sink (idempotent). Until set, STUN datagrams are still diverted off
+/// the WG path (never fed to boringtun) — just dropped.
+pub fn set_stun_sink(tx: std::sync::mpsc::Sender<(Vec<u8>, std::net::SocketAddr)>) {
+    let _ = STUN_SINK.set(tx);
+}
+
+/// Front-of-loop demux: if `pkt` is *positively* a STUN message, divert it off the
+/// WireGuard path and return true. Everything else returns false and falls through to
+/// boringtun — a misclassification can only ever drop a STUN probe (retried), never user
+/// data. `[T:crate::stun::is_stun — Tailscale fall-through invariant]`
+fn stun_divert(pkt: &[u8], src: std::net::SocketAddr) -> bool {
+    if crate::stun::is_stun(pkt) {
+        if let Some(tx) = STUN_SINK.get() {
+            let _ = tx.send((pkt.to_vec(), src));
+        }
+        return true;
+    }
+    false
+}
+
 /// Emit a diagnostic line to the installed hook, else stdout.
 fn plog(msg: &str) {
     match LOG_HOOK.get() {
@@ -540,6 +566,12 @@ pub fn spawn_rx(tun: crate::tundev::TunHandle, udp: Arc<UdpSocket>, peers: Peers
                     break;
                 }
             };
+            // STUN demux FIRST (G-2/G-3): a positively-matched STUN datagram is diverted
+            // off the WireGuard path; anything else falls through to boringtun unchanged,
+            // so this can never drop a data packet. `[T:nat-traversal-disco-design]`
+            if stun_divert(&datagram[..n], src) {
+                continue;
+            }
             // (No per-datagram log here: a public node's UDP port sees constant
             // internet noise — per-packet logging floods the journal. Drops are
             // surfaced by the rate-limited counter below instead.)
