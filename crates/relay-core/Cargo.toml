@@ -1,0 +1,15 @@
+# Vendored copy of `relay-core` — SSOT is the relay-server repo (github.com/ankayma/
+# relay-server). The agent embeds this small, dep-free wire codec so the PUBLIC client
+# builds standalone (no path-dep into another repo) `[T:Part D §D.9.5 rule 3 — "agent
+# embeds relay-core"]`. Keep byte-compatible with the SSOT: the golden wire-vector test
+# in `frame.rs` exists in BOTH repos and must stay identical — a divergence there means
+# client and relay disagree on the wire. Frame protocol is v0/frozen (rule 4), so drift
+# should be rare and always deliberate.
+[package]
+name = "relay-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+# dep-free by design (std only) — new deps need owner approval (A.1.21).
+[dependencies]

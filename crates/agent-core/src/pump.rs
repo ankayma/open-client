@@ -16,11 +16,13 @@
 
 use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, SocketAddr, UdpSocket};
+use std::sync::mpsc::Receiver;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use crate::dataplane::{self, DialablePeer};
 use crate::domain::PeerInfo;
+use crate::relay_transport::{RelayClient, RelayInbound};
 use crate::tunnel::{handshake_established, make_tunn, PublicKey, StaticSecret, Tunn, TunnResult};
 
 /// Safe overlay MTU under a typical 1500-byte path. `[T:WireGuard]`
@@ -37,12 +39,57 @@ pub fn set_log_hook(f: fn(&str)) {
     let _ = LOG_HOOK.set(f);
 }
 
+/// STUN packets arriving on the shared WG socket are handed here (endpoint discovery /
+/// hole-punch, G-2/G-3), off the boringtun path. `OnceLock` set once at startup; the
+/// discovery driver owns the receiver. `[T:decision/nat-traversal-disco-design-2026-07-21]`
+static STUN_SINK: std::sync::OnceLock<std::sync::mpsc::Sender<(Vec<u8>, std::net::SocketAddr)>> =
+    std::sync::OnceLock::new();
+
+/// Register the STUN sink (idempotent). Until set, STUN datagrams are still diverted off
+/// the WG path (never fed to boringtun) — just dropped.
+pub fn set_stun_sink(tx: std::sync::mpsc::Sender<(Vec<u8>, std::net::SocketAddr)>) {
+    let _ = STUN_SINK.set(tx);
+}
+
+/// Front-of-loop demux: if `pkt` is *positively* a STUN message, divert it off the
+/// WireGuard path and return true. Everything else returns false and falls through to
+/// boringtun — a misclassification can only ever drop a STUN probe (retried), never user
+/// data. `[T:crate::stun::is_stun — Tailscale fall-through invariant]`
+fn stun_divert(pkt: &[u8], src: std::net::SocketAddr) -> bool {
+    if crate::stun::is_stun(pkt) {
+        if let Some(tx) = STUN_SINK.get() {
+            let _ = tx.send((pkt.to_vec(), src));
+        }
+        return true;
+    }
+    false
+}
+
+/// Rendezvous frames arriving over the RELAY (a peer's CallMeMaybe: `(sender pubkey,
+/// their STUN-reflexive endpoint)`) are handed here, off the boringtun path — the
+/// Tailscale disco-over-DERP model, carried by our DERP-style relay. `[T:disco §4]`
+static RENDEZVOUS_SINK: std::sync::OnceLock<
+    std::sync::mpsc::Sender<([u8; 32], std::net::SocketAddr)>,
+> = std::sync::OnceLock::new();
+
+/// Register the rendezvous sink (idempotent). Until set, rendezvous frames are still
+/// diverted off the WG path (never fed to boringtun) — just dropped.
+pub fn set_rendezvous_sink(tx: std::sync::mpsc::Sender<([u8; 32], std::net::SocketAddr)>) {
+    let _ = RENDEZVOUS_SINK.set(tx);
+}
+
 /// Emit a diagnostic line to the installed hook, else stdout.
 fn plog(msg: &str) {
     match LOG_HOOK.get() {
         Some(f) => f(msg),
         None => println!("{msg}"),
     }
+}
+
+/// Public diagnostic line — same sink as the pump's own logs, so the `disco` driver's
+/// lines reach the iOS log hook too (not just stdout).
+pub fn plog_public(msg: &str) {
+    plog(msg);
 }
 
 /// Tear down an established session after this much *data* silence — tunnels are
@@ -238,6 +285,81 @@ fn peer_by_source(peers: &Peers, src: SocketAddr) -> Option<Arc<PeerEntry>> {
         .cloned()
 }
 
+/// Find the peer that owns a WireGuard public key. Relay-delivered datagrams carry
+/// the exact sender key (`Recv{src}`), so this is a precise lookup — no trial-decap
+/// guessing needed as on the UDP path. `[T: Decision D-T1]`
+fn peer_by_pubkey(peers: &Peers, pubkey: [u8; 32]) -> Option<Arc<PeerEntry>> {
+    let g = peers.lock().expect("peers lock");
+    g.iter().find(|p| p.peer.public_key == pubkey).cloned()
+}
+
+/// G-3 hole-punch cadence: a short burst of handshake initiations opens the NAT mapping.
+/// ~200-250ms × ~10 over ~2s, then concede to the relay (Nebula-style linear cadence).
+/// `[T:decision/nat-traversal-disco-design-2026-07-21 §2(B)]`
+const PUNCH_TRIES: u32 = 8;
+const PUNCH_INTERVAL: Duration = Duration::from_millis(250);
+
+/// Fire a burst of WireGuard handshake initiations DIRECTLY at `target` — the peer's
+/// server-reflexive endpoint learned via a relay rendezvous frame (G-3, Tailscale
+/// CallMeMaybe-over-DERP model) — to open the NAT mapping. The peer bursts back
+/// simultaneously (its own rendezvous); the first init to survive both NATs completes the
+/// handshake on the direct 5-tuple, and the rx pump's roaming (`set_endpoint` on the
+/// authenticated reply) upgrades the peer to direct. No relay teardown and no session
+/// reset — WireGuard is keyed by the static pubkey, not the 5-tuple. Best-effort: send
+/// errors are dropped (WG/relay retransmit). Blocks for the burst; own thread.
+/// `[T:nat-traversal-disco-design §2(B),(C)]`
+pub fn punch_toward_pubkey(peers: &Peers, pubkey: [u8; 32], udp: &UdpSocket, target: SocketAddr) {
+    let Some(entry) = peer_by_pubkey(peers, pubkey) else {
+        return;
+    };
+    // Already direct? Nothing to punch.
+    if entry.endpoint().is_some() {
+        return;
+    }
+    plog(&format!(
+        "hole-punch → {target} (peer {})",
+        entry.peer.node_id
+    ));
+    let mut buf = [0u8; 2048];
+    for _ in 0..PUNCH_TRIES {
+        // Stop early if roaming already upgraded us to a direct path.
+        if entry.endpoint().is_some() {
+            break;
+        }
+        {
+            let mut tunn = entry.tunn.lock().expect("tunn lock");
+            if let TunnResult::WriteToNetwork(pkt) =
+                tunn.format_handshake_initiation(&mut buf, false)
+            {
+                let _ = udp.send_to(pkt, target);
+            }
+        }
+        std::thread::sleep(PUNCH_INTERVAL);
+    }
+}
+
+/// Send one WireGuard `ciphertext` datagram to `entry` over the best available path:
+/// a known direct UDP endpoint if we have one, otherwise the relay fallback
+/// `[T: Decision D-T1 — Tailscale-lite]`. With no endpoint and no relay the frame is
+/// dropped (unchanged from the pre-relay behaviour); the inner WG session retransmits.
+fn send_ciphertext(
+    entry: &PeerEntry,
+    udp: &UdpSocket,
+    relay: Option<&RelayClient>,
+    ciphertext: &[u8],
+) {
+    match entry.endpoint() {
+        Some(ep) => {
+            let _ = udp.send_to(ciphertext, ep);
+        }
+        None => {
+            if let Some(r) = relay {
+                r.send(entry.peer.public_key, ciphertext);
+            }
+        }
+    }
+}
+
 /// A self-addressed DNS responder for hosts with no OS-level split-DNS hook (iOS:
 /// `NEDNSSettings.matchDomains` routes matching queries INTO the tunnel instead of
 /// resolving them locally, so they arrive here as ordinary UDP packets). Optional —
@@ -386,6 +508,7 @@ pub fn spawn_tx(
     tun: crate::tundev::TunHandle,
     udp: Arc<UdpSocket>,
     peers: Peers,
+    relay: Option<Arc<RelayClient>>,
     dns: Option<DnsResponder>,
 ) {
     std::thread::spawn(move || {
@@ -481,9 +604,7 @@ pub fn spawn_tx(
             let mut tunn = entry.tunn.lock().expect("tunn lock");
             match tunn.encapsulate(&pkt[..n], &mut enc) {
                 TunnResult::WriteToNetwork(out) => {
-                    if let Some(ep) = entry.endpoint() {
-                        let _ = udp.send_to(out, ep);
-                    }
+                    send_ciphertext(&entry, &udp, relay.as_deref(), out);
                     // Outbound data (or the handshake it triggered) — the tunnel
                     // is in use, so it must not be torn down as idle.
                     entry.touch();
@@ -509,6 +630,12 @@ pub fn spawn_rx(tun: crate::tundev::TunHandle, udp: Arc<UdpSocket>, peers: Peers
                     break;
                 }
             };
+            // STUN demux FIRST (G-2/G-3): a positively-matched STUN datagram is diverted
+            // off the WireGuard path; anything else falls through to boringtun unchanged,
+            // so this can never drop a data packet. `[T:nat-traversal-disco-design]`
+            if stun_divert(&datagram[..n], src) {
+                continue;
+            }
             // (No per-datagram log here: a public node's UDP port sees constant
             // internet noise — per-packet logging floods the journal. Drops are
             // surfaced by the rate-limited counter below instead.)
@@ -553,6 +680,61 @@ pub fn spawn_rx(tun: crate::tundev::TunHandle, udp: Arc<UdpSocket>, peers: Peers
             }
             if !handled {
                 log_undecryptable_drop(src);
+            }
+        }
+    });
+}
+
+/// Relay ingress → decapsulate → tun. The relay leg of the data plane: drains
+/// WireGuard ciphertext the relay forwarded to us (`Recv{src,payload}`, already
+/// decoded into `RelayInbound` by `relay_transport`) and feeds it through the same
+/// boringtun `decapsulate` path as the UDP rx pump. Replies (handshake responses,
+/// cookies) go BACK through the relay, since a peer reached via the relay has no
+/// direct endpoint to answer to. `[T: Decision D-T1 — part-d-transport-connectivity §5]`
+///
+/// Runs only when a relay is configured; the UDP rx pump (`spawn_rx`) is unaffected,
+/// so a node with a direct path keeps its exact prior behaviour.
+pub fn spawn_relay_rx(
+    tun: crate::tundev::TunHandle,
+    relay: Arc<RelayClient>,
+    inbound: Receiver<RelayInbound>,
+    peers: Peers,
+) {
+    std::thread::spawn(move || {
+        let mut out = [0u8; 2048];
+        // Sender drops when the relay connection closes → recv() ends the loop.
+        while let Ok(RelayInbound { src, payload }) = inbound.recv() {
+            // [G-3] Rendezvous demux FIRST: a CallMeMaybe frame (magic prefix + the
+            // sender's reflexive endpoint) is diverted to the disco driver; everything
+            // else is WireGuard ciphertext for boringtun. Fail-safe — WG ciphertext never
+            // starts with the magic, so this can't drop a data frame. `[T:disco §4]`
+            if let Some(their_ep) = crate::disco::parse_rendezvous(&payload) {
+                if let Some(tx) = RENDEZVOUS_SINK.get() {
+                    let _ = tx.send((src, their_ep));
+                }
+                continue;
+            }
+            // The relay names the exact sender key, so demux is a direct lookup —
+            // no trial-decapsulation. An unknown key (revoked/stale) is dropped.
+            let Some(entry) = peer_by_pubkey(&peers, src) else {
+                continue;
+            };
+            let mut tunn = entry.tunn.lock().expect("tunn lock");
+            let mut res = tunn.decapsulate(None, &payload, &mut out);
+            loop {
+                match res {
+                    TunnResult::WriteToNetwork(p) => {
+                        // Handshake response / cookie / keepalive → back via the relay.
+                        relay.send(src, p);
+                        res = tunn.decapsulate(None, &[], &mut out);
+                    }
+                    TunnResult::WriteToTunnelV4(pkt, _) | TunnResult::WriteToTunnelV6(pkt, _) => {
+                        let _ = tun.write_packet(pkt);
+                        entry.touch(); // inbound data → tunnel in use
+                        break;
+                    }
+                    _ => break,
+                }
             }
         }
     });
@@ -620,6 +802,7 @@ pub fn spawn_timers(
     peers: Peers,
     static_private: StaticSecret,
     index: Arc<Mutex<u32>>,
+    relay: Option<Arc<RelayClient>>,
 ) {
     std::thread::spawn(move || {
         let mut buf = [0u8; 2048];
@@ -631,13 +814,20 @@ pub fn spawn_timers(
             for entry in snapshot {
                 let mut tunn = entry.tunn.lock().expect("tunn lock");
                 if let TunnResult::WriteToNetwork(p) = tunn.update_timers(&mut buf) {
-                    if let Some(ep) = entry.endpoint() {
-                        match udp.send_to(p, ep) {
+                    match entry.endpoint() {
+                        Some(ep) => match udp.send_to(p, ep) {
                             Ok(n) => plog(&format!("timer→{ep} ({}) {n}B", entry.peer.hostname)),
                             Err(e) => plog(&format!(
                                 "timer→{ep} ({}) SEND FAILED: {e}",
                                 entry.peer.hostname
                             )),
+                        },
+                        // No direct endpoint → keep the session's timers alive over
+                        // the relay (retransmits, keepalive). `[T: Decision D-T1]`
+                        None => {
+                            if let Some(r) = &relay {
+                                r.send(entry.peer.public_key, p);
+                            }
                         }
                     }
                 }
@@ -719,6 +909,39 @@ mod tests {
         // incoming: exact endpoint match, then sole-peer fallback for an unknown src.
         assert!(peer_by_source(&peers, "1.2.3.4:51820".parse().unwrap()).is_some());
         assert!(peer_by_source(&peers, "9.9.9.9:1".parse().unwrap()).is_some());
+    }
+
+    // Relay ingress demuxes by exact WG public key (the relay names the sender), not
+    // by endpoint guess — a precise lookup. Pin it. `[T: Decision D-T1]`
+    #[test]
+    fn peer_by_pubkey_matches_exact_sender_key() {
+        let mk = |overlay: &str, pk: [u8; 32]| -> Arc<PeerEntry> {
+            let sp = StaticSecret::random_from_rng(OsRng);
+            let pp = PublicKey::from(&StaticSecret::random_from_rng(OsRng));
+            Arc::new(PeerEntry {
+                peer: DialablePeer {
+                    node_id: "n".into(),
+                    hostname: "h".into(),
+                    public_key: pk,
+                    public_key_b64: "k".into(),
+                    overlay_ip: overlay.parse().unwrap(),
+                    endpoint: None,
+                },
+                endpoint: Mutex::new(None),
+                tunn: Mutex::new(make_tunn(sp, pp, 1, None)),
+                last_activity: Mutex::new(Instant::now()),
+                keepalive: None,
+            })
+        };
+        let a = mk("10.0.0.1", [0x11; 32]);
+        let b = mk("10.0.0.2", [0x22; 32]);
+        let peers: Peers = Arc::new(Mutex::new(vec![a.clone(), b.clone()]));
+
+        assert!(Arc::ptr_eq(
+            &peer_by_pubkey(&peers, [0x22; 32]).unwrap(),
+            &b
+        ));
+        assert!(peer_by_pubkey(&peers, [0x99; 32]).is_none());
     }
 
     // With two peers, an unknown source has no sole-peer fallback → None (forces the

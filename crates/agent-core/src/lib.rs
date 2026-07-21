@@ -3,16 +3,19 @@
 pub mod adapters; // concrete impls of ports
 pub mod application; // use cases, orchestration
 pub mod dataplane; // overlay peer model + packet routing helpers (testable)
+pub mod disco; // NAT-traversal driver: STUN discovery + hole-punch on the WG socket (G-2/G-3)
 pub mod dns; // F-3 private-DNS responder + raw IP/UDP framing (daemon + iOS extension)
 pub mod domain; // pure business logic, no I/O
 pub mod machine_key; // stable per-device identity proven at enrollment (Ed25519)
 pub mod oidc; // CI OIDC token fetch for secretless deploy (B-3)
 pub mod ports; // trait interfaces for external systems
 pub mod pump; // reusable WireGuard packet pump over a tun fd (daemon + iOS extension)
+pub mod relay_transport; // DERP-style relay fallback path for the WG data plane (Decision D-T1)
 pub mod ssh_client; // F-2 NoKeySSH client transport (russh) — CLI + GUI + iOS terminal
 pub mod ssh_grant; // F-2 root-elevation grant (Ed25519 sign/verify) — CP issues, node verifies
 pub mod ssh_server; // F-2 NoKeySSH embedded server (russh + PTY) — runs on target nodes
 pub mod status; // data-plane status snapshot + heartbeat (daemon + iOS extension) → GUI path-proof
+pub mod stun; // RFC 5389 endpoint discovery on the WG socket (G-2, NAT traversal)
 pub mod tundev; // fd-level tun packet I/O (per-platform framing; macOS+iOS shared)
 pub mod tunnel; // WireGuard data-plane engine (boringtun)
 

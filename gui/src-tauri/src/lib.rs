@@ -468,6 +468,23 @@ fn load_stored_node_identity(dir: &std::path::Path) -> Option<(String, String)> 
     (!s.node_id.is_empty() && !s.public_b64.is_empty()).then_some((s.node_id, s.public_b64))
 }
 
+/// The persisted NODE service token, recovered from agent.json. Node-scoped routes
+/// (`GET /api/v1/relay/map`, the relay's own membership verify) authenticate the node
+/// via this token — the user session token (`AppState::token`, an OAuth token) is
+/// rejected there. Written by `persist_*` alongside the WG key. `[T:D.11 scoped token]`
+// Only the mobile Packet Tunnel builder (`vpn::build_config`, iOS/Android) reads this;
+// on desktop the daemon holds its own service token.
+#[cfg_attr(not(any(target_os = "ios", target_os = "android")), allow(dead_code))]
+fn load_stored_service_token(dir: &std::path::Path) -> Option<String> {
+    let bytes = std::fs::read(dir.join("agent.json")).ok()?;
+    #[derive(serde::Deserialize)]
+    struct Stored {
+        service_token: Option<String>,
+    }
+    let s: Stored = serde_json::from_slice(&bytes).ok()?;
+    s.service_token.filter(|t| !t.is_empty())
+}
+
 /// Real control-plane enrollment. Idempotent: a no-op if already enrolled
 /// in-process, otherwise enrolls with the persisted keypair when one exists.
 ///

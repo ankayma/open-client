@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/domain-core",
+    "crates/relay-core",  # [T:Part D §D.9.5 rule 3] vendored relay wire codec — SSOT is the relay-server repo; agent embeds it so the public client builds standalone
     "crates/proto",
     "crates/crypto",
     "crates/ledger-client",

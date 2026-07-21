@@ -147,9 +147,15 @@ pub async fn ensure_csr_submitted(
     }
     let keypair = load_or_generate_keypair(fqdn)?;
     let csr_pem = build_csr_pem(fqdn, &keypair)?;
-    adapters::submit_subdomain_csr(http, control_plane, service_token, fqdn, &csr_pem)
-        .await
-        .map_err(|e| anyhow::anyhow!("submit CSR for {fqdn}: {e:?}"))
+    adapters::submit_subdomain_csr(
+        http,
+        control_plane,
+        &adapters::NodeServiceToken(service_token.to_string()),
+        fqdn,
+        &csr_pem,
+    )
+    .await
+    .map_err(|e| anyhow::anyhow!("submit CSR for {fqdn}: {e:?}"))
 }
 
 /// Poll `GET .../cert` once; persist it if issued. The fallback to the

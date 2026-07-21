@@ -221,6 +221,16 @@ struct Config {
     /// path-proof stays empty (older app), unchanged. [T:F-5, A.1.1 metadata only]
     #[serde(default)]
     status_path: Option<String>,
+    /// This PL's relay endpoint (`host:port`), when the control plane published a fleet
+    /// map. The app fetches the map (this extension has no CP client / async runtime) and
+    /// hands the chosen relay here. Absent/None → direct-only, unchanged. [T:D-T1, §D.9.3]
+    #[serde(default)]
+    relay_endpoint: Option<String>,
+    /// This node's control-plane service token, needed to authenticate the relay
+    /// ClientHello — the relay re-verifies membership with the CP (fail-closed, A.1.6).
+    /// Only present when `relay_endpoint` is; stays inside the App Group container.
+    #[serde(default)]
+    service_token: Option<String>,
 }
 
 fn default_port() -> u16 {
@@ -244,6 +254,10 @@ struct Prepared {
     node_id: String,
     /// App Group path for the status heartbeat; `None` disables it.
     status_path: Option<String>,
+    /// Relay endpoint (`host:port`) to keep a NAT-fallback leg to; `None` → direct-only.
+    relay_endpoint: Option<String>,
+    /// Service token for the relay ClientHello; `None` → no relay leg.
+    service_token: Option<String>,
 }
 
 /// Parse `upstream_dns` entries (bare IPs) into `ip:53` targets, dropping
@@ -300,6 +314,8 @@ fn prepare(config_json: &str) -> Result<Prepared, String> {
         upstreams,
         node_id,
         status_path: cfg.status_path,
+        relay_endpoint: cfg.relay_endpoint,
+        service_token: cfg.service_token,
     })
 }
 
@@ -384,14 +400,78 @@ fn start_inner(fd: i32, config_json: &str, bound_if: u32) -> Result<Box<PtpHandl
     );
 
     let tun = agent_core::tundev::TunHandle::Fd(fd);
-    pump::spawn_tx(tun.clone(), udp.clone(), peers.clone(), p.dns);
+    // Relay fallback (Decision D-T1, "Tailscale-lite"): when the app fed us a relay
+    // endpoint + token, keep a relay leg up so peers with no dialable endpoint (the
+    // common mobile↔mobile / mobile↔NAT case) are still reachable — `send_ciphertext`
+    // routes to the relay exactly when a peer has no direct endpoint. Sync `connect`
+    // (std `TcpStream`) fits this runtime-less extension. Absent/unreachable → None →
+    // prior direct-UDP-only behaviour, unchanged. [T:A.1.1 relay-block + §D.9.3]
+    let relay: Option<std::sync::Arc<agent_core::relay_transport::RelayClient>> =
+        match (p.relay_endpoint.as_deref(), p.service_token.as_deref()) {
+            (Some(endpoint), Some(token)) => {
+                let my_pubkey = agent_core::tunnel::PublicKey::from(&p.static_private).to_bytes();
+                match agent_core::relay_transport::RelayClient::connect(
+                    endpoint,
+                    my_pubkey,
+                    token.as_bytes().to_vec(),
+                ) {
+                    Ok((client, inbound)) => {
+                        let client = std::sync::Arc::new(client);
+                        pump::spawn_relay_rx(tun.clone(), client.clone(), inbound, peers.clone());
+                        ios_pump_log(&format!("relay leg up via {endpoint}"));
+                        Some(client)
+                    }
+                    // Fail-open to direct-only: an unreachable relay must not block the
+                    // data plane (A.1.6 fail-closed is the relay's own contract, not ours).
+                    Err(e) => {
+                        ios_pump_log(&format!("relay unreachable, direct-only: {e}"));
+                        None
+                    }
+                }
+            }
+            _ => None,
+        };
+    pump::spawn_tx(
+        tun.clone(),
+        udp.clone(),
+        peers.clone(),
+        relay.clone(),
+        p.dns,
+    );
     pump::spawn_rx(tun, udp.clone(), peers.clone());
     pump::spawn_timers(
         udp.clone(),
         peers.clone(),
         p.static_private.clone(),
         index.clone(),
+        None,
     );
+
+    // [G-2/G-3] STUN discovery + relay-carried hole-punch rendezvous — the SAME agent-core
+    // driver the desktop daemon uses, run HERE in the extension because it holds the
+    // persistent relay leg. On iOS the app suspends when backgrounded, so signaling that
+    // rides the relay (not the control plane) keeps working while backgrounded — the reason
+    // this is the correct design, not the app. `[T:iOS-signaling research 2026-07-21]`
+    if let (Some(client), Some(endpoint)) = (relay.clone(), p.relay_endpoint.as_deref()) {
+        if let Some(stun_addr) = agent_core::disco::stun_addr_for(endpoint) {
+            let reflexive: agent_core::disco::Reflexive =
+                std::sync::Arc::new(std::sync::Mutex::new(None));
+            // STUN endpoint discovery on the WG socket.
+            let (stun_tx, stun_rx) = std::sync::mpsc::channel();
+            pump::set_stun_sink(stun_tx);
+            let (udp_d, refl_d) = (udp.clone(), reflexive.clone());
+            std::thread::spawn(move || {
+                agent_core::disco::run_discovery(udp_d, stun_addr, stun_rx, refl_d);
+            });
+            // Rendezvous + hole-punch, carried over the relay leg above.
+            let (rzv_tx, rzv_rx) = std::sync::mpsc::channel();
+            pump::set_rendezvous_sink(rzv_tx);
+            let (peers_r, udp_r) = (peers.clone(), udp.clone());
+            std::thread::spawn(move || {
+                agent_core::disco::run_rendezvous(client, peers_r, udp_r, reflexive, rzv_rx);
+            });
+        }
+    }
 
     // Status heartbeat (the SAME writer the desktop daemon uses): if the app supplied an
     // App Group path, rewrite the snapshot every 15s so the GUI process can read live

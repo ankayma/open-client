@@ -279,14 +279,97 @@ pub(crate) async fn serve_dataplane(
     // never on the tun fd itself — no DnsResponder needed here (iOS-only, no
     // split-DNS hook to piggyback on).
     let tun = tun_handle;
-    pump::spawn_tx(tun.clone(), udp.clone(), peers.clone(), None);
+    // Relay fallback (Decision D-T1, "Tailscale-lite"): fetch this PL's relay fleet
+    // map and, if the control plane published one, keep a relay leg up for NAT-fallback
+    // reachability. Empty map → relay = None → exact prior direct-UDP-only behaviour, so
+    // a PL with no relay deployed is unchanged. `[T:A.1.1 relay-block + part-d-transport-connectivity §5]`
+    // The relay's STUN address, derived from the chosen relay endpoint (G-2). Set when a
+    // relay is picked; drives endpoint discovery below.
+    let mut relay_stun_addr: Option<std::net::SocketAddr> = None;
+    let relay: Option<Arc<agent_core::relay_transport::RelayClient>> = {
+        let token = ctx.service_token.read().unwrap().clone();
+        match adapters::relay_map(
+            &ctx.http,
+            &ctx.control_plane,
+            &adapters::NodeServiceToken(token.clone()),
+        )
+        .await
+        {
+            Ok(map) if !map.is_empty() => {
+                // One region today → pin the first enabled relay; RTT-based home-relay
+                // selection lands when the fleet spans ≥2 regions (§D.9.6). `[A]`
+                let picked = &map[0];
+                relay_stun_addr = agent_core::disco::stun_addr_for(&picked.endpoint);
+                let my_pubkey = agent_core::tunnel::PublicKey::from(&static_private).to_bytes();
+                match agent_core::relay_transport::RelayClient::connect(
+                    &picked.endpoint,
+                    my_pubkey,
+                    token.into_bytes(),
+                ) {
+                    Ok((client, inbound)) => {
+                        let client = Arc::new(client);
+                        pump::spawn_relay_rx(tun.clone(), client.clone(), inbound, peers.clone());
+                        eprintln!("relay leg up: {} via {}", picked.relay_id, picked.endpoint);
+                        Some(client)
+                    }
+                    // Fail-open to direct-only: a relay we cannot reach must not block the
+                    // data plane — WG still works for direct/LAN peers, and the next
+                    // resync retries. (Fail-closed is the relay's own membership contract,
+                    // A.1.6, not the agent's startup path.) `[T]`
+                    Err(e) => {
+                        eprintln!("relay {} unreachable, direct-only: {e}", picked.relay_id);
+                        None
+                    }
+                }
+            }
+            Ok(_) => None, // empty map: no relay deployed for this PL yet
+            Err(e) => {
+                eprintln!("relay map fetch failed, direct-only: {e}");
+                None
+            }
+        }
+    };
+
+    pump::spawn_tx(tun.clone(), udp.clone(), peers.clone(), relay.clone(), None);
     pump::spawn_rx(tun, udp.clone(), peers.clone());
     pump::spawn_timers(
         udp.clone(),
         peers.clone(),
         static_private.clone(),
         index.clone(),
+        relay.clone(),
     );
+
+    // [G-2] STUN endpoint discovery on the WG socket. Register the demux sink, then run
+    // discovery against the relay's STUN reflector — learning our public reflexive endpoint
+    // (the candidate a peer dials to hole-punch a direct path, G-3). Only when a relay is
+    // present (hence a co-located STUN reflector). The handle is shared with the SSE loop
+    // below (rendezvous → hole-punch). `[T:nat-traversal-disco-design §4]`
+    let reflexive: agent_core::disco::Reflexive = Arc::new(std::sync::Mutex::new(None));
+    if let Some(stun_addr) = relay_stun_addr {
+        let (stun_tx, stun_rx) = std::sync::mpsc::channel();
+        pump::set_stun_sink(stun_tx);
+        let refl = reflexive.clone();
+        let udp_disco = udp.clone();
+        std::thread::spawn(move || {
+            agent_core::disco::run_discovery(udp_disco, stun_addr, stun_rx, refl);
+        });
+    }
+
+    // [G-3] Hole-punch rendezvous carried over the RELAY (Tailscale CallMeMaybe-over-DERP,
+    // per the 2026-07-21 iOS-signaling research): register the demux sink and drive
+    // rendezvous — advertise our reflexive endpoint to relay-only peers over the relay, and
+    // punch toward peers that advertise theirs. No control-plane round trip; identical on
+    // desktop and inside the iOS Packet Tunnel. Runs only with a relay (the carrier) + STUN
+    // discovery (our endpoint). `[T:decision/nat-traversal-disco-design + research]`
+    if let (Some(client), Some(_)) = (relay.clone(), relay_stun_addr) {
+        let (rzv_tx, rzv_rx) = std::sync::mpsc::channel();
+        pump::set_rendezvous_sink(rzv_tx);
+        let (peers_r, udp_r, refl_r) = (peers.clone(), udp.clone(), reflexive.clone());
+        std::thread::spawn(move || {
+            agent_core::disco::run_rendezvous(client, peers_r, udp_r, refl_r, rzv_rx);
+        });
+    }
 
     // [F-3] Private DNS for branded names while the overlay is up: resolve the
     // tenant's `<name> → overlay_ip` table locally so a browser on this enrolled
@@ -425,9 +508,11 @@ pub(crate) async fn serve_dataplane(
                 // this covers "accepted but headers never arrive"). The response
                 // BODY stays unbounded on purpose — SSE_SESSION_CAP bounds it.
                 const SSE_CONNECT_CAP: Duration = Duration::from_secs(30);
+                // Bind the token so it outlives the stored (later-awaited) future.
+                let svc = adapters::NodeServiceToken(svc_token.clone());
                 let subscribe = tokio::time::timeout(
                     SSE_CONNECT_CAP,
-                    adapters::subscribe_peer_events(&http, &cp, &svc_token),
+                    adapters::subscribe_peer_events(&http, &cp, &svc),
                 );
                 match subscribe.await.unwrap_or_else(|_elapsed| {
                     Err(agent_core::adapters::ApiError::Transport(format!(
@@ -570,6 +655,8 @@ async fn consume_peer_sse(
                         println!("SSE: cert issued for {}", c.fqdn);
                     }
                 }
+                // (Hole-punch rendezvous is carried over the relay now — see
+                // `disco::run_rendezvous` — not the control-plane SSE.)
                 evt_type.clear();
                 evt_data.clear();
             } else if let Some(v) = line.strip_prefix("event: ") {
@@ -1331,7 +1418,14 @@ fn spawn_token_renewal(
             // until roughly the renewal interval has elapsed.
             tokio::time::sleep(TOKEN_RENEW_INTERVAL).await;
             let current = token_cell.read().unwrap().clone();
-            match adapters::renew_service_token(&http, &control_plane, &node_id, &current).await {
+            match adapters::renew_service_token(
+                &http,
+                &control_plane,
+                &node_id,
+                &adapters::NodeServiceToken(current.clone()),
+            )
+            .await
+            {
                 Ok((new_token, new_expiry)) => {
                     // Publish for the refresh loop FIRST, then persist for restarts.
                     if let Ok(mut w) = token_cell.write() {
