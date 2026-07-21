@@ -156,20 +156,25 @@ async fn build_config(state: &AppState) -> Result<String, String> {
     // fetch error → None → direct-only, unchanged. The token only rides along when there
     // is a relay to authenticate to, and never leaves the App Group container.
     // [T:A.1.1 relay-block + A.1.6 verify + part-d-transport-connectivity §5]
-    let (relay_endpoint, relay_token): (Option<String>, Option<String>) = match state.token() {
-        Some(tok) => {
-            let ep = agent_core::adapters::relay_map(&state.http, &state.regional_base_url(), &tok)
-                .await
-                .ok()
-                .and_then(|map| map.into_iter().next())
-                .map(|r| r.endpoint);
-            match ep {
-                Some(e) => (Some(e), Some(tok)),
-                None => (None, None),
+    // Node service token (NOT the user session token): `/api/v1/relay/map` and the
+    // relay's membership verify are node-scoped and reject the OAuth session token.
+    // Read it from the persisted agent.json — the same token the desktop daemon uses.
+    let (relay_endpoint, relay_token): (Option<String>, Option<String>) =
+        match crate::load_stored_service_token(&crate::handoff_state_dir(state)) {
+            Some(tok) => {
+                let ep =
+                    agent_core::adapters::relay_map(&state.http, &state.regional_base_url(), &tok)
+                        .await
+                        .ok()
+                        .and_then(|map| map.into_iter().next())
+                        .map(|r| r.endpoint);
+                match ep {
+                    Some(e) => (Some(e), Some(tok)),
+                    None => (None, None),
+                }
             }
-        }
-        None => (None, None),
-    };
+            None => (None, None),
+        };
     let cfg = serde_json::json!({
         "private_key_b64": private_b64,
         "overlay_ip": overlay_ip,
