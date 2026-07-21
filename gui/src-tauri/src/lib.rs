@@ -1339,7 +1339,7 @@ async fn totp_confirm(state: State<'_, AppState>, code: String) -> Result<(), St
 /// Disable the caller's own TOTP factor. Called WITHOUT a proof first: the CP
 /// returns STEP_UP_REQUIRED (`manage_auth_factor`), the GUI's `runWithStepUp`
 /// runs the step-up (TOTP, or the AAL2 email "lost-authenticator" path at
-/// F0-Plus/F1) and retries WITH the proof. [T:e7-recovery-model-2026-07-20]
+/// F0-Plus/F1) and retries WITH the proof. [T:Part D §H.9]
 #[tauri::command]
 async fn totp_disable(
     state: State<'_, AppState>,
@@ -2537,7 +2537,7 @@ async fn remove_member(
 
 /// Admin resets a member's TOTP (admin-mediated recovery, H.9). Called WITHOUT a
 /// proof first → CP returns STEP_UP_REQUIRED:manage_member_factor → runWithStepUp
-/// supplies the admin's proof. [T:e7-recovery-model-2026-07-20.md]
+/// supplies the admin's proof. [T:Part D §H.9]
 #[tauri::command]
 async fn reset_member_totp(
     user_id: String,

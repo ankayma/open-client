@@ -808,7 +808,7 @@ pub async fn remove_member(
 /// Admin resets a member's TOTP (the admin-mediated recovery path, H.9).
 /// `POST /api/v1/members/{user_id}/totp/disable`, gated by the admin's own
 /// `manage_member_factor` step-up proof (passed as a query param, matching the
-/// server's `Query<StepUpQuery>`). [T:e7-recovery-model-2026-07-20.md]
+/// server's `Query<StepUpQuery>`). [T:Part D §H.9]
 pub async fn reset_member_totp(
     http: &reqwest::Client,
     base_url: &str,
@@ -1380,7 +1380,7 @@ pub async fn totp_enroll(
 }
 
 /// `POST /api/v1/stepup/totp/confirm` — prove the enrolled secret works and mark
-/// it confirmed. No backup-codes returned (removed 2026-07-20, e7-recovery-model:
+/// it confirmed. No backup-codes returned (removed 2026-07-20 (recovery model):
 /// a lost authenticator recovers via the email-OTP AAL2 path or an admin/vendor
 /// disable, not a code-on-paper).
 pub async fn totp_confirm(

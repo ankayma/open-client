@@ -100,7 +100,7 @@
 
   // Admin-mediated factor recovery (H.9): a member who lost their authenticator
   // and can't self-recover asks out-of-band; the admin resets it here so they can
-  // re-enroll. Gated by the admin's OWN step-up. [T:e7-recovery-model-2026-07-20]
+  // re-enroll. Gated by the admin's OWN step-up. [T:Part D §H.9]
   async function resetTotp(userId: string, login: string) {
     if (!confirm(`Reset ${login}'s authenticator? They'll sign in with an emailed code and set up a new one.`))
       return;

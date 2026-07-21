@@ -279,7 +279,7 @@ export async function totpEnroll(): Promise<[string, string]> {
 }
 
 // Prove the enrolled secret works and mark TOTP confirmed. No backup-codes
-// (removed 2026-07-20, e7-recovery-model): a lost authenticator recovers via the
+// (removed 2026-07-20): a lost authenticator recovers via the
 // email-OTP AAL2 path or an admin/vendor disable.
 export async function totpConfirm(code: string): Promise<void> {
   return invoke("totp_confirm", { code });
@@ -399,7 +399,7 @@ export async function removeMember(userId: string, proof?: StepUpProof): Promise
 
 // Admin resets a member's TOTP (admin-mediated recovery, H.9) — the member then
 // re-enrolls a fresh authenticator. Gated by the admin's own manage_member_factor
-// step-up (runWithStepUp supplies the proof). [T:e7-recovery-model-2026-07-20]
+// step-up (runWithStepUp supplies the proof). [T:Part D §H.9]
 export async function resetMemberTotp(userId: string, proof?: StepUpProof): Promise<void> {
   return invoke("reset_member_totp", { userId, proofToken: proof?.proofToken });
 }

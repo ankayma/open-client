@@ -11,7 +11,7 @@
 
 	// idle: not enrolled, offer setup. enrolling: secret shown, awaiting a code
 	// to confirm. enrolled: a confirmed factor exists. No backup-codes step
-	// (removed 2026-07-20, e7-recovery-model): a lost authenticator recovers via
+	// (removed 2026-07-20): a lost authenticator recovers via
 	// the email-OTP AAL2 path or an admin/vendor disable.
 	let totpState = $state<'loading' | 'idle' | 'enrolling' | 'enrolled'>('loading');
 	let otpauthUrl = $state('');
@@ -85,7 +85,7 @@
 	// runWithStepUp drives the modal (the user's own TOTP, or the AAL2 email
 	// "lost-authenticator" fallback at F0-Plus/F1) and retries with the proof.
 	// This is also the escape hatch for a stale/unwanted enrollment.
-	// [T:e7-recovery-model-2026-07-20.md]
+	// [T:Part D §H.9]
 	async function disableTotp() {
 		busy = true;
 		totpError = '';
