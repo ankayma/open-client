@@ -21,7 +21,7 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket};
 use std::path::Path;
 use std::process::Command;
 use std::sync::{Arc, Mutex, RwLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use agent_core::domain::{EnrollRequest, EnrollResponse};
 use agent_core::pump::{self, Peers}; // shared packet pump (tx/rx/timers + peer roster)
@@ -187,6 +187,41 @@ pub(crate) struct RefreshCtx {
 /// Bring the WireGuard overlay online for `state` and move packets. Shared by
 /// `agent up` (refresh loop) and `agent ci-deploy` (one-shot). [T:A.1.3]
 ///
+/// Hole-punch context (G-3), shared by the periodic initiator and the SSE rendezvous
+/// handler: the control-plane client/token used to request a rendezvous, and this node's
+/// discovered server-reflexive endpoint to advertise as the punch candidate.
+#[derive(Clone)]
+struct PunchCtx {
+    http: reqwest::Client,
+    control_plane: String,
+    token_cell: Arc<RwLock<String>>,
+    reflexive: agent_core::disco::Reflexive,
+    /// Per-peer debounce for reacting to a rendezvous — breaks the reciprocation
+    /// ping-pong into ~2 overlapping bursts, then quiets (STUN-storm pitfall).
+    recent: Arc<Mutex<std::collections::HashMap<String, Instant>>>,
+}
+
+impl PunchCtx {
+    fn node_token(&self) -> adapters::NodeServiceToken {
+        adapters::NodeServiceToken(self.token_cell.read().unwrap().clone())
+    }
+    /// True at most once per `PUNCH_DEBOUNCE` per peer — gates punch+reciprocate so a
+    /// received rendezvous can't ping-pong into a storm.
+    fn should_react(&self, peer: &str) -> bool {
+        let mut g = self.recent.lock().expect("recent lock");
+        let now = Instant::now();
+        match g.get(peer) {
+            Some(t) if t.elapsed() < PUNCH_DEBOUNCE => false,
+            _ => {
+                g.insert(peer.to_string(), now);
+                true
+            }
+        }
+    }
+}
+
+const PUNCH_DEBOUNCE: Duration = Duration::from_secs(5);
+
 /// macOS only at 1.1 (the utun adapter); other platforms error at runtime but still
 /// compile (A.1.9). Requires root (utun + route). Per-peer host routes (/32 v4,
 /// /128 v6) are added as peers appear — more specific than any overlapping pool a
@@ -343,14 +378,59 @@ pub(crate) async fn serve_dataplane(
     // [G-2] STUN endpoint discovery on the WG socket. Register the demux sink, then run
     // discovery against the relay's STUN reflector — learning our public reflexive endpoint
     // (the candidate a peer dials to hole-punch a direct path, G-3). Only when a relay is
-    // present (hence a co-located STUN reflector). `[T:nat-traversal-disco-design §4]`
+    // present (hence a co-located STUN reflector). The handle is shared with the SSE loop
+    // below (rendezvous → hole-punch). `[T:nat-traversal-disco-design §4]`
+    let reflexive: agent_core::disco::Reflexive = Arc::new(std::sync::Mutex::new(None));
     if let Some(stun_addr) = relay_stun_addr {
         let (stun_tx, stun_rx) = std::sync::mpsc::channel();
         pump::set_stun_sink(stun_tx);
-        let reflexive: agent_core::disco::Reflexive = Arc::new(std::sync::Mutex::new(None));
+        let refl = reflexive.clone();
         let udp_disco = udp.clone();
         std::thread::spawn(move || {
-            agent_core::disco::run_discovery(udp_disco, stun_addr, stun_rx, reflexive);
+            agent_core::disco::run_discovery(udp_disco, stun_addr, stun_rx, refl);
+        });
+    }
+
+    // [G-3] Hole-punch initiator: once we know our reflexive endpoint, periodically ask the
+    // control plane to rendezvous each RELAY-ONLY peer (no direct endpoint) toward us. The
+    // target reciprocates via its SSE handler so both fire simultaneously (see
+    // `consume_peer_sse`). Runs only when discovery is active (relay present).
+    let punch = PunchCtx {
+        http: ctx.http.clone(),
+        control_plane: ctx.control_plane.clone(),
+        token_cell: ctx.service_token.clone(),
+        reflexive: reflexive.clone(),
+        recent: Arc::new(Mutex::new(std::collections::HashMap::new())),
+    };
+    if relay_stun_addr.is_some() {
+        let punch = punch.clone();
+        let peers = peers.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(Duration::from_secs(20)).await;
+                let Some(my_ep) = *punch.reflexive.lock().expect("reflexive lock") else {
+                    continue;
+                };
+                // Snapshot relay-only targets, then drop the lock before awaiting.
+                let targets: Vec<String> = {
+                    let g = peers.lock().expect("peers lock");
+                    g.iter()
+                        .filter(|p| p.endpoint().is_none())
+                        .map(|p| p.peer.node_id.clone())
+                        .collect()
+                };
+                let token = punch.node_token();
+                for target in targets {
+                    let _ = adapters::request_rendezvous(
+                        &punch.http,
+                        &punch.control_plane,
+                        &token,
+                        &target,
+                        &my_ep.to_string(),
+                    )
+                    .await;
+                }
+            }
         });
     }
 
@@ -406,6 +486,7 @@ pub(crate) async fn serve_dataplane(
     let refresh = {
         let (http, cp, svc_token_cell) = (ctx.http, ctx.control_plane, ctx.service_token);
         let (peers, index, udp) = (peers.clone(), index.clone(), udp.clone());
+        let punch = punch.clone();
         let dev_name = dev_name.clone();
         let resolver = resolver.clone();
         let relay = relay.clone();
@@ -516,6 +597,7 @@ pub(crate) async fn serve_dataplane(
                             &overlay_s,
                             port,
                             keepalive,
+                            &punch,
                         );
                         match tokio::time::timeout(SSE_SESSION_CAP, sse).await {
                             Ok(Ok(())) => {}
@@ -563,6 +645,7 @@ async fn consume_peer_sse(
     overlay_s: &str,
     port: u16,
     keepalive: Option<u16>,
+    punch: &PunchCtx,
 ) -> anyhow::Result<()> {
     use futures::StreamExt as _;
     let mut stream = resp.bytes_stream();
@@ -636,6 +719,49 @@ async fn consume_peer_sse(
                         // above — acceptable, bounded by the reconnect backoff).
                         crate::tls_relay::on_cert_issued(&c.fqdn, &c.cert_pem);
                         println!("SSE: cert issued for {}", c.fqdn);
+                    }
+                }
+                // [G-3] A peer asked us (via the control plane) to hole-punch toward it.
+                if evt_type == "rendezvous" && !evt_data.is_empty() {
+                    #[derive(serde::Deserialize)]
+                    struct SseRendezvous {
+                        target_node_id: String,
+                        peer_node_id: String,
+                        endpoint: String,
+                    }
+                    if let Ok(r) = serde_json::from_str::<SseRendezvous>(&evt_data) {
+                        if r.target_node_id == node_id && punch.should_react(&r.peer_node_id) {
+                            if let Ok(target_ep) = r.endpoint.parse::<std::net::SocketAddr>() {
+                                // Fire the punch burst toward the peer (blocks → own thread).
+                                let (peers_c, udp_c, peer_c) =
+                                    (peers.clone(), udp.clone(), r.peer_node_id.clone());
+                                std::thread::spawn(move || {
+                                    pump::punch_toward(&peers_c, &peer_c, &udp_c, target_ep);
+                                });
+                                // Reciprocate so the peer punches back at the SAME time — the
+                                // simultaneity that opens both NATs (debounced above).
+                                if let Some(my_ep) =
+                                    *punch.reflexive.lock().expect("reflexive lock")
+                                {
+                                    let (http, cp, token, peer) = (
+                                        punch.http.clone(),
+                                        punch.control_plane.clone(),
+                                        punch.node_token(),
+                                        r.peer_node_id.clone(),
+                                    );
+                                    tokio::spawn(async move {
+                                        let _ = adapters::request_rendezvous(
+                                            &http,
+                                            &cp,
+                                            &token,
+                                            &peer,
+                                            &my_ep.to_string(),
+                                        )
+                                        .await;
+                                    });
+                                }
+                            }
+                        }
                     }
                 }
                 evt_type.clear();

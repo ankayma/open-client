@@ -280,6 +280,52 @@ fn peer_by_pubkey(peers: &Peers, pubkey: [u8; 32]) -> Option<Arc<PeerEntry>> {
     g.iter().find(|p| p.peer.public_key == pubkey).cloned()
 }
 
+fn peer_by_node_id(peers: &Peers, node_id: &str) -> Option<Arc<PeerEntry>> {
+    let g = peers.lock().expect("peers lock");
+    g.iter().find(|p| p.peer.node_id == node_id).cloned()
+}
+
+/// G-3 hole-punch cadence: a short burst of handshake initiations opens the NAT mapping.
+/// ~200-250ms × ~10 over ~2s, then concede to the relay (Nebula-style linear cadence).
+/// `[T:decision/nat-traversal-disco-design-2026-07-21 §2(B)]`
+const PUNCH_TRIES: u32 = 8;
+const PUNCH_INTERVAL: Duration = Duration::from_millis(250);
+
+/// Fire a burst of WireGuard handshake initiations DIRECTLY at `target` — the peer's
+/// server-reflexive endpoint learned via CP rendezvous (G-3) — to open the NAT mapping.
+/// The peer bursts back simultaneously (its own rendezvous); the first init to survive
+/// both NATs completes the handshake on the direct 5-tuple, and the rx pump's roaming
+/// (`set_endpoint` on the authenticated reply) upgrades the peer to direct. No relay
+/// teardown and no session reset — WireGuard is keyed by the static pubkey, not the
+/// 5-tuple. Best-effort: send errors are dropped (WG/relay retransmit). Blocks for the
+/// burst; run on its own thread. `[T:nat-traversal-disco-design §2(B),(C)]`
+pub fn punch_toward(peers: &Peers, node_id: &str, udp: &UdpSocket, target: SocketAddr) {
+    let Some(entry) = peer_by_node_id(peers, node_id) else {
+        return;
+    };
+    // Already direct? Nothing to punch.
+    if entry.endpoint().is_some() {
+        return;
+    }
+    plog(&format!("hole-punch → {target} (peer {node_id})"));
+    let mut buf = [0u8; 2048];
+    for _ in 0..PUNCH_TRIES {
+        // Stop early if roaming already upgraded us to a direct path.
+        if entry.endpoint().is_some() {
+            break;
+        }
+        {
+            let mut tunn = entry.tunn.lock().expect("tunn lock");
+            if let TunnResult::WriteToNetwork(pkt) =
+                tunn.format_handshake_initiation(&mut buf, false)
+            {
+                let _ = udp.send_to(pkt, target);
+            }
+        }
+        std::thread::sleep(PUNCH_INTERVAL);
+    }
+}
+
 /// Send one WireGuard `ciphertext` datagram to `entry` over the best available path:
 /// a known direct UDP endpoint if we have one, otherwise the relay fallback
 /// `[T: Decision D-T1 — Tailscale-lite]`. With no endpoint and no relay the frame is

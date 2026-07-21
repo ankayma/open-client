@@ -619,6 +619,31 @@ pub async fn submit_subdomain_csr(
     Ok(())
 }
 
+/// Ask the control plane to signal `target_node_id` to hole-punch toward this node at
+/// `endpoint` (G-3 rendezvous). `POST /api/v1/rendezvous`, node-service-token authed.
+/// Best-effort: the control plane only relays the candidate address over SSE — an offline
+/// target just leaves the caller on the relay. `[T:D.9.7, nat-traversal-disco-design]`
+pub async fn request_rendezvous(
+    http: &reqwest::Client,
+    base_url: &str,
+    token: &NodeServiceToken,
+    target_node_id: &str,
+    endpoint: &str,
+) -> Result<(), ApiError> {
+    let resp = http
+        .post(url(base_url, "/api/v1/rendezvous"))
+        .bearer_auth(token.as_str())
+        .json(&serde_json::json!({ "target_node_id": target_node_id, "endpoint": endpoint }))
+        .timeout(CP_REST_TIMEOUT)
+        .send()
+        .await
+        .map_err(|e| ApiError::Transport(e.to_string()))?;
+    if !resp.status().is_success() {
+        return Err(status_error(resp).await);
+    }
+    Ok(())
+}
+
 /// Poll ACME issuance state for a subdomain. `GET /api/v1/subdomain/{fqdn}/cert`
 /// — the fallback to the `cert_issued` SSE push (belt-and-suspenders, same
 /// lesson as the resolver's stale-table bug). `[T:F-3 auto-TLS]`
