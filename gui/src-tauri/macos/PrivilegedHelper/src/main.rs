@@ -51,6 +51,13 @@ mod imp {
     /// Pid of the agent WE spawned, recorded root-owned at spawn time so
     /// stop_agent never has to trust the caller-writable status file.
     const PID_PATH: &str = "/var/run/com.ankayma.agent.pid";
+    /// Root-owned state dir for the agent daemon, passed via `--state-dir` — NEVER
+    /// via `$HOME`: launchd strips `$HOME` from root daemons (macOS ≥ Catalina), so
+    /// the agent's home-relative fallback landed on the sealed read-only system
+    /// volume and it died at startup. And root resolving paths inside a
+    /// caller-owned home dir is symlink-attack surface (CWE-59) — the same reason
+    /// open_log is O_NOFOLLOW. See docs/daemon-state-dir.md.
+    const AGENT_STATE_DIR: &str = "/Library/Ankayma";
 
     #[derive(Deserialize)]
     #[serde(tag = "command", rename_all = "lowercase")]
@@ -60,6 +67,11 @@ mod imp {
             token: String,
             control_plane: String,
             home: String,
+            /// The GUI's enrolled identity (agent.json content) — the handoff that
+            /// used to happen implicitly by sharing `~/.ankayma`. Optional so a
+            /// request from an older GUI build still parses.
+            #[serde(default)]
+            state_json: Option<String>,
         },
         Stop {
             home: String,
@@ -130,8 +142,9 @@ mod imp {
                 agent_bin,
                 token,
                 control_plane,
+                state_json,
                 ..
-            } => start_agent(&agent_bin, &token, &control_plane),
+            } => start_agent(&agent_bin, &token, &control_plane, state_json.as_deref()),
             Request::Stop { home } => stop_agent(&home),
         };
         match outcome {
@@ -170,13 +183,72 @@ mod imp {
             .open(path)
     }
 
+    /// Seed the daemon's agent.json from the GUI's enrolled identity — replaces the
+    /// implicit handoff of both processes reading one `~/.ankayma`. Written only when
+    /// the daemon has no state yet or the node identity changed (new tenant, rotated
+    /// WireGuard key): once seeded, the daemon's copy is the living one — its
+    /// background token renewal rewrites it, and a renewal invalidates the previous
+    /// token server-side, so overwriting with the GUI's older copy would hand the
+    /// daemon a dead credential.
+    fn seed_state(incoming_json: &str) -> Result<(), String> {
+        use std::os::unix::fs::OpenOptionsExt;
+        #[derive(Deserialize)]
+        struct Identity {
+            node_id: String,
+            public_b64: String,
+        }
+        let incoming: Identity =
+            serde_json::from_str(incoming_json).map_err(|e| format!("bad state_json: {e}"))?;
+        let path = format!("{AGENT_STATE_DIR}/agent.json");
+        let same_identity = fs::read(&path)
+            .ok()
+            .and_then(|b| serde_json::from_slice::<Identity>(&b).ok())
+            .is_some_and(|cur| {
+                cur.node_id == incoming.node_id && cur.public_b64 == incoming.public_b64
+            });
+        if same_identity {
+            return Ok(());
+        }
+        let mut f = fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(&path)
+            .map_err(|e| format!("open {path}: {e}"))?;
+        f.write_all(incoming_json.as_bytes())
+            .map_err(|e| format!("write {path}: {e}"))?;
+        Ok(())
+    }
+
     /// Spawn the agent daemon directly — no shell, so no shell-metacharacter risk
     /// (the osascript quick-fix it replaces had to single-quote around this).
-    fn start_agent(agent_bin: &str, token: &str, control_plane: &str) -> Result<(), String> {
+    fn start_agent(
+        agent_bin: &str,
+        token: &str,
+        control_plane: &str,
+        state_json: Option<&str>,
+    ) -> Result<(), String> {
+        // 0755 dir: agent.json inside stays 0600 (seed_state), while the status
+        // snapshot the daemon writes is world-readable on purpose — the GUI's
+        // path-proof panel reads it, and it carries connection-level metadata only.
+        fs::create_dir_all(AGENT_STATE_DIR)
+            .map_err(|e| format!("create {AGENT_STATE_DIR}: {e}"))?;
+        let _ = fs::set_permissions(AGENT_STATE_DIR, fs::Permissions::from_mode(0o755));
+        if let Some(json) = state_json {
+            seed_state(json)?;
+        }
         let log = open_log(AGENT_LOG_PATH).map_err(|e| format!("open {AGENT_LOG_PATH}: {e}"))?;
         let log_err = log.try_clone().map_err(|e| e.to_string())?;
         let child = Command::new(agent_bin)
-            .args(["up", "--control-plane", control_plane])
+            .args([
+                "up",
+                "--control-plane",
+                control_plane,
+                "--state-dir",
+                AGENT_STATE_DIR,
+            ])
             // Token via env, never argv: argv of the long-lived root `agent up`
             // process is world-visible in `ps` for the whole tunnel lifetime; a
             // root process's environment is not. `agent up` already reads
@@ -210,16 +282,18 @@ mod imp {
     /// name match if the recorded pid is stale.
     fn stop_agent(home: &str) -> Result<(), String> {
         // Pid sources in trust order: the root-owned file WE wrote at spawn,
-        // then the caller-writable status file (agents started by older
+        // then the daemon's status file — /Library/Ankayma (root-owned, current
+        // builds) before ~/.ankayma (caller-writable, agents started by older
         // builds). Either way the pid is only signalled after is_agent_process
-        // confirms the executable — the status file content is attacker-
-        // controlled (caller owns it), and pids get reused, so an unverified
-        // kill is a kill-as-root primitive.
+        // confirms the executable — the home status file is attacker-controlled
+        // (caller owns it), and pids get reused, so an unverified kill is a
+        // kill-as-root primitive.
         let recorded = fs::read_to_string(PID_PATH)
             .ok()
             .and_then(|s| s.trim().parse::<u64>().ok());
-        let claimed = fs::read(format!("{home}/.ankayma/agent-status.json"))
+        let claimed = fs::read(format!("{AGENT_STATE_DIR}/agent-status.json"))
             .ok()
+            .or_else(|| fs::read(format!("{home}/.ankayma/agent-status.json")).ok())
             .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
             .and_then(|v| v.get("pid").and_then(|p| p.as_u64()));
         log_line(&format!(

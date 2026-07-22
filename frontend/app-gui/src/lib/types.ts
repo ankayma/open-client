@@ -40,7 +40,11 @@ export type ConnectionState =
       // get_connection_status (or a new command) starts populating them.
       cert_expires_days?: number;
       aal?: string;
-    };
+    }
+  // Enrolled but the daemon stopped writing its status snapshot — the tunnel is
+  // NOT carrying traffic. Rendered as an explicit fault state, never as
+  // "connected" (desktop only; mobile reports through vpn_status).
+  | { status: "dataplane_down"; node_id: string; endpoint: string };
 
 export interface Quota {
   bandwidth_bytes_used: number;

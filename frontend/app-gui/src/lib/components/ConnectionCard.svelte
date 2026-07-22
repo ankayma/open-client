@@ -146,6 +146,11 @@
 				if (isMobile) {
 					await vpnConnect();
 				} else {
+					if (conn.status === 'dataplane_down') {
+						// Reconnect after a daemon death: a wedged daemon could still
+						// hold udp/51820 — clear it before respawning.
+						try { await stopDataplane(); } catch { /* not running — fine */ }
+					}
 					await connect();
 					await startDataplane();
 				}
@@ -172,13 +177,15 @@
 			class="dot"
 			class:connected={$connection.status === 'connected'}
 			class:connecting={$connection.status === 'connecting'}
+			class:down={$connection.status === 'dataplane_down'}
 		></span>
-		<span class="status" class:connected={$connection.status === 'connected'}>
+		<span class="status" class:connected={$connection.status === 'connected'} class:down={$connection.status === 'dataplane_down'}>
 			<!-- Peer count inline with the state (owner feedback 2026-07-04): the
 			     first thing to know after Connect is "am I meshed with anyone?".
 			     Fills in as soon as the daemon status poll reports. -->
 			{#if $connection.status === 'connected'}Connected{#if dp?.running}&nbsp;· <span title="{activePeers} peer(s) handshaking now · {dp.peers.length} configured from the tenant roster">{activePeers} active / {dp.peers.length} peers</span>{/if}
 			{:else if $connection.status === 'connecting'}Connecting…
+			{:else if $connection.status === 'dataplane_down'}Tunnel down
 			{:else}Disconnected{/if}
 		</span>
 	</div>
@@ -200,7 +207,7 @@
 			</svg>
 		</button>
 		{#if $connection.status !== 'connected'}
-			<span class="hint">{$connection.status === 'connecting' ? 'Connecting…' : 'Tap to connect'}</span>
+			<span class="hint">{$connection.status === 'connecting' ? 'Connecting…' : $connection.status === 'dataplane_down' ? 'The tunnel service stopped — tap to reconnect' : 'Tap to connect'}</span>
 		{/if}
 	{/if}
 
@@ -267,6 +274,13 @@
 	.dot.connecting {
 		background: var(--c-warn);
 		animation: pulse 1s ease-in-out infinite;
+	}
+	.dot.down {
+		background: var(--c-danger, #ef4444);
+		box-shadow: 0 0 8px var(--c-danger, #ef4444);
+	}
+	.status.down {
+		color: var(--c-danger, #ef4444);
 	}
 	@keyframes pulse {
 		0%, 100% { opacity: 1; }

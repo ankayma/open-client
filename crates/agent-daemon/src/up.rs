@@ -84,6 +84,13 @@ pub(crate) struct AgentState {
 /// `agent.json` carries a scoped node service token and `--token` is optional.
 pub async fn run(args: &[String]) -> Result<()> {
     let cfg = Config::parse(args)?;
+    // Fail loudly and early if the state dir cannot exist, and print the resolved
+    // path — the failure mode this replaces ("./.ankayma" under a read-only cwd)
+    // surfaced only as one line in a root-owned log file.
+    let sdir = state_dir();
+    std::fs::create_dir_all(&sdir)
+        .with_context(|| format!("create state dir {sdir} (override with --state-dir)"))?;
+    println!("state dir: {sdir}");
     // connect_timeout bounds TCP+TLS setup for EVERY call, including the SSE
     // subscribe (whose response body must stay unbounded). Round-trip bounds on
     // plain REST live in the adapters (CP_REST_TIMEOUT) — together they keep the
@@ -733,7 +740,7 @@ impl Config {
         // headlessly on first boot, with no SSH. [A: headless golden-image enroll]
         let mut join_token = std::env::var("ANKAYMA_JOIN_TOKEN").ok();
         let mut listen_port = DEFAULT_LISTEN_PORT;
-        let mut state_path = default_state_path();
+        let mut state_path: Option<String> = None;
 
         let mut it = args.iter();
         while let Some(a) = it.next() {
@@ -752,7 +759,17 @@ impl Config {
                         .parse()
                         .context("--port must be a number")?
                 }
-                "--state" => state_path = it.next().context("--state needs a value")?.clone(),
+                "--state" => {
+                    state_path = Some(it.next().context("--state needs a value")?.clone())
+                }
+                // Must be pinned BEFORE anything calls state_dir() — the OnceLock
+                // memoizes the first resolution, so a flag seen after a default
+                // resolution would be silently ignored. state_path's default is
+                // therefore computed after this loop, not before it.
+                "--state-dir" => {
+                    let dir = it.next().context("--state-dir needs a value")?.clone();
+                    let _ = STATE_DIR.set(dir);
+                }
                 other => return Err(anyhow!("unknown argument: {other}")),
             }
         }
@@ -761,24 +778,63 @@ impl Config {
             token,
             join_token,
             listen_port,
-            state_path,
+            state_path: state_path.unwrap_or_else(default_state_path),
         })
     }
 }
 
-/// Home base for `~/.ankayma/…` — thin alias for the shared resolver so `agent up`
-/// and `agent ssh` share one state dir with the GUI on every platform. `[T:A.1.3]`
+/// Home base for `~/.ankayma/…` — thin alias for the shared resolver, used by the
+/// USER-side CLI (`agent ssh`) which always runs inside a login session. The daemon
+/// (`agent up`) resolves its state through [`state_dir`] instead: a root daemon
+/// spawned by launchd/systemd has no `$HOME` to resolve against. `[T:A.1.3]`
 pub(crate) fn home_root() -> String {
     agent_core::home_root()
 }
 
+static STATE_DIR: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+/// The daemon's state directory, resolved once at startup and read everywhere else
+/// (agent.json, machine.key via the agent.json parent, status snapshot, ssh host
+/// key, TLS certs). Resolution order:
+///   1. `--state-dir` / `$ANKAYMA_STATE_DIR` — explicit wins. The macOS helper
+///      passes `/Library/Ankayma` — system-daemon state belongs in a root-owned
+///      system location, selected explicitly, never derived from a login
+///      environment. `[T:FHS 3.0 §5.8 /var/lib; systemd.exec StateDirectory=]`
+///   2. `$HOME/.ankayma` (`%USERPROFILE%` on Windows) — every existing install
+///      keeps its state exactly where it already is.
+///   3. The platform's system-state directory — NEVER the old `./.ankayma`
+///      fallback: launchd strips `$HOME` from root daemons (macOS ≥ Catalina) and
+///      starts them with cwd `/`, so the relative fallback meant "create state on
+///      the sealed read-only system volume" — the daemon died at startup while the
+///      GUI still showed Connected. See docs/daemon-state-dir.md.
+pub(crate) fn state_dir() -> String {
+    STATE_DIR.get_or_init(default_state_dir).clone()
+}
+
+fn default_state_dir() -> String {
+    if let Ok(dir) = std::env::var("ANKAYMA_STATE_DIR") {
+        return dir;
+    }
+    if let Ok(home) = std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")) {
+        return format!("{home}/.ankayma");
+    }
+    // No $HOME → a system daemon. Use the platform's system-state location
+    // (FHS `/var/lib/<package>` on Linux; the local /Library domain on macOS).
+    #[cfg(target_os = "macos")]
+    return "/Library/Ankayma".into();
+    #[cfg(target_os = "windows")]
+    return "C:\\ProgramData\\Ankayma".into();
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    "/var/lib/ankayma".into()
+}
+
 fn default_state_path() -> String {
-    format!("{}/.ankayma/agent.json", home_root())
+    format!("{}/agent.json", state_dir())
 }
 
 /// [F-2 v0.5] Start the embedded SSH server on the overlay. Best-effort: a failure
 /// here (e.g. can't bind, no host key) is logged, never fatal to the data plane.
-/// The host key persists at `~/.ankayma/ssh-host-ed25519`; its public form is what
+/// The host key persists at `<state-dir>/ssh-host-ed25519`; its public form is what
 /// the control plane distributes for clients to PIN (A.1.3). Port default 22022,
 /// override via `ANKAYMA_SSH_PORT` (shared-host knob, mirrors the relay-port env).
 #[cfg(any(unix, windows))]
@@ -792,10 +848,7 @@ async fn start_embedded_ssh(
     use agent_core::ssh_grant::GrantVerifier;
     use agent_core::ssh_server::{serve, SshHostKey, SshServerConfig};
 
-    let home = home_root();
-    let host_key_path = std::path::Path::new(&home)
-        .join(".ankayma")
-        .join("ssh-host-ed25519");
+    let host_key_path = std::path::Path::new(&state_dir()).join("ssh-host-ed25519");
     let host_key = match SshHostKey::load_or_generate(&host_key_path) {
         Ok(k) => k,
         Err(e) => {
@@ -1028,8 +1081,7 @@ fn advise_wg_firewall(_port: u16) {}
 // the daemon is actually up (not just enrolled) + the current peer roster.
 // Connection-level only (hostname/overlay/endpoint) — never payload [T:A.1.1].
 fn status_path() -> String {
-    let home = home_root();
-    format!("{home}/.ankayma/agent-status.json")
+    format!("{}/agent-status.json", state_dir())
 }
 
 /// Write the live status file the GUI reads for the F-5 path-proof panel. Thin wrapper over

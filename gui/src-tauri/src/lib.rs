@@ -102,6 +102,11 @@ struct AppState {
     ssh_sessions: Mutex<std::collections::HashMap<String, agent_core::ssh_client::SshInput>>,
     /// Monotonic id source for terminal sessions.
     ssh_seq: std::sync::atomic::AtomicU64,
+    /// When `start_dataplane` last succeeded (desktop). Gives the daemon a settle
+    /// window to write its first status snapshot before `current_connection`
+    /// declares the data plane down — without it, every Connect would flash
+    /// "tunnel down" during daemon startup.
+    dataplane_started: Mutex<Option<std::time::Instant>>,
 }
 
 /// Build the control-plane HTTP client. On Android the full-tunnel VPN (0.0.0.0/0 +
@@ -184,6 +189,7 @@ impl AppState {
             pending_join_node: Mutex::new(None),
             ssh_sessions: Mutex::new(std::collections::HashMap::new()),
             ssh_seq: std::sync::atomic::AtomicU64::new(0),
+            dataplane_started: Mutex::new(None),
         }
     }
 
@@ -352,6 +358,12 @@ pub enum ConnectionState {
     Disconnected,
     Connecting,
     Connected { node_id: String, endpoint: String },
+    /// Enrolled, but the privileged daemon is not writing its status snapshot —
+    /// the tunnel is NOT carrying traffic. Shown instead of a false "Connected"
+    /// when the daemon died or never came up (the failure mode that had the GUI
+    /// green while the data plane was dead). Desktop only; mobile reports the
+    /// tunnel state through `vpn_status`.
+    DataplaneDown { node_id: String, endpoint: String },
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -400,15 +412,80 @@ pub struct PathProof {
 
 // --- Core helpers (shared by #[tauri::command]s and the tray) ---
 
+/// Age in seconds of the daemon's status snapshot, None when absent/unreadable.
+/// The snapshot is heartbeat-rewritten every 15s while the daemon runs, so its
+/// age is the ground truth for "is the data plane actually up". [T:F-5]
+#[cfg(not(any(target_os = "ios", target_os = "android")))]
+fn dataplane_snapshot_age() -> Option<u64> {
+    #[derive(serde::Deserialize)]
+    struct Stamp {
+        updated_at: u64,
+    }
+    let bytes = std::fs::read(status_snapshot_path()).ok()?;
+    let s: Stamp = serde_json::from_slice(&bytes).ok()?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    Some(now.saturating_sub(s.updated_at))
+}
+
+/// 3× the daemon's 15s heartbeat: tolerates a missed tick without flapping the
+/// UI off, matches the F-5 path-proof threshold. [T:F-5]
+#[cfg(not(any(target_os = "ios", target_os = "android")))]
+const DATAPLANE_FRESH_SECS: u64 = 45;
+/// How long after `start_dataplane` the daemon gets to write its FIRST snapshot
+/// (enroll reuse + roster fetch + utun) before "no snapshot" means "down".
+#[cfg(not(any(target_os = "ios", target_os = "android")))]
+const DATAPLANE_SETTLE_SECS: u64 = 25;
+
 /// The live connection status derived from AppState — single source of truth
 /// for both the window UI and the tray menu.
+///
+/// Desktop: enrollment alone is NOT a connection. "Connected" additionally
+/// requires a fresh daemon status snapshot; a dead daemon shows `DataplaneDown`
+/// instead of the old false green (the GUI stayed "Connected" for hours while
+/// the tunnel was down — see docs/daemon-state-dir.md for one way that happened).
+/// Mobile keeps enrollment-only: the in-app tunnel reports through `vpn_status`.
 fn current_connection(state: &AppState) -> ConnectionState {
-    match &*state.node.lock().expect("node lock poisoned") {
-        Some(n) => ConnectionState::Connected {
-            node_id: n.node_id.clone(),
-            endpoint: n.overlay_ip.clone(),
-        },
-        None => ConnectionState::Disconnected,
+    let Some((node_id, endpoint)) = state
+        .node
+        .lock()
+        .expect("node lock poisoned")
+        .as_ref()
+        .map(|n| (n.node_id.clone(), n.overlay_ip.clone()))
+    else {
+        return ConnectionState::Disconnected;
+    };
+    #[cfg(not(any(target_os = "ios", target_os = "android")))]
+    {
+        match dataplane_snapshot_age() {
+            Some(age) if age <= DATAPLANE_FRESH_SECS => {
+                ConnectionState::Connected { node_id, endpoint }
+            }
+            _ => {
+                let started = *state
+                    .dataplane_started
+                    .lock()
+                    .expect("dataplane_started lock poisoned");
+                match started {
+                    // Daemon launched recently — first snapshot may still be
+                    // seconds away. Also the pre-`start_dataplane` window right
+                    // after enroll (started=None): the frontend drives that phase
+                    // and calls start_dataplane immediately, so report Connecting
+                    // rather than flashing a false "down".
+                    Some(t) if t.elapsed().as_secs() <= DATAPLANE_SETTLE_SECS => {
+                        ConnectionState::Connecting
+                    }
+                    None => ConnectionState::Connecting,
+                    Some(_) => ConnectionState::DataplaneDown { node_id, endpoint },
+                }
+            }
+        }
+    }
+    #[cfg(any(target_os = "ios", target_os = "android"))]
+    {
+        ConnectionState::Connected { node_id, endpoint }
     }
 }
 
@@ -417,9 +494,10 @@ fn current_connection(state: &AppState) -> ConnectionState {
 /// writable location, so a handoff written there is lost (or never written) between
 /// launches — which made every Connect enroll a BRAND-NEW node with a fresh
 /// WireGuard key (roster filled with duplicate nodes; peers that already knew the
-/// old key dropped the new handshakes → tunnel stuck at rx 0). On desktop it MUST
-/// stay under `$HOME/.ankayma` because the privileged `agent up` daemon reads it
-/// from there. `[T:A.1.10]`
+/// old key dropped the new handshakes → tunnel stuck at rx 0). On desktop this is
+/// the GUI's OWN copy of the identity — on macOS the privileged daemon receives its
+/// content over the helper IPC at Start and keeps a root-owned copy under
+/// /Library/Ankayma (docs/daemon-state-dir.md). `[T:A.1.10]`
 fn handoff_state_dir(state: &AppState) -> std::path::PathBuf {
     #[cfg(any(target_os = "ios", target_os = "android"))]
     {
@@ -428,8 +506,7 @@ fn handoff_state_dir(state: &AppState) -> std::path::PathBuf {
     #[cfg(not(any(target_os = "ios", target_os = "android")))]
     {
         let _ = state;
-        // One resolver for every entrypoint (HOME on unix, USERPROFILE on Windows) so
-        // the GUI and the privileged `agent up` daemon read the same ~/.ankayma.
+        // One resolver for every entrypoint (HOME on unix, USERPROFILE on Windows).
         // Reading a bare HOME here (unset on Windows) persisted identity to a relative
         // `.ankayma` under an unwritable CWD. [T:agent_core::home_root]
         std::path::PathBuf::from(agent_core::home_root()).join(".ankayma")
@@ -584,6 +661,10 @@ async fn connect_inner(state: &AppState) -> Result<(), String> {
 
 fn disconnect_inner(state: &AppState) {
     *state.node.lock().expect("node lock poisoned") = None;
+    *state
+        .dataplane_started
+        .lock()
+        .expect("dataplane_started lock poisoned") = None;
 }
 
 /// Propagate a connection/auth change: notify the window (so its store updates
@@ -1133,8 +1214,8 @@ async fn probe_reachable(targets: Vec<String>) -> Result<Vec<bool>, String> {
 /// Path of the data-plane status snapshot the GUI reads for path-proof. On iOS the Packet
 /// Tunnel extension (a SEPARATE process) writes it into the App Group container, so the app
 /// must read from there, not its own sandbox HOME; the `connect`-side config passes the
-/// SAME path to the extension so both agree. Every other platform uses the daemon's
-/// `~/.ankayma/agent-status.json`. [T:F-5]
+/// SAME path to the extension so both agree. macOS reads the daemon's root-owned
+/// `/Library/Ankayma/agent-status.json`; other platforms use `~/.ankayma`. [T:F-5]
 pub(crate) fn status_snapshot_path() -> std::path::PathBuf {
     #[cfg(target_os = "ios")]
     {
@@ -1153,7 +1234,18 @@ pub(crate) fn status_snapshot_path() -> std::path::PathBuf {
         }
         // else fall through to the home path (unavailable container → best-effort).
     }
-    std::path::PathBuf::from(agent_core::home_root()).join(".ankayma/agent-status.json")
+    // macOS desktop: the daemon owns its state root-side under /Library/Ankayma
+    // (the helper passes --state-dir; launchd gives root daemons no $HOME). The
+    // snapshot is world-readable — connection-level metadata only, never payload
+    // [T:A.1.1]. See docs/daemon-state-dir.md.
+    #[cfg(target_os = "macos")]
+    {
+        std::path::PathBuf::from("/Library/Ankayma/agent-status.json")
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        std::path::PathBuf::from(agent_core::home_root()).join(".ankayma/agent-status.json")
+    }
 }
 
 /// verify the connection is real and peer-to-peer without trusting the GUI alone.
@@ -1170,7 +1262,7 @@ async fn get_path_proof(state: State<'_, AppState>) -> Result<PathProof, String>
 
     // The F-5 path proof reads the same status snapshot the data plane writes. On iOS the
     // extension writes it into the App Group container (a separate process from this app);
-    // every other platform reads the daemon's `~/.ankayma/agent-status.json`.
+    // desktop reads the daemon's snapshot (see status_snapshot_path for the per-OS spot).
     let path = status_snapshot_path();
     let Ok(bytes) = std::fs::read(&path) else {
         return Ok(not_connected());
@@ -1767,6 +1859,11 @@ mod helper_ipc {
             token: &'a str,
             control_plane: &'a str,
             home: &'a str,
+            /// The enrolled identity (agent.json content). The daemon's state lives
+            /// root-owned under /Library/Ankayma (launchd gives root daemons no
+            /// $HOME), so the handoff rides the IPC request instead of a shared
+            /// ~/.ankayma. See docs/daemon-state-dir.md.
+            state_json: &'a str,
         },
         Stop {
             home: &'a str,
@@ -1820,12 +1917,14 @@ mod helper_ipc {
         token: &str,
         control_plane: &str,
         home: &str,
+        state_json: &str,
     ) -> Result<(), String> {
         send(&Request::Start {
             agent_bin,
             token,
             control_plane,
             home,
+            state_json,
         })
     }
 
@@ -1845,7 +1944,20 @@ fn bring_up_dataplane(
 ) -> Result<(), String> {
     helper_ipc::ensure_registered()?;
     let home = std::env::var("HOME").map_err(|_| "HOME not set".to_string())?;
-    helper_ipc::start(&agent_bin.to_string_lossy(), token, control_plane, &home)
+    // The enrolled identity rides the IPC request; the daemon keeps its own copy
+    // under /Library/Ankayma. Reading the caller's ~/.ankayma from the root daemon
+    // never reliably worked (launchd strips $HOME) and is CWE-59 surface besides.
+    let state_json = std::fs::read_to_string(
+        std::path::Path::new(&home).join(".ankayma").join("agent.json"),
+    )
+    .map_err(|e| format!("read enrolled identity for the daemon handoff: {e}"))?;
+    helper_ipc::start(
+        &agent_bin.to_string_lossy(),
+        token,
+        control_plane,
+        &home,
+        &state_json,
+    )
 }
 
 /// Windows: the Wintun adapter needs admin and the GUI runs unelevated, so launch
@@ -1892,6 +2004,13 @@ fn bring_up_dataplane(_b: &std::path::Path, _t: &str, _c: &str) -> Result<(), St
 /// comes up. Enroll (`connect`) first; macOS prompts for admin once.
 #[tauri::command]
 async fn start_dataplane(state: State<'_, AppState>) -> Result<(), String> {
+    start_dataplane_inner(&state).await
+}
+
+/// Body of `start_dataplane`, callable from non-command contexts too — the tray
+/// Connect used to run `connect_inner` alone, which enrolled but never brought
+/// the tunnel up (one more way to a green UI over a dead data plane).
+async fn start_dataplane_inner(state: &AppState) -> Result<(), String> {
     let tok = state.token().ok_or("not signed in")?;
     if state.node.lock().expect("node lock poisoned").is_none() {
         return Err("not connected — enroll first".into());
@@ -1901,9 +2020,28 @@ async fn start_dataplane(state: State<'_, AppState>) -> Result<(), String> {
     // thread::sleep); run it off the async runtime so it doesn't stall the
     // Tauri executor (audit 2026-07-02).
     let base_url = state.regional_base_url();
-    tauri::async_runtime::spawn_blocking(move || bring_up_dataplane(&bin, &tok, &base_url))
+    let outcome = tauri::async_runtime::spawn_blocking(move || bring_up_dataplane(&bin, &tok, &base_url))
         .await
-        .map_err(|e| format!("dataplane task panicked: {e}"))?
+        .map_err(|e| format!("dataplane task panicked: {e}"))?;
+    // Feed current_connection's settle window: success = daemon starting now
+    // (grant it DATAPLANE_SETTLE_SECS to write the first snapshot); failure = an
+    // already-expired stamp, so the state reads DataplaneDown immediately instead
+    // of "Connecting" forever.
+    #[cfg(not(any(target_os = "ios", target_os = "android")))]
+    {
+        let stamp = if outcome.is_ok() {
+            std::time::Instant::now()
+        } else {
+            std::time::Instant::now()
+                .checked_sub(std::time::Duration::from_secs(DATAPLANE_SETTLE_SECS + 1))
+                .unwrap_or_else(std::time::Instant::now)
+        };
+        *state
+            .dataplane_started
+            .lock()
+            .expect("dataplane_started lock poisoned") = Some(stamp);
+    }
+    outcome
 }
 
 /// Tear down the data plane (stop the privileged daemon). Killing a root-owned
@@ -2277,11 +2415,10 @@ async fn get_dataplane_status() -> Result<DataplaneStatus, String> {
         age_secs: None,
         peers: vec![],
     };
-    // HOME on unix, USERPROFILE on Windows (unset HOME made this report the tunnel
-    // down on Windows even while the daemon was up). [T:agent_core::home_root]
-    let home = agent_core::home_root();
-    let path = std::path::Path::new(&home).join(".ankayma/agent-status.json");
-    let Ok(bytes) = std::fs::read(&path) else {
+    // One resolver for the snapshot location on every platform — on macOS the
+    // daemon now writes it under /Library/Ankayma, not ~/.ankayma (the daemon has
+    // no $HOME; docs/daemon-state-dir.md).
+    let Ok(bytes) = std::fs::read(status_snapshot_path()) else {
         return Ok(down());
     };
     #[derive(serde::Deserialize)]
@@ -2305,7 +2442,9 @@ async fn get_dataplane_status() -> Result<DataplaneStatus, String> {
         .unwrap_or(0);
     let age = now.saturating_sub(s.updated_at);
     Ok(DataplaneStatus {
-        running: age <= 15,
+        // 3× the 15s heartbeat — one missed tick must not flap "running" off
+        // (same threshold as current_connection / the F-5 path proof). [T:F-5]
+        running: age <= 45,
         pid: Some(s.pid),
         age_secs: Some(age),
         peers: s
@@ -2725,17 +2864,21 @@ fn build_tray_menu(
     use tauri::menu::{IsMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu};
 
     let conn = current_connection(state);
-    let connected = matches!(conn, ConnectionState::Connected { .. });
-    let status_text = match conn {
+    let status_text = match &conn {
         ConnectionState::Connected { .. } => "● Connected",
         ConnectionState::Connecting => "Connecting…",
         ConnectionState::Disconnected => "○ Disconnected",
+        ConnectionState::DataplaneDown { .. } => "⚠ Tunnel down",
     };
     let status = MenuItem::with_id(app, "status", status_text, false, None::<&str>)?;
     let toggle = MenuItem::with_id(
         app,
         "toggle",
-        if connected { "Disconnect" } else { "Connect" },
+        match &conn {
+            ConnectionState::Connected { .. } => "Disconnect",
+            ConnectionState::DataplaneDown { .. } => "Reconnect",
+            _ => "Connect",
+        },
         true,
         None::<&str>,
     )?;
@@ -2883,8 +3026,18 @@ fn handle_tray_menu(app: &AppHandle, event: tauri::menu::MenuEvent) {
                         log::warn!("tray disconnect: stop daemon failed: {e}");
                     }
                     disconnect_inner(&state);
-                } else if let Err(e) = connect_inner(&state).await {
-                    log::error!("tray connect failed: {e}");
+                } else {
+                    // Enroll AND bring the tunnel up — connect_inner alone only
+                    // talks to the control plane; without start_dataplane the UI
+                    // said Connected while no daemon ran.
+                    match connect_inner(&state).await {
+                        Ok(()) => {
+                            if let Err(e) = start_dataplane_inner(&state).await {
+                                log::error!("tray connect: start dataplane failed: {e}");
+                            }
+                        }
+                        Err(e) => log::error!("tray connect failed: {e}"),
+                    }
                 }
                 apply_connection_change(&app);
             });
@@ -3033,6 +3186,29 @@ pub fn run() {
                     .show_menu_on_left_click(true)
                     .on_menu_event(handle_tray_menu)
                     .build(&handle)?;
+            }
+
+            // Data-plane liveness watcher: the connection state can change with NO
+            // user action (daemon crash, kill, stale heartbeat), and nothing else
+            // re-emits it — the old UI stayed "Connected" for hours over a dead
+            // tunnel. Poll the derived state and broadcast only on transitions.
+            #[cfg(desktop)]
+            {
+                let handle = app.handle().clone();
+                std::thread::spawn(move || {
+                    let mut last: Option<String> = None;
+                    loop {
+                        std::thread::sleep(std::time::Duration::from_secs(5));
+                        let conn = current_connection(&handle.state::<AppState>());
+                        // Compare on the serialized form — cheap, and covers every
+                        // field without a PartialEq impl.
+                        let tag = serde_json::to_string(&conn).unwrap_or_default();
+                        if last.as_deref() != Some(&tag) {
+                            last = Some(tag);
+                            apply_connection_change(&handle);
+                        }
+                    }
+                });
             }
 
             // macOS: show the Dock icon (Regular) in addition to the menu-bar

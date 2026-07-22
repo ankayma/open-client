@@ -44,8 +44,7 @@ fn relay_http_port() -> u16 {
 }
 
 fn cert_dir(fqdn: &str) -> PathBuf {
-    let home = crate::up::home_root();
-    PathBuf::from(format!("{home}/.ankayma/certs")).join(fqdn)
+    PathBuf::from(crate::up::state_dir()).join("certs").join(fqdn)
 }
 fn key_path(fqdn: &str) -> PathBuf {
     cert_dir(fqdn).join("key.pem")
