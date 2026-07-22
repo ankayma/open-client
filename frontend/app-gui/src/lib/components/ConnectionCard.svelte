@@ -202,7 +202,7 @@
 
 	{#if isMobile && $connection.status === 'connected'}
 		<!-- Honest about the "reconnect to see new devices/services" model (Phase 1,
-		     f3-privdomain-ios-plan.md): the extension only reads peers/resolve once,
+		     F-3 private-DNS): the extension only reads peers/resolve once,
 		     at tunnel start — no live refresh while connected. -->
 		<p class="hint">Kết nối lại để thấy thiết bị/dịch vụ mới</p>
 	{/if}

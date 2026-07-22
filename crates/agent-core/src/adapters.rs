@@ -705,7 +705,7 @@ pub async fn invite_member(
 /// — the device-key re-auth that removes the 4h session wall (no second sign-in).
 /// NO Authorization header: the `machine_proof` IS the credential (PoP, non-bearer).
 /// `POST {base_url}/api/v1/session/refresh` → the fresh session token.
-/// [T:decision/session-reauth-device-key-2026-07-18 §3.1]
+/// [T:E-6 device-key re-auth + A.1.10]
 pub async fn session_refresh(
     http: &reqwest::Client,
     base_url: &str,

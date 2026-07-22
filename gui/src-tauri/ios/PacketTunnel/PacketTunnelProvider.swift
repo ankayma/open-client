@@ -191,7 +191,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         // keeps the device's normal resolver. The Rust pump (agent_core::dns,
         // wired in agent-ios-ptp's Config) answers matching queries itself from
         // `self_overlay_ip:53`; iOS has no split-DNS hook outside this setting,
-        // unlike macOS's scoped `/etc/resolver/<zone>`. `[T: f3-privdomain-ios-plan.md Phase 3]`
+        // unlike macOS's scoped `/etc/resolver/<zone>`. `[T: F-3 private-DNS]`
         if let zone = config.zone, !zone.isEmpty {
             // DNS server = the magic in-tunnel IPv4 address (routed above), NOT this
             // node's own overlay IP — iOS won't deliver a query to the interface's

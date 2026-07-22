@@ -167,7 +167,7 @@ fn forward_once(token: u64, query: &[u8], upstreams: &[SocketAddr], bound_if: u3
 // docs/f3-ios-dns-forwarding-resolver.md "on-device validation".)
 
 /// One private branded name the main app already resolved (`GET /api/v1/mesh/resolve`)
-/// and handed in alongside the tunnel config. `[T: f3-privdomain-ios-plan.md Phase 1]`
+/// and handed in alongside the tunnel config. `[T: F-3 private-DNS]`
 #[derive(Deserialize)]
 struct ResolveEntry {
     fqdn: String,

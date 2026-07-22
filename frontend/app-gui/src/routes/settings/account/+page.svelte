@@ -14,7 +14,7 @@
 
 	// Buy one +$9 admin add-on (Model B): a distinct add-on subscription the control plane
 	// maps to `admins_included += 1` (and member cap +1). Opens the LS checkout in the
-	// browser like any other plan. [T:pricing.md §2 Admin thêm]
+	// browser like any other plan. [T:plan model]
 	async function addAdminSeat() {
 		addingAdmin = true;
 		addonError = '';
@@ -30,10 +30,10 @@
 	// shipped build (was hard-coded to 0.1.0 and went stale). [T:tauri-api-app@2]
 	let appVersion = $state('');
 
-	// Upgrade ladder per Pricing SSOT (pricing.md §4 — cửa chuyển tier): every tier
+	// Upgrade ladder per the plan model (tier-change path): every tier
 	// below the top has a path up (F0→F0-Plus→F1 team→grow/add-admin). All route to
 	// /upgrade, the plan picker. Previously the banner only rendered for F0, so a paid
-	// F0-Plus user had no visible way to start a team. [T:pricing.md §4]
+	// F0-Plus user had no visible way to start a team. [T:plan model]
 	const UPGRADE: Record<string, { title: string; sub: string; cta: string }> = {
 		'F0': { title: 'Upgrade to F0-Plus', sub: '$9/mo · more nodes, private domains, raw TCP & step-up 2FA', cta: 'Upgrade' },
 		'F0-Plus': { title: 'Start a team — F1', sub: 'Invite people and keep your $9 seat — you become the admin', cta: 'See team plans' },

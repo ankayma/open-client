@@ -243,7 +243,7 @@ fn peer_by_source(peers: &Peers, src: SocketAddr) -> Option<Arc<PeerEntry>> {
 /// resolving them locally, so they arrive here as ordinary UDP packets). Optional —
 /// `None` on the macOS/Linux daemon, which answers via a separate loopback socket
 /// fed by `/etc/resolver/<zone>` and never sees DNS on the tun fd at all.
-/// `[T: f3-privdomain-ios-plan.md Phase 2]`
+/// `[T: F-3 private-DNS]`
 pub struct DnsResponder {
     /// This node's own overlay address — queries are addressed here, never a peer.
     pub self_ip: IpAddr,

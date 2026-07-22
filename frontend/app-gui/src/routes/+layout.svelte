@@ -78,7 +78,7 @@
 		// iOS/Android resume: the webview does NOT reliably fire `focus` when the app comes
 		// back from background (overnight). `visibilitychange` does — it's what triggers the
 		// device-key re-auth after the 4h session TTL lapses while suspended, instead of
-		// leaving every API call stuck on 401. [T:decision/session-reauth-device-key-2026-07-18]
+		// leaving every API call stuck on 401. [T:E-6 device-key re-auth + A.1.10]
 		document.addEventListener('visibilitychange', onVisibility);
 
 		// Apply saved theme and wire up persistence
