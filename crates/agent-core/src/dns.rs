@@ -11,7 +11,7 @@
 //!     which routes matching queries INTO the tunnel. Those queries arrive as
 //!     ordinary UDP packets on the tun fd, addressed at this node's own
 //!     overlay IP — `dns_query_payload`/`build_dns_reply` extract/frame them.
-//!     `[T: f3-privdomain-ios-plan.md Phase 2]`
+//!     `[T: F-3 private-DNS]`
 
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
@@ -155,7 +155,7 @@ pub fn build_servfail(query: &[u8]) -> Option<Vec<u8>> {
 /// query bytes). A query for our own overlay IP is never a real mesh peer, so
 /// the caller should intercept it here instead of routing it to a peer.
 /// Handles IPv4 (with IHL/options) and IPv6 (no extension headers — a plain
-/// resolver's outgoing query never has any). `[T: f3-privdomain-ios-plan.md]`
+/// resolver's outgoing query never has any). `[T: F-3 private-DNS]`
 pub fn dns_query_payload(packet: &[u8], self_ip: IpAddr) -> Option<&[u8]> {
     match (packet.first()? >> 4, self_ip) {
         (4, IpAddr::V4(self_v4)) => {

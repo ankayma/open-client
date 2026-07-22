@@ -77,7 +77,7 @@ pub struct VpnStatus {
 /// plus (best-effort) the tenant's F-3 resolve table so the extension can answer
 /// private names itself — iOS has no OS-level split-DNS hook, unlike the macOS/
 /// Linux daemon's `/etc/resolver/<zone>`. Shape matches `agent-ios-ptp`'s `Config`
-/// (private key + overlay + peers + zone + resolve). [T:A.1.1, f3-privdomain-ios-plan.md Phase 1]
+/// (private key + overlay + peers + zone + resolve). [T:A.1.1, F-3 private-DNS]
 ///
 /// The resolve table is fetched fresh on every `connect` (not cached) — the
 /// documented model is "reconnect to see new devices/services", matching how a

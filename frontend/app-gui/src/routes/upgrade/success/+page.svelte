@@ -5,7 +5,7 @@
 	import { trackEvent } from '$lib/tauri';
 
 	// Reflect the tier the webhook actually granted — the account may have landed on
-	// F0-Plus or on F1 Team, so read it live instead of assuming one plan. [T:pricing.md §1]
+	// F0-Plus or on F1 Team, so read it live instead of assuming one plan. [T:plan model]
 	let tier = $derived($auth.status === 'authenticated' ? $auth.user.tier : '');
 	let isTeam = $derived(tier === 'F1-Starter');
 	let planName = $derived(isTeam ? 'F1 Team' : tier === 'F0-Plus' ? 'F0-Plus' : tier || 'your new plan');

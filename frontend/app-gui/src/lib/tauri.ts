@@ -38,7 +38,7 @@ export async function checkAuthState(): Promise<AuthState> {
 // with a Retry that reuses the same stale token, transparently re-authenticate via the
 // device key (`check_auth_state` performs the device-key re-auth in Rust, incl. the
 // cold-start disk fallback) and retry the call ONCE. Self-heals regardless of whether the
-// webview fired a focus/visibility event. [T:decision/session-reauth-device-key-2026-07-18]
+// webview fired a focus/visibility event. [T:E-6 device-key re-auth + A.1.10]
 async function invokeWithReauth<T>(
   cmd: string,
   args?: Record<string, unknown>,

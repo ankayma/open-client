@@ -1,7 +1,7 @@
 //! resolver — agent-local private DNS for F-3 branded names (Part C §H.3.6.1).
 //! OPEN, intensity Standard. macOS-first (matches the data plane); iOS answers on
 //! the tun fd itself instead (`agent_core::pump::DnsResponder`, no OS split-DNS
-//! hook available there) — see `f3-privdomain-ios-plan.md`.
+//! hook available there) — see `F-3 private-DNS`.
 //!
 //! While the overlay is up, this answers `<label>.<tenant>.<zone>` → the target
 //! node's overlay address, from the control plane's mesh-resolve table — so a

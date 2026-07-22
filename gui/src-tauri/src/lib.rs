@@ -680,7 +680,7 @@ fn apply_connection_change(app: &AppHandle) {
 
 /// The stored session expired (4h). Instead of logging out, prove possession of this
 /// device's DURABLE machine key and re-mint a session — no second sign-in, no "4h
-/// wall" (E-6 device-key model; [T:decision/session-reauth-device-key-2026-07-18]).
+/// wall" (E-6 device-key model; [T:E-6 device-key re-auth + A.1.10]).
 /// Returns the refreshed user, or None if this device cannot re-auth: no enrolled node
 /// in memory (never connected this run), or the CP rejects the proof (device revoked /
 /// legacy). None → the caller does a real logout + disconnect.
@@ -689,7 +689,7 @@ async fn try_reauth_via_device_key(app: &AppHandle, state: &AppState) -> Option<
     // from the persisted handoff (agent.json). The disk fallback is what makes re-auth work
     // on a COLD START — after the app is killed and reopened, `state.node` is empty, but the
     // durable node_id + WG pubkey (and the machine key) are still on disk, so we re-mint a
-    // session with no second sign-in. [T:decision/session-reauth-device-key-2026-07-18 + A.1.10]
+    // session with no second sign-in. [T:E-6 device-key re-auth + A.1.10]
     let (node_id, wg_pubkey) = {
         let held = state.node.lock().ok().and_then(|n| {
             n.as_ref()
@@ -705,7 +705,7 @@ async fn try_reauth_via_device_key(app: &AppHandle, state: &AppState) -> Option<
     // session_refresh runs on — and mints the session INTO — the owner's REGIONAL CP
     // (regional_base_url). Validate + adopt it THERE, not the gateway (auth_base_url):
     // a regional (e.g. UAE) session lives only on its region's box, so checking it
-    // against the gateway would 401. [T:decision/session-reauth-device-key-2026-07-18 §5]
+    // against the gateway would 401. [T:E-6 device-key re-auth + A.1.10]
     let base = state.regional_base_url();
     let session = adapters::session_refresh(&state.http, &base, &node_id, &proof)
         .await
@@ -740,7 +740,7 @@ async fn check_auth_state(app: AppHandle, state: State<'_, AppState>) -> Result<
                 AuthState::Authenticated { user: s.into() }
             }
             // Session invalid/expired (4h). Try device-key re-auth before giving up —
-            // no second sign-in, no dropped tunnel. [T:decision/session-reauth-…-07-18]
+            // no second sign-in, no dropped tunnel. [T:E-6 device-key re-auth + A.1.10]
             Err(_) => match try_reauth_via_device_key(&app, state.inner()).await {
                 Some(user) => AuthState::Authenticated { user },
                 None => {
@@ -1363,7 +1363,7 @@ async fn get_server_enroll_command(
     // Build the server-enroll command from a SCOPED, single-use join token (E-3) —
     // NOT the session token. The caller mints it behind a step-up, exactly like the
     // device invite link, so this command never carries the user's full credential.
-    // The agent enrolls the server as AppServer itself. [T:P.3 + part-d-invite-flow §Authority]
+    // The agent enrolls the server as AppServer itself. [T:P.3 + invite-flow authority]
     if join_token.is_empty() {
         return Err("missing enrollment token".into());
     }
