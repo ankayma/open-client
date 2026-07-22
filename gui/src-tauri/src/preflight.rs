@@ -2,14 +2,14 @@
 //!
 //! Every platform needs some OS permission before the tunnel can come up, and each
 //! asks for it differently:
-//!   - macOS   : approve the `com.ankayma.helper` LaunchDaemon (System Settings >
-//!               General > Login Items & Extensions > App Background Activity).
-//!   - iOS     : allow the VPN configuration ("Ankayma would like to add VPN
-//!               Configurations"), via NETunnelProviderManager.saveToPreferences.
-//!   - Android : grant the VpnService consent dialog (VpnService.prepare).
-//!   - Windows : UAC elevation is per-connect and can't be pre-acquired; Linux
-//!               likewise. These report `ready = true` and show no gate — the
-//!               standard OS prompt still appears at connect, unchanged.
+//!   - macOS: approve the `com.ankayma.helper` LaunchDaemon (System Settings >
+//!     General > Login Items & Extensions > App Background Activity).
+//!   - iOS: allow the VPN configuration ("Ankayma would like to add VPN
+//!     Configurations"), via NETunnelProviderManager.saveToPreferences.
+//!   - Android: grant the VpnService consent dialog (VpnService.prepare).
+//!   - Windows: UAC elevation is per-connect and can't be pre-acquired; Linux
+//!     likewise. These report `ready = true` and show no gate — the standard OS
+//!     prompt still appears at connect, unchanged.
 //!
 //! The UI calls `preflight_status` right after sign-in and gates the Connect button
 //! on `ready`; if not ready it shows the onboarding card and calls `preflight_request`,
