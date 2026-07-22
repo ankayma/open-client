@@ -19,6 +19,17 @@ pub mod stun; // RFC 5389 endpoint discovery on the WG socket (G-2, NAT traversa
 pub mod tundev; // fd-level tun packet I/O (per-platform framing; macOS+iOS shared)
 pub mod tunnel; // WireGuard data-plane engine (boringtun)
 
+/// This crate's version, surfaced in user-triggered diagnostic bundles so a report
+/// can be pinned to an agent build.
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// A short random id (8 lowercase hex) the user quotes to support to locate their
+/// diagnostic report. Not a secret and not linked to identity — just a lookup handle.
+pub fn random_report_id() -> String {
+    let b: [u8; 4] = rand::random();
+    b.iter().map(|x| format!("{x:02x}")).collect()
+}
+
 // Node identity = a WireGuard keypair (Part B §B.1.1 `Node`). Surface the crypto
 // primitive through agent-core so entrypoints (cli/daemon/GUI) depend on the
 // lib, not on `crypto` directly (keeps the A.3.1 hexagonal seam). [T:A.3.1]

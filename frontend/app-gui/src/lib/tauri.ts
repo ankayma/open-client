@@ -112,6 +112,31 @@ export async function getDataplaneStatus(): Promise<DataplaneStatus> {
   return invoke<DataplaneStatus>("get_dataplane_status");
 }
 
+// User-triggered diagnostics (bug report). The bundle is connection-level
+// operational metadata only — never keys/tokens/payload. `diagnosticsBuild`
+// gathers it for the user to REVIEW; `diagnosticsSend` uploads exactly that,
+// only on the user's explicit consent, and returns a report id for support.
+export interface DiagnosticBundle {
+  report_id: string;
+  category: string;
+  code: string | null;
+  platform: string;
+  app_version: string;
+  agent_version: string;
+  connection_state: string;
+  status_snapshot: unknown | null;
+  agent_log_tail: string;
+  helper_log_tail: string;
+}
+
+export async function diagnosticsBuild(category?: string): Promise<DiagnosticBundle> {
+  return invoke<DiagnosticBundle>("diagnostics_build", { category });
+}
+
+export async function diagnosticsSend(): Promise<string> {
+  return invoke<string>("diagnostics_send");
+}
+
 // iOS VPN — enroll + bring up the Packet Tunnel via the Network Extension (the
 // data plane runs in-app on iOS, not a privileged daemon). On desktop these reject
 // ("iOS-only"); desktop uses startDataplane/the agent daemon instead.

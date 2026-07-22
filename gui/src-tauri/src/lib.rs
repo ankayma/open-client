@@ -85,6 +85,10 @@ struct AppState {
     /// Signed-in account email, surfaced in the tray menu. None when signed out.
     email: Mutex<Option<String>>,
     node: Mutex<Option<EnrolledNode>>,
+    /// The diagnostic bundle the user is previewing, cached so `diagnostics_send`
+    /// transmits EXACTLY what `diagnostics_build` showed — consent is per that exact
+    /// content. Cleared after a send. [T:A.1.1 operational metadata only]
+    pending_diagnostic: Mutex<Option<serde_json::Value>>,
     /// A deep-link token captured at COLD start (the app was launched by
     /// `ankayma://auth/callback?token=…`). The frontend isn't listening yet at that
     /// moment, so we hold it here and let the first `check_auth_state` drain it —
@@ -184,6 +188,7 @@ impl AppState {
             session: Mutex::new(session),
             email: Mutex::new(None),
             node: Mutex::new(None),
+            pending_diagnostic: Mutex::new(None),
             pending_token: Mutex::new(None),
             pending_join_team: Mutex::new(None),
             pending_join_node: Mutex::new(None),
@@ -357,13 +362,19 @@ impl From<domain::SessionInfo> for User {
 pub enum ConnectionState {
     Disconnected,
     Connecting,
-    Connected { node_id: String, endpoint: String },
+    Connected {
+        node_id: String,
+        endpoint: String,
+    },
     /// Enrolled, but the privileged daemon is not writing its status snapshot —
     /// the tunnel is NOT carrying traffic. Shown instead of a false "Connected"
     /// when the daemon died or never came up (the failure mode that had the GUI
     /// green while the data plane was dead). Desktop only; mobile reports the
     /// tunnel state through `vpn_status`.
-    DataplaneDown { node_id: String, endpoint: String },
+    DataplaneDown {
+        node_id: String,
+        endpoint: String,
+    },
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -1868,15 +1879,26 @@ mod helper_ipc {
         Stop {
             home: &'a str,
         },
+        /// Ask the root helper for the tail of the two daemon logs (user-triggered
+        /// diagnostics). Only the owning user (authorized by home-dir ownership) can
+        /// read their own agent's root-owned logs.
+        Readlogtail {
+            home: &'a str,
+        },
     }
 
-    #[derive(serde::Deserialize)]
+    #[derive(serde::Deserialize, Default)]
     struct Response {
         ok: bool,
         error: Option<String>,
+        #[serde(default)]
+        agent_log: Option<String>,
+        #[serde(default)]
+        helper_log: Option<String>,
     }
 
-    fn send(req: &Request) -> Result<(), String> {
+    /// Round-trip one request and return the parsed `Response` (log fields intact).
+    fn send_raw(req: &Request) -> Result<Response, String> {
         // First launch after ensure_registered() races launchd actually binding
         // the socket — retry briefly instead of failing the user's first click.
         let mut last_err = String::new();
@@ -1901,8 +1923,11 @@ mod helper_ipc {
         BufReader::new(&stream)
             .read_line(&mut line)
             .map_err(|e| format!("read helper: {e}"))?;
-        let resp: Response =
-            serde_json::from_str(line.trim()).map_err(|e| format!("bad helper response: {e}"))?;
+        serde_json::from_str(line.trim()).map_err(|e| format!("bad helper response: {e}"))
+    }
+
+    fn send(req: &Request) -> Result<(), String> {
+        let resp = send_raw(req)?;
         if resp.ok {
             Ok(())
         } else {
@@ -1910,6 +1935,21 @@ mod helper_ipc {
                 .error
                 .unwrap_or_else(|| "helper reported failure".into()))
         }
+    }
+
+    /// (agent.log tail, helper.log tail) from the root helper — for the diagnostics
+    /// bundle. Best-effort: the caller degrades gracefully if the helper is absent.
+    pub fn read_log_tail(home: &str) -> Result<(String, String), String> {
+        let resp = send_raw(&Request::Readlogtail { home })?;
+        if !resp.ok {
+            return Err(resp
+                .error
+                .unwrap_or_else(|| "helper reported failure".into()));
+        }
+        Ok((
+            resp.agent_log.unwrap_or_default(),
+            resp.helper_log.unwrap_or_default(),
+        ))
     }
 
     pub fn start(
@@ -1948,7 +1988,9 @@ fn bring_up_dataplane(
     // under /Library/Ankayma. Reading the caller's ~/.ankayma from the root daemon
     // never reliably worked (launchd strips $HOME) and is CWE-59 surface besides.
     let state_json = std::fs::read_to_string(
-        std::path::Path::new(&home).join(".ankayma").join("agent.json"),
+        std::path::Path::new(&home)
+            .join(".ankayma")
+            .join("agent.json"),
     )
     .map_err(|e| format!("read enrolled identity for the daemon handoff: {e}"))?;
     helper_ipc::start(
@@ -2020,9 +2062,10 @@ async fn start_dataplane_inner(state: &AppState) -> Result<(), String> {
     // thread::sleep); run it off the async runtime so it doesn't stall the
     // Tauri executor (audit 2026-07-02).
     let base_url = state.regional_base_url();
-    let outcome = tauri::async_runtime::spawn_blocking(move || bring_up_dataplane(&bin, &tok, &base_url))
-        .await
-        .map_err(|e| format!("dataplane task panicked: {e}"))?;
+    let outcome =
+        tauri::async_runtime::spawn_blocking(move || bring_up_dataplane(&bin, &tok, &base_url))
+            .await
+            .map_err(|e| format!("dataplane task panicked: {e}"))?;
     // Feed current_connection's settle window: success = daemon starting now
     // (grant it DATAPLANE_SETTLE_SECS to write the first snapshot); failure = an
     // already-expired stamp, so the state reads DataplaneDown immediately instead
@@ -2386,6 +2429,131 @@ async fn ssh_close(state: State<'_, AppState>, id: String) -> Result<(), String>
         let _ = inp.close().await;
     }
     Ok(())
+}
+
+// ── User-triggered diagnostics (bug report) ────────────────────────────────────
+// The user hits "Send diagnostics" on a Tunnel-down card; the client gathers
+// connection-level operational metadata (daemon log tails + status snapshot +
+// version/OS/connection state) — NEVER keys, tokens, or data-plane payload
+// [T:A.1.1] — shows it for review, and POSTs only on explicit per-send consent.
+// No background stream: the vendor stays off the data path (P.3 honest).
+
+/// A short error code distilled from the log tail — only a well-formed `(os error N)`
+/// becomes `oserrorN`, never free log text, so the code field can carry no PII.
+fn diag_error_code(agent_log: &str) -> Option<String> {
+    let line = agent_log
+        .lines()
+        .rev()
+        .find(|l| l.to_ascii_lowercase().contains("error"))?;
+    let i = line.find("os error ")?;
+    let n: String = line[i + 9..]
+        .chars()
+        .take_while(|c| c.is_ascii_digit())
+        .collect();
+    (!n.is_empty()).then(|| format!("oserror{n}"))
+}
+
+/// macOS reads the two root-owned daemon logs through the privileged helper; other
+/// desktops run the daemon as the user (no root logs to fetch here).
+fn diag_log_tails() -> (String, String) {
+    #[cfg(target_os = "macos")]
+    {
+        match helper_ipc::read_log_tail(&agent_core::home_root()) {
+            Ok(pair) => pair,
+            Err(e) => (format!("(log tail unavailable: {e})"), String::new()),
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        (String::new(), String::new())
+    }
+}
+
+fn build_diagnostic_bundle(
+    app: &tauri::AppHandle,
+    state: &AppState,
+    category: Option<String>,
+) -> serde_json::Value {
+    let conn_label = match current_connection(state) {
+        ConnectionState::Connected { .. } => "connected",
+        ConnectionState::Connecting => "connecting",
+        ConnectionState::DataplaneDown { .. } => "dataplane_down",
+        ConnectionState::Disconnected => "disconnected",
+    };
+    let category = category
+        .filter(|c| {
+            [
+                "daemon-start",
+                "daemon-crash",
+                "handshake",
+                "dns",
+                "relay",
+                "other",
+            ]
+            .contains(&c.as_str())
+        })
+        .unwrap_or_else(|| "other".to_string());
+    let (agent_log, helper_log) = diag_log_tails();
+    let snapshot = std::fs::read(status_snapshot_path())
+        .ok()
+        .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok());
+    serde_json::json!({
+        "report_id": agent_core::random_report_id(),
+        "category": category,
+        "code": diag_error_code(&agent_log),
+        "platform": format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH),
+        "app_version": app.package_info().version.to_string(),
+        "agent_version": agent_core::VERSION,
+        "connection_state": conn_label,
+        "status_snapshot": snapshot,
+        "agent_log_tail": agent_log,
+        "helper_log_tail": helper_log,
+    })
+}
+
+/// Build the diagnostic bundle for the user to REVIEW (does not send). Cached so the
+/// subsequent `diagnostics_send` transmits exactly what was shown — consent is per
+/// that exact content.
+#[tauri::command]
+async fn diagnostics_build(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    category: Option<String>,
+) -> Result<serde_json::Value, String> {
+    let bundle = build_diagnostic_bundle(&app, &state, category);
+    *state
+        .pending_diagnostic
+        .lock()
+        .expect("pending_diagnostic lock poisoned") = Some(bundle.clone());
+    Ok(bundle)
+}
+
+/// Send the previewed bundle after the user consents. Session-authed; no retry loop
+/// (offline/failure surfaces to the user — nothing runs in the background). Returns
+/// the report id the user quotes to support.
+#[tauri::command]
+async fn diagnostics_send(state: State<'_, AppState>) -> Result<String, String> {
+    let bundle = state
+        .pending_diagnostic
+        .lock()
+        .expect("pending_diagnostic lock poisoned")
+        .clone()
+        .ok_or("build the diagnostic report first")?;
+    let token = state.token().ok_or("sign in to send diagnostics")?;
+    let base = state.regional_base_url();
+    let report_id = agent_core::adapters::post_diagnostics(&state.http, &base, &token, &bundle)
+        .await
+        .map_err(|e| match e {
+            agent_core::adapters::ApiError::Status(429) => {
+                "you've sent several reports recently — please try again later".to_string()
+            }
+            other => other.to_string(),
+        })?;
+    *state
+        .pending_diagnostic
+        .lock()
+        .expect("pending_diagnostic lock poisoned") = None;
+    Ok(report_id)
 }
 
 #[derive(serde::Serialize)]
@@ -3292,6 +3460,8 @@ pub fn run() {
             ssh_resize,
             ssh_close,
             get_dataplane_status,
+            diagnostics_build,
+            diagnostics_send,
             track_event,
             open_billing_checkout,
             list_subdomains,

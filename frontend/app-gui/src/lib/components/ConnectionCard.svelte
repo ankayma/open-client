@@ -1,6 +1,8 @@
 <script lang="ts">
 	import { onMount, onDestroy } from 'svelte';
-	import { connection } from '$lib/stores';
+	import { connection, activeLang } from '$lib/stores';
+	import { STRINGS, type Lang } from '$lib/i18n';
+	import DiagnosticsDialog from './DiagnosticsDialog.svelte';
 	import type { ConnectionState } from '$lib/types';
 	import {
 		connect,
@@ -20,6 +22,12 @@
 	} from '$lib/tauri';
 	import type { PathProof } from '$lib/types';
 	import PreflightGate from './PreflightGate.svelte';
+
+	let lang = $state<Lang>('vn');
+	activeLang.subscribe((l) => (lang = l));
+	// The "Send diagnostics" review dialog — offered when the daemon died so the user
+	// can send a bug report on the very failure they're looking at. [T:A.1.1]
+	let showDiag = $state(false);
 
 	let toggling = $state(false);
 	let connectError = $state<string | null>(null);
@@ -209,6 +217,9 @@
 		{#if $connection.status !== 'connected'}
 			<span class="hint">{$connection.status === 'connecting' ? 'Connecting…' : $connection.status === 'dataplane_down' ? 'The tunnel service stopped — tap to reconnect' : 'Tap to connect'}</span>
 		{/if}
+		{#if $connection.status === 'dataplane_down'}
+			<button class="diag-btn" onclick={() => (showDiag = true)}>🩺 {STRINGS[lang].diag_send}</button>
+		{/if}
 	{/if}
 
 	<div class="kv">
@@ -243,6 +254,10 @@
 		<p class="hint">Kết nối lại để thấy thiết bị/dịch vụ mới</p>
 	{/if}
 </section>
+
+{#if showDiag}
+	<DiagnosticsDialog category="daemon-crash" onclose={() => (showDiag = false)} />
+{/if}
 
 <style>
 	.card {
@@ -322,6 +337,21 @@
 		font-size: 13px;
 		color: var(--c-text-dim);
 		margin-top: -4px;
+	}
+	.diag-btn {
+		margin-top: 4px;
+		padding: 8px 14px;
+		border-radius: 8px;
+		border: 1px solid var(--c-border);
+		background: var(--c-bg);
+		color: var(--c-text-dim);
+		font-size: 12px;
+		font-weight: 600;
+		cursor: pointer;
+	}
+	.diag-btn:hover {
+		border-color: var(--c-accent);
+		color: var(--c-accent);
 	}
 	.kv {
 		display: flex;

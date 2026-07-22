@@ -76,13 +76,26 @@ mod imp {
         Stop {
             home: String,
         },
+        /// Return the tail of the two ROOT-OWNED daemon logs so the owning user can
+        /// build a diagnostic bundle (user-triggered bug report). The caller never
+        /// supplies a path — only the two fixed files under LOG_DIR are ever read,
+        /// so this can't be turned into an arbitrary-file-read-as-root primitive.
+        Readlogtail {
+            home: String,
+        },
     }
 
-    #[derive(Serialize)]
+    #[derive(Serialize, Default)]
     struct Response {
         ok: bool,
         #[serde(skip_serializing_if = "Option::is_none")]
         error: Option<String>,
+        /// Tail of `/var/log/ankayma/agent.log` — set only by `Readlogtail`.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        agent_log: Option<String>,
+        /// Tail of `/var/log/ankayma/helper.log` — set only by `Readlogtail`.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        helper_log: Option<String>,
     }
 
     pub fn run() {
@@ -120,6 +133,7 @@ mod imp {
             Err(e) => Response {
                 ok: false,
                 error: Some(format!("bad request: {e}")),
+                ..Default::default()
             },
         };
         let out = serde_json::to_string(&resp).unwrap_or_else(|_| "{\"ok\":false}".into());
@@ -130,11 +144,22 @@ mod imp {
         let home = match &req {
             Request::Start { home, .. } => home.clone(),
             Request::Stop { home } => home.clone(),
+            Request::Readlogtail { home } => home.clone(),
         };
         if let Err(e) = authorize(&home, peer_uid) {
             return Response {
                 ok: false,
                 error: Some(e),
+                ..Default::default()
+            };
+        }
+        // ReadLogTail returns data, not a unit outcome — handle it separately.
+        if let Request::Readlogtail { .. } = req {
+            return Response {
+                ok: true,
+                agent_log: Some(read_log_tail(AGENT_LOG_PATH)),
+                helper_log: Some(read_log_tail(LOG_PATH)),
+                ..Default::default()
             };
         }
         let outcome = match req {
@@ -146,17 +171,39 @@ mod imp {
                 ..
             } => start_agent(&agent_bin, &token, &control_plane, state_json.as_deref()),
             Request::Stop { home } => stop_agent(&home),
+            Request::Readlogtail { .. } => unreachable!("handled above"),
         };
         match outcome {
             Ok(()) => Response {
                 ok: true,
                 error: None,
+                ..Default::default()
             },
             Err(e) => Response {
                 ok: false,
                 error: Some(e),
+                ..Default::default()
             },
         }
+    }
+
+    /// Last `LOG_TAIL_LINES` lines of a FIXED root-owned log (never a caller path).
+    /// O_NOFOLLOW so a planted symlink can't redirect the read; a missing/unreadable
+    /// file yields a short marker, never an error (a bug report is best-effort).
+    fn read_log_tail(path: &str) -> String {
+        const LOG_TAIL_LINES: usize = 200;
+        use std::os::unix::fs::OpenOptionsExt;
+        let file = match fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(path)
+        {
+            Ok(f) => f,
+            Err(e) => return format!("(no {path}: {e})"),
+        };
+        let lines: Vec<String> = BufReader::new(file).lines().map_while(Result::ok).collect();
+        let start = lines.len().saturating_sub(LOG_TAIL_LINES);
+        lines[start..].join("\n")
     }
 
     /// A caller may only act on the home directory it actually owns — stops a
