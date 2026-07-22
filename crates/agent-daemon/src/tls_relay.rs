@@ -44,7 +44,9 @@ fn relay_http_port() -> u16 {
 }
 
 fn cert_dir(fqdn: &str) -> PathBuf {
-    PathBuf::from(crate::up::state_dir()).join("certs").join(fqdn)
+    PathBuf::from(crate::up::state_dir())
+        .join("certs")
+        .join(fqdn)
 }
 fn key_path(fqdn: &str) -> PathBuf {
     cert_dir(fqdn).join("key.pem")
