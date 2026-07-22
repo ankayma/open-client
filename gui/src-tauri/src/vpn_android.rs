@@ -57,6 +57,14 @@ struct Config {
     /// the Android forward hook uses the first). [T:F-3]
     #[serde(default)]
     upstream_dns: Vec<String>,
+    /// This PL's relay endpoint (`host:port`) when the app fetched a fleet map. Absent →
+    /// direct-only (unchanged). `build_config` (shared with iOS) already populates it. [T:D-T1]
+    #[serde(default)]
+    relay_endpoint: Option<String>,
+    /// Node service token authenticating the relay ClientHello (the relay re-verifies
+    /// membership with the CP, fail-closed A.1.6). Only present when `relay_endpoint` is. [T:D-T1]
+    #[serde(default)]
+    service_token: Option<String>,
 }
 
 /// Forward a raw DNS query via Kotlin AnkaymaVpnService.forwardDns().
@@ -242,6 +250,23 @@ fn protected_connect(host: &str, port: u16) -> std::io::Result<std::net::TcpStre
     Ok(sock.into())
 }
 
+/// Connect override for the relay TCP leg (fits `relay_transport::set_connect_hook`): dial
+/// `host:port` on a socket bound to the underlying non-VPN network, so the relay leg doesn't
+/// loop through our own full-tunnel VPN and get black-holed. Reuses `protected_connect` — the
+/// same bypass the control-plane proxy uses, and the mechanism Tailscale/Firezone use on
+/// Android. Runs on every dial (incl. the G-7 supervisor's reconnects), re-binding each fresh
+/// fd on a roam. `[T:F-3 bindSocket pattern + research 2026-07-21]`
+fn relay_connect(addr: &str) -> std::io::Result<std::net::TcpStream> {
+    let inv = |m: &str| std::io::Error::new(std::io::ErrorKind::InvalidInput, m.to_string());
+    // Relay endpoints are host:port (IPv4/hostname from the CP `relays` table). rsplit on the
+    // last ':' so a hostname with no colon is rejected rather than mis-split.
+    let (host, port) = addr
+        .rsplit_once(':')
+        .ok_or_else(|| inv("relay addr missing port"))?;
+    let port: u16 = port.parse().map_err(|_| inv("relay addr bad port"))?;
+    protected_connect(host, port)
+}
+
 fn start_tunnel(
     env: &mut JNIEnv,
     service: &JObject,
@@ -365,11 +390,43 @@ fn start_tunnel(
     // spawn_tx/spawn_rx take a unified TunHandle now (was a raw fd); wrap the
     // Android VpnService descriptor. tun_fd is i32 (Copy) so it stays usable after.
     // `[T:agent_core::tundev::TunHandle::Fd]`
-    // relay = None on this mobile path: NAT-fallback relay not activated here yet
-    // (Decision D-T1) — direct-UDP only until the control plane distributes a relay
-    // endpoint. `[T:D-T1]`
     let tun = agent_core::tundev::TunHandle::Fd(tun_fd);
-    pump::spawn_tx(tun.clone(), udp.clone(), peers.clone(), None, dns);
+
+    // Relay fallback (Decision D-T1, "Tailscale-lite"): when the config carried a relay
+    // endpoint + node service token, keep a relay leg up so peers with no dialable endpoint
+    // (the common mobile↔NAT case) stay reachable — `send_ciphertext` routes to the relay
+    // exactly when a peer has no direct endpoint. On Android the leg's TCP socket would
+    // otherwise loop through our own full-tunnel VPN, so register the connect override BEFORE
+    // dialing (it re-binds on every G-7 reconnect too). Absent/unreachable → None → direct
+    // only, unchanged. [T:A.1.1 relay-block + §D.9.3]
+    agent_core::relay_transport::set_connect_hook(relay_connect);
+    let relay: Option<Arc<agent_core::relay_transport::RelayClient>> =
+        match (cfg.relay_endpoint.as_deref(), cfg.service_token.as_deref()) {
+            (Some(endpoint), Some(token)) => {
+                let my_pubkey = agent_core::tunnel::PublicKey::from(&static_private).to_bytes();
+                match agent_core::relay_transport::RelayClient::connect(
+                    endpoint,
+                    my_pubkey,
+                    token.as_bytes().to_vec(),
+                ) {
+                    Ok((client, inbound)) => {
+                        let client = Arc::new(client);
+                        pump::spawn_relay_rx(tun.clone(), client.clone(), inbound, peers.clone());
+                        log::info!("relay leg up via {endpoint}");
+                        Some(client)
+                    }
+                    // Fail-open to direct-only: an unreachable relay must not block the data
+                    // plane (A.1.6 fail-closed is the relay's own contract, not ours).
+                    Err(e) => {
+                        log::warn!("relay unreachable, direct-only: {e}");
+                        None
+                    }
+                }
+            }
+            _ => None,
+        };
+
+    pump::spawn_tx(tun.clone(), udp.clone(), peers.clone(), relay.clone(), dns);
     pump::spawn_rx(tun, udp.clone(), peers.clone());
     pump::spawn_timers(
         udp.clone(),
@@ -378,6 +435,35 @@ fn start_tunnel(
         index.clone(),
         None,
     );
+
+    // [G-2/G-3] STUN discovery + relay-carried hole-punch rendezvous — the SAME agent-core
+    // driver desktop + iOS use. STUN rides the (protected) WG socket; rendezvous rides the
+    // relay leg. Runs in-process here; the foreground Service keeps it resident.
+    // TODO[A]: keepalive/endpoint-refresh timers use std `Instant` (CLOCK_MONOTONIC), which
+    // FREEZES during Doze/suspend → a NAT mapping can lapse while asleep and the direct path
+    // dies until the next wake. Verify on device; the documented fix is a CLOCK_BOOTTIME timer
+    // source (research 2026-07-21, wireguard-android's boottime-over-monotonic patch). A
+    // ConnectivityManager NetworkCallback to re-run discovery on a link change is a follow-up
+    // — the relay leg itself already self-heals via the G-7 supervisor + connect override.
+    if let (Some(client), Some(endpoint)) = (relay.clone(), cfg.relay_endpoint.as_deref()) {
+        if let Some(stun_addr) = agent_core::disco::stun_addr_for(endpoint) {
+            let reflexive: agent_core::disco::Reflexive = Arc::new(Mutex::new(None));
+            // STUN endpoint discovery on the WG socket.
+            let (stun_tx, stun_rx) = std::sync::mpsc::channel();
+            pump::set_stun_sink(stun_tx);
+            let (udp_d, refl_d) = (udp.clone(), reflexive.clone());
+            std::thread::spawn(move || {
+                agent_core::disco::run_discovery(udp_d, stun_addr, stun_rx, refl_d);
+            });
+            // Rendezvous + hole-punch, carried over the relay leg above.
+            let (rzv_tx, rzv_rx) = std::sync::mpsc::channel();
+            pump::set_rendezvous_sink(rzv_tx);
+            let (peers_r, udp_r) = (peers.clone(), udp.clone());
+            std::thread::spawn(move || {
+                agent_core::disco::run_rendezvous(client, peers_r, udp_r, reflexive, rzv_rx);
+            });
+        }
+    }
 
     Ok(Box::new(VpnHandle {
         _udp: udp,

@@ -36,6 +36,25 @@ const READ_TIMEOUT: Duration = Duration::from_secs(20);
 const BACKOFF_MIN: Duration = Duration::from_millis(500);
 const BACKOFF_MAX: Duration = Duration::from_secs(30);
 
+/// Optional connect override for the relay TCP leg. On a full-tunnel platform (Android:
+/// VpnService routes 0.0.0.0/0 + ::/0) a plain socket to the relay would loop back into our
+/// OWN VPN and be black-holed, so the platform must create the socket, bind it to the
+/// underlying non-VPN network, THEN connect. Android installs a hook that does exactly that
+/// (the per-socket bypass Tailscale's `netns_android` `controlC` and Firezone's
+/// `protected_tcp_socket_factory` both use). It runs on EVERY dial, so the supervisor's
+/// reconnects re-bind the fresh socket too — the bypass is one-shot per fd, not sticky
+/// across a WiFi↔cellular roam. Unset (desktop/iOS, whose tunnels install no default route
+/// so the relay egresses unpinned) → plain `TcpStream::connect`.
+/// `[T:research Firezone protected_tcp_socket_factory / Tailscale netns_android.go 2026-07-21]`
+static CONNECT_HOOK: std::sync::OnceLock<fn(&str) -> io::Result<TcpStream>> =
+    std::sync::OnceLock::new();
+
+/// Install the relay connect override (see `CONNECT_HOOK`). Idempotent; set once at startup
+/// before the first `RelayClient::connect`.
+pub fn set_connect_hook(f: fn(&str) -> io::Result<TcpStream>) {
+    let _ = CONNECT_HOOK.set(f);
+}
+
 /// One inbound ciphertext delivery from the relay: `src` is the peer's WireGuard
 /// public key (a precise sender identity — better than the UDP path's IP guess),
 /// `payload` is the opaque WireGuard ciphertext to feed into `Tunn::decapsulate`.
@@ -123,7 +142,12 @@ impl RelayClient {
 /// buffered reader with a read timeout set (so an idle-but-dead leg is probed, not
 /// blocked on forever). A refused hello is fail-closed (`PermissionDenied`).
 fn dial(addr: &str, pubkey: Key, auth: &[u8]) -> io::Result<(TcpStream, BufReader<TcpStream>)> {
-    let stream = TcpStream::connect(addr)?;
+    // Full-tunnel platforms register a connect override that binds the socket off the VPN
+    // before connecting (see CONNECT_HOOK); everyone else dials directly.
+    let stream = match CONNECT_HOOK.get() {
+        Some(connect) => connect(addr)?,
+        None => TcpStream::connect(addr)?,
+    };
     stream.set_nodelay(true).ok();
     let read_half = stream.try_clone()?;
     read_half.set_read_timeout(Some(READ_TIMEOUT)).ok();
