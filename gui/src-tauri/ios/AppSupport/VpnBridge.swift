@@ -74,3 +74,24 @@ public func ankayma_vpn_status() -> Int32 {
 public func ankayma_vpn_prime() {
     TunnelManager.shared.primeStatus()
 }
+
+/// Pre-flight: 1 if the VPN configuration is already installed (the user allowed the
+/// "add VPN Configurations" dialog), else 0. Reads the cached flag primeStatus /
+/// installConfiguration keep current, so the Rust side can poll it synchronously.
+@_cdecl("ankayma_vpn_has_config")
+public func ankayma_vpn_has_config() -> Int32 {
+    return TunnelManager.shared.cachedHasConfig ? 1 : 0
+}
+
+/// Pre-flight: install the VPN configuration now (bind + saveToPreferences, WITHOUT
+/// starting the tunnel), firing the iOS permission dialog at onboarding instead of at
+/// the first connect. Fire-and-forget; readiness surfaces via ankayma_vpn_has_config.
+@_cdecl("ankayma_vpn_install_config")
+public func ankayma_vpn_install_config() -> Int32 {
+    TunnelManager.shared.installConfiguration { error in
+        if let error = error {
+            NSLog("ankayma_vpn_install_config failed: \(error.localizedDescription)")
+        }
+    }
+    return 0
+}

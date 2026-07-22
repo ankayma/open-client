@@ -28,6 +28,12 @@ import NetworkExtension
     @objc private(set) var cachedStatusCode: Int32 = 0
     private var statusObserver: NSObjectProtocol?
 
+    /// Whether a tunnel configuration is installed in the system VPN preferences — i.e.
+    /// the user has allowed the "add VPN Configurations" dialog at least once. Kept
+    /// current by `primeStatus` (app launch) and `installConfiguration` (pre-flight) so
+    /// the sync C bridge (`ankayma_vpn_has_config`) can read it without an async load.
+    @objc private(set) var cachedHasConfig: Bool = false
+
     /// Observe the manager's connection so `cachedStatusCode` tracks reality. Idempotent.
     private func beginMonitoring(_ manager: NETunnelProviderManager) {
         cachedStatusCode = Int32(manager.connection.status.rawValue)
@@ -43,7 +49,26 @@ import NetworkExtension
     /// app launch so the UI shows the real state before the user taps connect.
     @objc func primeStatus() {
         NETunnelProviderManager.loadAllFromPreferences { [weak self] managers, _ in
+            self?.cachedHasConfig = (managers?.isEmpty == false)
             if let manager = managers?.first { self?.beginMonitoring(manager) }
+        }
+    }
+
+    /// Pre-flight install: create + save the tunnel manager bound to our extension
+    /// WITHOUT starting it, so the "add VPN Configurations" permission dialog fires at
+    /// onboarding. The real resolved config (keys + peers) is written later, at
+    /// `connect()`. Once saved, `cachedHasConfig` flips true and the onboarding card
+    /// (which polls `ankayma_vpn_has_config`) advances. [T:A.1.9 preflight]
+    @objc func installConfiguration(completion: @escaping (Error?) -> Void) {
+        loadOrCreateManager { [weak self] result in
+            switch result {
+            case .failure(let error):
+                completion(error)
+            case .success(let manager):
+                self?.cachedHasConfig = true
+                self?.beginMonitoring(manager)
+                completion(nil)
+            }
         }
     }
 

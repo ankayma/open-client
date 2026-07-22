@@ -41,6 +41,17 @@ export const STRINGS: Record<Lang, Record<string, string>> = {
     title_users:    'Người dùng & Vai trò',
     title_settings: 'Cài đặt',
     title_invite:   'Mời người dùng',
+
+    // pre-flight permission gate (shown once after sign-in, before first Connect)
+    pf_intro:         'Sắp xong',
+    pf_helper_title:  'Còn một bước thiết lập',
+    pf_helper_body:   'Ankayma cần một tiến trình nền để chạy đường hầm bảo mật. Bật “Ankayma” trong System Settings → General → Login Items & Extensions → App Background Activity là xong.',
+    pf_vpn_title:     'Còn một bước thiết lập',
+    pf_vpn_body:      'Ankayma cần quyền thêm cấu hình VPN cho đường hầm bảo mật. Chọn “Cho phép” khi thiết bị hỏi.',
+    pf_action_helper: 'Mở System Settings',
+    pf_action_vpn:    'Cho phép VPN',
+    pf_waiting:       'Đang chờ bạn phê duyệt…',
+    pf_ready:         'Xong — có thể kết nối',
   },
 
   en: {
@@ -83,6 +94,17 @@ export const STRINGS: Record<Lang, Record<string, string>> = {
     title_users:    'Users & Roles',
     title_settings: 'Settings',
     title_invite:   'Invite User',
+
+    // pre-flight permission gate (shown once after sign-in, before first Connect)
+    pf_intro:         'Almost there',
+    pf_helper_title:  'One quick setup step',
+    pf_helper_body:   'Ankayma needs a background helper to run your secure tunnel. Turn on “Ankayma” under System Settings → General → Login Items & Extensions → App Background Activity, and you’re set.',
+    pf_vpn_title:     'One quick setup step',
+    pf_vpn_body:      'Ankayma needs permission to add a VPN configuration for your secure tunnel. Tap “Allow” when your device asks.',
+    pf_action_helper: 'Open System Settings',
+    pf_action_vpn:    'Allow VPN access',
+    pf_waiting:       'Waiting for your approval…',
+    pf_ready:         'All set — you can connect now',
   },
 };
 

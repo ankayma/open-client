@@ -661,6 +661,68 @@ pub fn open_url(url: &str) -> Result<(), String> {
     })
 }
 
+/// Pre-flight: has the user granted the Android VPN consent? `VpnService.prepare`
+/// returns null once the consent has been granted for this app, or an Intent while
+/// it still needs granting. Read-only — safe to poll from the UI. Returns false if
+/// the JVM/context isn't ready yet (treated as "not granted", so the card shows).
+/// [T:A.1.9 preflight]
+pub fn vpn_permission_ready() -> bool {
+    with_jni(|env, ctx| {
+        // VpnService.prepare(Context) is a static method.
+        let intent = env
+            .call_static_method(
+                "android/net/VpnService",
+                "prepare",
+                "(Landroid/content/Context;)Landroid/content/Intent;",
+                &[JValue::Object(ctx.as_obj())],
+            )
+            .map_err(|e| format!("VpnService.prepare: {e}"))?
+            .l()
+            .map_err(|e| format!("prepare intent: {e}"))?;
+        Ok(intent.is_null())
+    })
+    .unwrap_or(false)
+}
+
+/// Pre-flight: launch the Android VPN consent dialog so the user grants it at
+/// onboarding instead of at the first connect. No-op if already granted. Started
+/// from the app context with FLAG_ACTIVITY_NEW_TASK (like `open_url`) — we detect
+/// the result by polling `vpn_permission_ready`, not via onActivityResult, so no
+/// Activity reference is needed. [T:A.1.9 preflight]
+pub fn request_vpn_permission() -> Result<(), String> {
+    with_jni(|env, ctx| {
+        let intent = env
+            .call_static_method(
+                "android/net/VpnService",
+                "prepare",
+                "(Landroid/content/Context;)Landroid/content/Intent;",
+                &[JValue::Object(ctx.as_obj())],
+            )
+            .map_err(|e| format!("VpnService.prepare: {e}"))?
+            .l()
+            .map_err(|e| format!("prepare intent: {e}"))?;
+        if intent.is_null() {
+            return Ok(()); // already granted
+        }
+        // intent.addFlags(FLAG_ACTIVITY_NEW_TASK) — required from a non-Activity context.
+        env.call_method(
+            &intent,
+            "addFlags",
+            "(I)Landroid/content/Intent;",
+            &[JValue::Int(0x10000000)],
+        )
+        .map_err(|e| format!("addFlags: {e}"))?;
+        env.call_method(
+            ctx.as_obj(),
+            "startActivity",
+            "(Landroid/content/Intent;)V",
+            &[JValue::Object(&intent)],
+        )
+        .map_err(|e| format!("startActivity: {e}"))?;
+        Ok(())
+    })
+}
+
 /// Stop AnkaymaVpnService by sending it the STOP action.
 pub fn stop_service() -> Result<(), String> {
     with_jni(|env, ctx| {

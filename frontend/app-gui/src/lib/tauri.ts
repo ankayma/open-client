@@ -134,6 +134,26 @@ export async function vpnStatus(): Promise<VpnStatus> {
   return invoke<VpnStatus>("vpn_status");
 }
 
+// Unified cross-platform pre-flight permission gate. Every platform needs an OS
+// permission before the tunnel can start (macOS: helper daemon; iOS/Android: VPN
+// consent). `preflightStatus` reports whether it's already granted — poll it and
+// gate the Connect button on `ready`; `preflightRequest` asks for it at onboarding
+// so the prompt happens at setup, not as a Connect-time error. Windows/Linux have
+// no pre-acquirable permission and always report ready (kind: "none"). [T:A.1.7/A.1.9]
+export interface PreflightStatus {
+  ready: boolean;
+  kind: "helper" | "vpn" | "none";
+  platform: string; // "macos" | "ios" | "android" | "windows" | "linux"
+}
+
+export async function preflightStatus(): Promise<PreflightStatus> {
+  return invoke<PreflightStatus>("preflight_status");
+}
+
+export async function preflightRequest(): Promise<void> {
+  return invoke("preflight_request");
+}
+
 // Target OS ("ios" | "macos" | "linux" | "windows"). Used to pick the connect path:
 // iOS brings the tunnel up in-app (Packet Tunnel), desktop uses the agent daemon.
 export async function getPlatform(): Promise<string> {

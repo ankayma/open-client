@@ -15,9 +15,11 @@
 		vpnDisconnect,
 		vpnStatus,
 		getPlatform,
-		getNodeInfo
+		getNodeInfo,
+		preflightStatus
 	} from '$lib/tauri';
 	import type { PathProof } from '$lib/types';
+	import PreflightGate from './PreflightGate.svelte';
 
 	let toggling = $state(false);
 	let connectError = $state<string | null>(null);
@@ -35,6 +37,26 @@
 	// iOS runs the data plane in-app (Packet Tunnel extension); desktop hands off to
 	// the privileged daemon. The connect toggle picks the path from this. [T:A.1.9]
 	let isMobile = $state(false);
+
+	// Pre-flight permission gate. Every platform needs an OS permission before the
+	// tunnel can start (macOS helper daemon, iOS/Android VPN consent). When it isn't
+	// granted yet we show the onboarding card IN PLACE OF the power button, so the
+	// permission is handled at setup instead of surfacing as a Connect-time error.
+	// `null` = still checking (or dev/browser) → don't block. Windows/Linux report
+	// ready = true (no pre-acquirable permission). [T:A.1.7 helper, A.1.9 vpn]
+	let preflightReady = $state<boolean | null>(null);
+	let preflightKind = $state<'helper' | 'vpn'>('helper');
+
+	async function checkPreflight() {
+		try {
+			const s = await preflightStatus();
+			preflightReady = s.ready;
+			preflightKind = s.kind === 'vpn' ? 'vpn' : 'helper';
+		} catch {
+			// Tauri unavailable (browser dev) or unsupported — never block the button.
+			preflightReady = true;
+		}
+	}
 
 	async function refreshDataplane() {
 		try {
@@ -75,6 +97,7 @@
 			.then((os) => { isMobile = os === 'ios' || os === 'android'; refreshDataplane(); })
 			.catch(() => (isMobile = false));
 		refreshDataplane();
+		checkPreflight();
 		dpTimer = setInterval(refreshDataplane, 4000);
 		getNodeInfo().then((n) => (hostname = n.hostname)).catch(() => {});
 	});
@@ -160,19 +183,25 @@
 		</span>
 	</div>
 
-	<button
-		class="toggle-btn"
-		class:active={$connection.status === 'connected'}
-		onclick={toggleConnection}
-		disabled={toggling || $connection.status === 'connecting'}
-		aria-label={$connection.status === 'connected' ? 'Disconnect' : 'Connect'}
-	>
-		<svg width="32" height="32" viewBox="0 0 24 24" fill="currentColor">
-			<path d="M13 3h-2v10h2V3zm4.83 2.17l-1.42 1.42A6.92 6.92 0 0119 12c0 3.87-3.13 7-7 7A7 7 0 015 12c0-1.68.59-3.22 1.58-4.42L5.17 6.17A8.932 8.932 0 003 12c0 4.97 4.03 9 9 9s9-4.03 9-9c0-2.74-1.23-5.18-3.17-6.83z"/>
-		</svg>
-	</button>
-	{#if $connection.status !== 'connected'}
-		<span class="hint">{$connection.status === 'connecting' ? 'Connecting…' : 'Tap to connect'}</span>
+	{#if preflightReady === false && $connection.status !== 'connected'}
+		<!-- OS permission not granted yet — guide the user through it here, before the
+		     Connect button ever appears, so it can't surface as a Connect error. -->
+		<PreflightGate kind={preflightKind} onready={() => (preflightReady = true)} />
+	{:else}
+		<button
+			class="toggle-btn"
+			class:active={$connection.status === 'connected'}
+			onclick={toggleConnection}
+			disabled={toggling || $connection.status === 'connecting'}
+			aria-label={$connection.status === 'connected' ? 'Disconnect' : 'Connect'}
+		>
+			<svg width="32" height="32" viewBox="0 0 24 24" fill="currentColor">
+				<path d="M13 3h-2v10h2V3zm4.83 2.17l-1.42 1.42A6.92 6.92 0 0119 12c0 3.87-3.13 7-7 7A7 7 0 015 12c0-1.68.59-3.22 1.58-4.42L5.17 6.17A8.932 8.932 0 003 12c0 4.97 4.03 9 9 9s9-4.03 9-9c0-2.74-1.23-5.18-3.17-6.83z"/>
+			</svg>
+		</button>
+		{#if $connection.status !== 'connected'}
+			<span class="hint">{$connection.status === 'connecting' ? 'Connecting…' : 'Tap to connect'}</span>
+		{/if}
 	{/if}
 
 	<div class="kv">

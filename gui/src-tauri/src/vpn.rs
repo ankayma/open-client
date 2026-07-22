@@ -19,6 +19,12 @@ mod ffi {
         pub fn ankayma_vpn_disconnect();
         pub fn ankayma_vpn_status() -> i32;
         pub fn ankayma_vpn_prime();
+        // Pre-flight: 1 if the VPN configuration is already installed (user allowed
+        // it), else 0. Cached, synchronous. [T:A.1.9 preflight]
+        pub fn ankayma_vpn_has_config() -> i32;
+        // Pre-flight: install the VPN configuration now, firing the iOS "add VPN
+        // Configurations" permission dialog at onboarding. 0 = dispatched.
+        pub fn ankayma_vpn_install_config() -> i32;
         // Open an external URL in Safari (OpenUrlBridge.swift). 0 = dispatched,
         // -1 = unparseable URL. [T:A.1.9]
         pub fn ankayma_open_url(url: *const c_char) -> i32;
@@ -325,4 +331,27 @@ pub fn vpn_status(state: State<'_, AppState>) -> VpnStatus {
 pub fn prime() {
     // SAFETY: no arguments.
     unsafe { ffi::ankayma_vpn_prime() };
+}
+
+/// Pre-flight (iOS): is the VPN configuration already installed — i.e. did the user
+/// allow the "Ankayma would like to add VPN Configurations" dialog? Reads a cached
+/// flag the Swift side keeps current; safe to poll. [T:A.1.9 preflight]
+#[cfg(target_os = "ios")]
+pub fn preflight_ready() -> bool {
+    // SAFETY: returns a cached integer; no pointers involved.
+    unsafe { ffi::ankayma_vpn_has_config() == 1 }
+}
+
+/// Pre-flight (iOS): install the VPN configuration now so the permission dialog
+/// fires at onboarding instead of at the first Connect. Fire-and-forget — the card
+/// polls `preflight_ready` for the user's decision. Only a dispatch failure errors.
+#[cfg(target_os = "ios")]
+pub fn preflight_request() -> Result<(), String> {
+    // SAFETY: no arguments; the Swift side saves a manager and returns immediately.
+    let rc = unsafe { ffi::ankayma_vpn_install_config() };
+    if rc == 0 {
+        Ok(())
+    } else {
+        Err(format!("install vpn configuration rejected (code {rc})"))
+    }
 }

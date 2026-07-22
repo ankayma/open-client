@@ -29,6 +29,12 @@ mod vpn;
 #[cfg(target_os = "android")]
 mod vpn_android;
 
+// Unified cross-platform pre-flight permission gate. Lets the UI ask "is the OS
+// permission this platform needs for the tunnel already granted?" and request it
+// up front (right after sign-in), instead of only discovering it as a Connect
+// error. macOS=helper daemon, iOS/Android=VPN configuration consent. [T:A.1.7/A.1.9]
+mod preflight;
+
 /// Target OS this build runs on ("ios"/"macos"/"linux"/"windows"). The frontend uses
 /// it to pick the data-plane path: iOS brings the tunnel up in-app (Packet Tunnel
 /// extension); desktop hands off to the privileged `agent` daemon. [T:A.1.9]
@@ -1695,13 +1701,61 @@ mod helper_ipc {
             ServiceStatus::RequiresApproval => {
                 AppService::open_system_settings_login_items();
                 Err(
-                    "helper daemon needs approval — enable Ankayma in System Settings > Login Items, then try again"
+                    "helper daemon needs approval — turn on Ankayma under System Settings > General > Login Items & Extensions > App Background Activity, then try again"
                         .into(),
                 )
             }
             ServiceStatus::NotRegistered | ServiceStatus::NotFound => svc
                 .register()
                 .map_err(|e| format!("register helper daemon: {e}")),
+        }
+    }
+
+    /// Read-only pre-flight check: is the privileged helper ready to serve — either
+    /// already answering its socket, or registered AND enabled in the Background Task
+    /// Manager? Never mutates state and never prompts, so the UI can poll it freely
+    /// (unlike `ensure_registered`, whose `Enabled`-but-dead-socket branch re-registers).
+    pub fn preflight_ready() -> bool {
+        use smappservice_rs::{AppService, ServiceStatus, ServiceType};
+        if socket_live() {
+            return true;
+        }
+        let svc = AppService::new(ServiceType::Daemon {
+            plist_name: HELPER_PLIST_NAME,
+        });
+        matches!(svc.status(), ServiceStatus::Enabled)
+    }
+
+    /// Pre-flight request, run from the onboarding card BEFORE the first Connect:
+    /// register the helper if needed and, when the user still has to flip the System
+    /// Settings switch, deep-link them straight to it. Unlike `ensure_registered`,
+    /// `RequiresApproval` is NOT an error here — the card polls `preflight_ready`
+    /// until the toggle is on. Mirrors how iOS asks for the VPN configuration at
+    /// setup rather than at connect time.
+    pub fn preflight_request() -> Result<(), String> {
+        use smappservice_rs::{AppService, ServiceStatus, ServiceType};
+        if socket_live() {
+            return Ok(());
+        }
+        let svc = AppService::new(ServiceType::Daemon {
+            plist_name: HELPER_PLIST_NAME,
+        });
+        match svc.status() {
+            ServiceStatus::Enabled => Ok(()),
+            ServiceStatus::RequiresApproval => {
+                AppService::open_system_settings_login_items();
+                Ok(())
+            }
+            ServiceStatus::NotRegistered | ServiceStatus::NotFound => {
+                svc.register()
+                    .map_err(|e| format!("register helper daemon: {e}"))?;
+                // A fresh registration lands in RequiresApproval — take the user to
+                // the switch so they don't have to hunt for it.
+                if matches!(svc.status(), ServiceStatus::RequiresApproval) {
+                    AppService::open_system_settings_login_items();
+                }
+                Ok(())
+            }
         }
     }
 
@@ -3081,6 +3135,8 @@ pub fn run() {
             vpn::vpn_connect,
             vpn::vpn_disconnect,
             vpn::vpn_status,
+            preflight::preflight_status,
+            preflight::preflight_request,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
