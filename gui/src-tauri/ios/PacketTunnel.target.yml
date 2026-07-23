@@ -15,8 +15,8 @@
         # Must track the host app's version (gui/src-tauri/tauri.conf.json) — Apple
         # rejects an extension whose CFBundleShortVersionString/Version diverges from
         # the app it ships in. [A: bump together until this is generated from one source]
-        CFBundleShortVersionString: 1.1.18
-        CFBundleVersion: "1.1.18"
+        CFBundleShortVersionString: 1.1.19
+        CFBundleVersion: "1.1.19"
         NSExtension:
           NSExtensionPointIdentifier: com.apple.networkextension.packet-tunnel
           NSExtensionPrincipalClass: $(PRODUCT_MODULE_NAME).PacketTunnelProvider

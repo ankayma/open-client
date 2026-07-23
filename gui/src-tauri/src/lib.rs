@@ -432,7 +432,7 @@ fn dataplane_snapshot_age() -> Option<u64> {
     struct Stamp {
         updated_at: u64,
     }
-    let bytes = std::fs::read(status_snapshot_path()).ok()?;
+    let bytes = std::fs::read(freshest_status_path()).ok()?;
     let s: Stamp = serde_json::from_slice(&bytes).ok()?;
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -1227,6 +1227,11 @@ async fn probe_reachable(targets: Vec<String>) -> Result<Vec<bool>, String> {
 /// must read from there, not its own sandbox HOME; the `connect`-side config passes the
 /// SAME path to the extension so both agree. macOS reads the daemon's root-owned
 /// `/Library/Ankayma/agent-status.json`; other platforms use `~/.ankayma`. [T:F-5]
+///
+/// iOS-only now: it is the extension's single write target (passed via the connect config)
+/// and the read path on iOS. Desktop reads go through `freshest_status_path`, which picks
+/// the freshest of the possible daemon locations rather than one fixed spot.
+#[cfg(target_os = "ios")]
 pub(crate) fn status_snapshot_path() -> std::path::PathBuf {
     #[cfg(target_os = "ios")]
     {
@@ -1259,6 +1264,54 @@ pub(crate) fn status_snapshot_path() -> std::path::PathBuf {
     }
 }
 
+/// The two places a desktop daemon may have written its status snapshot: the platform
+/// system-state dir (a current-build helper spawns the agent with `--state-dir`) and the
+/// caller's `~/.ankayma` (a pre-1.1.18 helper spawns it WITHOUT `--state-dir`, so state
+/// lands under `$HOME`). System dir first = the canonical current location.
+#[cfg(not(target_os = "ios"))]
+fn desktop_status_candidates() -> Vec<std::path::PathBuf> {
+    let home = std::path::PathBuf::from(agent_core::home_root()).join(".ankayma/agent-status.json");
+    #[cfg(target_os = "macos")]
+    let sys = std::path::PathBuf::from("/Library/Ankayma/agent-status.json");
+    #[cfg(target_os = "windows")]
+    let sys = std::path::PathBuf::from("C:\\ProgramData\\Ankayma\\agent-status.json");
+    #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "ios")))]
+    let sys = std::path::PathBuf::from("/var/lib/ankayma/agent-status.json");
+    vec![sys, home]
+}
+
+/// The status snapshot to READ — the freshest-written of the possible daemon locations.
+/// After an app update the OLD root helper can still be resident (launchd does not reload a
+/// swapped daemon binary until reboot), so it keeps spawning the agent WITHOUT `--state-dir`
+/// and the live snapshot lands in `~/.ankayma` while the new GUI's canonical path is the
+/// system dir — reading whichever was written most recently keeps a live tunnel from showing
+/// a false "Tunnel down". iOS has a single writer (the extension → App Group), so there is
+/// nothing to choose. Read-only: this never writes either path, so it cannot conflict. The
+/// helper's own `stop_agent` already dual-reads the same two spots. [T:A.1.1 status metadata]
+pub(crate) fn freshest_status_path() -> std::path::PathBuf {
+    #[cfg(target_os = "ios")]
+    {
+        status_snapshot_path()
+    }
+    #[cfg(not(target_os = "ios"))]
+    {
+        let candidates = desktop_status_candidates();
+        candidates
+            .iter()
+            .filter_map(|p| {
+                std::fs::metadata(p)
+                    .and_then(|m| m.modified())
+                    .ok()
+                    .map(|t| (t, p))
+            })
+            .max_by_key(|(t, _)| *t)
+            .map(|(_, p)| p.clone())
+            // Neither snapshot exists yet → return the canonical path; the read fails and the
+            // caller reports "down", the same as before.
+            .unwrap_or_else(|| candidates.into_iter().next().expect("non-empty candidates"))
+    }
+}
+
 /// verify the connection is real and peer-to-peer without trusting the GUI alone.
 /// vendor_on_data_path is computed from peer states — honest per P.3, not hardcoded.
 #[tauri::command]
@@ -1273,8 +1326,9 @@ async fn get_path_proof(state: State<'_, AppState>) -> Result<PathProof, String>
 
     // The F-5 path proof reads the same status snapshot the data plane writes. On iOS the
     // extension writes it into the App Group container (a separate process from this app);
-    // desktop reads the daemon's snapshot (see status_snapshot_path for the per-OS spot).
-    let path = status_snapshot_path();
+    // desktop reads the daemon's snapshot from whichever location was written most recently
+    // (see freshest_status_path — resilient to a stale root helper after an app update).
+    let path = freshest_status_path();
     let Ok(bytes) = std::fs::read(&path) else {
         return Ok(not_connected());
     };
@@ -2494,7 +2548,7 @@ fn build_diagnostic_bundle(
         })
         .unwrap_or_else(|| "other".to_string());
     let (agent_log, helper_log) = diag_log_tails();
-    let snapshot = std::fs::read(status_snapshot_path())
+    let snapshot = std::fs::read(freshest_status_path())
         .ok()
         .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok());
     serde_json::json!({
@@ -2586,7 +2640,7 @@ async fn get_dataplane_status() -> Result<DataplaneStatus, String> {
     // One resolver for the snapshot location on every platform — on macOS the
     // daemon now writes it under /Library/Ankayma, not ~/.ankayma (the daemon has
     // no $HOME; docs/daemon-state-dir.md).
-    let Ok(bytes) = std::fs::read(status_snapshot_path()) else {
+    let Ok(bytes) = std::fs::read(freshest_status_path()) else {
         return Ok(down());
     };
     #[derive(serde::Deserialize)]
