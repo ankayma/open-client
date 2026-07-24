@@ -1,7 +1,7 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
 	import { goto } from '$app/navigation';
-	import { listSubdomains, createSubdomain, deleteSubdomain, openSubdomain, listNodes } from '$lib/tauri';
+	import { listSubdomains, createSubdomain, deleteSubdomain, openSubdomain, listNodes, publishSampleDemo, unpublishSampleDemo } from '$lib/tauri';
 	import { runWithStepUp } from '$lib/stepup';
 	import type { Subdomain, PeerBrief } from '$lib/types';
 
@@ -63,6 +63,38 @@
 			await load();
 		} catch (e: unknown) {
 			loadError = e instanceof Error ? e.message : 'Failed to remove subdomain';
+		}
+	}
+
+	// One-click "Publish a sample demo" (F0 step-2 friction killer, decision
+	// 2026-07-23): a fixed "demo" label, no form — the agent serves its own
+	// bundled page, so there's no target node/port to pick.
+	let publishingDemo = $state(false);
+	let demoError = $state('');
+
+	function isSampleDemo(entry: Subdomain) {
+		return entry.label === 'demo' || entry.label.startsWith('demo-');
+	}
+
+	async function addSampleDemo() {
+		publishingDemo = true;
+		demoError = '';
+		try {
+			await runWithStepUp('manage_subdomain', (proof) => publishSampleDemo(proof));
+			await load();
+		} catch (e: unknown) {
+			demoError = e instanceof Error ? e.message : 'Failed to publish the sample demo';
+		} finally {
+			publishingDemo = false;
+		}
+	}
+
+	async function removeSampleDemo(label: string) {
+		try {
+			await runWithStepUp('manage_subdomain', (proof) => unpublishSampleDemo(label, proof));
+			await load();
+		} catch (e: unknown) {
+			loadError = e instanceof Error ? e.message : 'Failed to remove the sample demo';
 		}
 	}
 
@@ -128,16 +160,26 @@
 								<code class="entry-fqdn">{entry.fqdn}</code>
 								<div class="entry-meta">
 									<span class="badge">private</span>
+									{#if isSampleDemo(entry)}
+										<span class="badge badge-sample">sample</span>
+									{/if}
 									<span class="arrow">→</span>
 									<span class="target">{nodeName(entry.target_node_id)}:{entry.target_port ?? 80}</span>
 								</div>
 								<div class="entry-meta">
 									<span class="badge cert-{entry.cert_status ?? 'none'}">{certLabel(entry.cert_status)}</span>
 								</div>
+								{#if isSampleDemo(entry)}
+									<button class="invite-link" onclick={() => goto('/add-device')}>Invite someone to view &rarr;</button>
+								{/if}
 							</div>
 							<div class="entry-actions">
 								<button class="link-btn" onclick={() => openSubdomain(entry.fqdn)} aria-label="Open in browser">Open</button>
-								<button class="remove-btn" onclick={() => removeSubdomain(entry.label)} aria-label="Remove subdomain">
+								<button
+									class="remove-btn"
+									onclick={() => isSampleDemo(entry) ? removeSampleDemo(entry.label) : removeSubdomain(entry.label)}
+									aria-label={isSampleDemo(entry) ? 'Remove sample demo' : 'Remove subdomain'}
+								>
 									<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
 										<path d="M18 6L6 18M6 6l12 12"/>
 									</svg>
@@ -146,6 +188,10 @@
 						</li>
 					{/each}
 				</ul>
+			{/if}
+
+			{#if demoError}
+				<p class="form-error">{demoError}</p>
 			{/if}
 
 			<!-- Add form -->
@@ -212,12 +258,26 @@
 					</div>
 				</div>
 			{:else}
-				<button class="add-btn" onclick={() => showAddForm = true}>
-					<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
-						<path d="M12 5v14M5 12h14"/>
-					</svg>
-					Add subdomain
-				</button>
+				<div class="add-row">
+					<button class="add-btn" onclick={() => showAddForm = true}>
+						<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+							<path d="M12 5v14M5 12h14"/>
+						</svg>
+						Add subdomain
+					</button>
+					<button
+						class="add-demo-btn"
+						onclick={addSampleDemo}
+						disabled={publishingDemo}
+						aria-label="Publish a sample demo"
+					>
+						{#if publishingDemo}
+							<span class="spinner spinner-dim"></span>
+						{:else}
+							Add demo
+						{/if}
+					</button>
+				</div>
 			{/if}
 		</div>
 </main>
@@ -361,23 +421,60 @@
 
 	.remove-btn:hover { background: color-mix(in srgb, var(--c-danger) 15%, transparent); color: var(--c-danger); }
 
-	/* Add button */
+	/* Add row: "Add subdomain" is the primary CTA, "Add demo" a small, quiet
+	   shortcut beside it (decision 2026-07-24 — sample-demo-one-click-publish). */
+	.add-row {
+		display: flex;
+		align-items: stretch;
+		gap: 8px;
+	}
+
 	.add-btn {
 		display: flex;
 		align-items: center;
 		gap: 8px;
 		padding: 12px 16px;
-		background: var(--c-surface);
-		border: 1px dashed var(--c-border);
+		background: var(--c-accent);
+		border: 1px solid var(--c-accent);
 		border-radius: var(--radius);
 		font-size: 14px;
-		color: var(--c-text-dim);
-		width: 100%;
+		font-weight: 600;
+		color: #fff;
+		flex: 1;
 		justify-content: center;
-		transition: border-color 0.15s;
+		transition: background 0.15s;
 	}
 
-	.add-btn:hover { border-color: var(--c-accent); color: var(--c-accent); }
+	.add-btn:hover { background: var(--c-accent-dim); }
+
+	.add-demo-btn {
+		padding: 12px 14px;
+		background: transparent;
+		border: 1px dashed var(--c-border);
+		border-radius: var(--radius);
+		font-size: 12px;
+		color: var(--c-text-dim);
+		flex-shrink: 0;
+		white-space: nowrap;
+	}
+
+	.add-demo-btn:hover:not(:disabled) { border-color: var(--c-accent); color: var(--c-accent); }
+	.add-demo-btn:disabled { opacity: 0.6; cursor: not-allowed; }
+
+	.spinner-dim { border-top-color: var(--c-text-dim); border-color: rgba(255,255,255,0.15); }
+
+	/* Sample-demo badge + invite shortcut on its entry row. */
+	.badge-sample { background: color-mix(in srgb, #eab308 15%, transparent); color: #eab308; }
+
+	.invite-link {
+		align-self: flex-start;
+		font-size: 12px;
+		font-weight: 600;
+		color: var(--c-accent);
+		margin-top: 2px;
+	}
+
+	.invite-link:hover { text-decoration: underline; }
 
 	/* Add form */
 	.add-form {

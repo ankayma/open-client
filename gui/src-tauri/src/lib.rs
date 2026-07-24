@@ -2662,6 +2662,100 @@ async fn open_subdomain(fqdn: String) -> Result<(), String> {
     open_url(&format!("https://{fqdn}"))
 }
 
+/// The label reserved for the one-click sample demo. A bare constant, not
+/// user input — the whole point is zero typing.
+const SAMPLE_DEMO_LABEL: &str = "demo";
+
+/// One-click "Publish a sample demo": ensure the bundled static page is being
+/// served locally, then map it onto this node exactly like any other F-3
+/// subdomain — no new control-plane surface, no `tls_relay` change. Reuses an
+/// existing `demo`-labeled entry pointed at this node instead of minting a
+/// second one on repeat clicks (ND-R6 subdomain cap is scarce on F0).
+#[tauri::command]
+async fn publish_sample_demo(
+    state: State<'_, AppState>,
+    proof_token: Option<String>,
+) -> Result<String, String> {
+    let tok = state.token().ok_or("not signed in")?;
+    let node_id = state
+        .node
+        .lock()
+        .expect("node lock")
+        .as_ref()
+        .map(|n| n.node_id.clone())
+        .ok_or("enroll and connect a device first")?;
+
+    let port = agent_core::sample_demo::ensure_running();
+
+    let existing = adapters::list_subdomains(&state.http, &state.regional_base_url(), &tok)
+        .await
+        .map_err(|e| e.to_string())?;
+    if let Some(found) = existing
+        .iter()
+        .find(|s| s.target_node_id == node_id && s.label.starts_with(SAMPLE_DEMO_LABEL))
+    {
+        return Ok(found.fqdn.clone());
+    }
+
+    let req = domain::SubdomainReq {
+        label: SAMPLE_DEMO_LABEL.to_string(),
+        target_node_id: node_id,
+        target_port: port,
+    };
+    match adapters::register_subdomain(
+        &state.http,
+        &state.regional_base_url(),
+        &tok,
+        &req,
+        proof_token.as_deref(),
+    )
+    .await
+    {
+        Ok(fqdn) => Ok(fqdn),
+        // The plain label is taken (by someone else's demo, or a race) — one
+        // suffixed retry per the spec ("reuse or suffix demo-2"); reuse already
+        // handled above.
+        Err(adapters::ApiError::Server { status: 409, .. }) => {
+            let suffixed = domain::SubdomainReq {
+                label: format!("{SAMPLE_DEMO_LABEL}-2"),
+                ..req
+            };
+            adapters::register_subdomain(
+                &state.http,
+                &state.regional_base_url(),
+                &tok,
+                &suffixed,
+                proof_token.as_deref(),
+            )
+            .await
+            .map_err(|e| e.to_string())
+        }
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+/// Tear down the sample demo: remove the subdomain mapping (same endpoint as a
+/// normal `delete_subdomain`) and stop the local responder from answering.
+#[tauri::command]
+async fn unpublish_sample_demo(
+    label: String,
+    state: State<'_, AppState>,
+    proof_token: Option<String>,
+) -> Result<(), String> {
+    let tok = state.token().ok_or("not signed in")?;
+    adapters::delete_subdomain(
+        &state.http,
+        &state.regional_base_url(),
+        &tok,
+        &label,
+        proof_token.as_deref(),
+    )
+    .await
+    .map_err(|e| e.to_string())?;
+    agent_core::sample_demo::set_enabled(false);
+    Ok(())
+}
+
 // ── F1 team membership ────────────────────────────────────────────────────────
 
 #[tauri::command]
@@ -3299,6 +3393,8 @@ pub fn run() {
             delete_subdomain,
             open_subdomain,
             get_subdomain_cert,
+            publish_sample_demo,
+            unpublish_sample_demo,
             list_members,
             invite_member,
             join_team,

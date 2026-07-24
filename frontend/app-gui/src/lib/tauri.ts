@@ -372,6 +372,17 @@ export async function openSubdomain(fqdn: string): Promise<void> {
   return invoke("open_subdomain", { fqdn });
 }
 
+// One-click "Publish a sample demo" (F0 step-2 friction killer): serves a
+// bundled page from this node and maps it onto a "demo" subdomain — same F-3
+// machinery as createSubdomain/deleteSubdomain above, zero manual setup.
+export async function publishSampleDemo(proof?: StepUpProof): Promise<string> {
+  return invoke<string>("publish_sample_demo", { proofToken: proof?.proofToken });
+}
+
+export async function unpublishSampleDemo(label: string, proof?: StepUpProof): Promise<void> {
+  return invoke("unpublish_sample_demo", { label, proofToken: proof?.proofToken });
+}
+
 // Auto-TLS (Slice 3) issuance-state poll — fallback to the cert_issued SSE push.
 export async function getSubdomainCert(fqdn: string): Promise<SubdomainCert> {
   return invoke<SubdomainCert>("get_subdomain_cert", { fqdn });

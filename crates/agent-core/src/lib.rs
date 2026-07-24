@@ -11,6 +11,7 @@ pub mod oidc; // CI OIDC token fetch for secretless deploy (B-3)
 pub mod ports; // trait interfaces for external systems
 pub mod pump; // reusable WireGuard packet pump over a tun fd (daemon + iOS extension)
 pub mod relay_transport; // DERP-style relay fallback path for the WG data plane (Decision D-T1)
+pub mod sample_demo; // F0 "Publish a sample demo" one-click bundled page + loopback responder
 pub mod ssh_client; // F-2 NoKeySSH client transport (russh) — CLI + GUI + iOS terminal
 pub mod ssh_grant; // F-2 root-elevation grant (Ed25519 sign/verify) — CP issues, node verifies
 pub mod ssh_server; // F-2 NoKeySSH embedded server (russh + PTY) — runs on target nodes

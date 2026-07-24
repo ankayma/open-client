@@ -1,0 +1,129 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<meta name="robots" content="noindex, nofollow" />
+<title>Private preview — Ankayma</title>
+<style>
+  :root {
+    color-scheme: dark;
+    --bg: #0b0d12;
+    --surface: #12151c;
+    --border: #232833;
+    --text: #e8eaed;
+    --text-dim: #8a919e;
+    --accent: #5b8def;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    min-height: 100vh;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 24px;
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  }
+  main {
+    max-width: 460px;
+    width: 100%;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 16px;
+    padding: 32px 28px;
+    text-align: center;
+  }
+  .badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 12px;
+    font-weight: 700;
+    letter-spacing: 0.02em;
+    color: var(--accent);
+    background: color-mix(in srgb, var(--accent) 15%, transparent);
+    padding: 5px 12px;
+    border-radius: 999px;
+    margin-bottom: 20px;
+  }
+  .dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--accent);
+  }
+  h1 {
+    font-size: 22px;
+    font-weight: 700;
+    margin: 0 0 12px;
+    line-height: 1.3;
+  }
+  p {
+    font-size: 14px;
+    line-height: 1.6;
+    color: var(--text-dim);
+    margin: 0 0 10px;
+  }
+  .facts {
+    text-align: left;
+    margin: 24px 0;
+    padding: 0;
+    list-style: none;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+  }
+  .facts li {
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    font-size: 13px;
+    color: var(--text);
+    line-height: 1.5;
+  }
+  .facts .icon {
+    flex-shrink: 0;
+    width: 20px;
+    height: 20px;
+    color: var(--accent);
+  }
+  a.cta {
+    display: inline-block;
+    margin-top: 8px;
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--accent);
+    text-decoration: none;
+  }
+  a.cta:hover { text-decoration: underline; }
+</style>
+</head>
+<body>
+  <main>
+    <span class="badge"><span class="dot"></span>Private preview</span>
+    <h1>You're viewing this over a private connection</h1>
+    <p>
+      This page isn't hosted anywhere public — it's being served straight from the
+      device that shared it with you, over a private mesh only your two devices are on.
+    </p>
+    <ul class="facts">
+      <li>
+        <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+        <span>Only devices explicitly invited can see this — nobody else on the internet can find it.</span>
+      </li>
+      <li>
+        <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2l8 4v6c0 5-3.5 8.5-8 10-4.5-1.5-8-5-8-10V6l8-4z"/></svg>
+        <span>Ankayma (the vendor) never sits on this connection and never sees this traffic.</span>
+      </li>
+      <li>
+        <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg>
+        <span>No VPN client, no open ports, no server to rent — just a name that resolves for invited devices.</span>
+      </li>
+    </ul>
+    <a class="cta" href="https://ankayma.com" target="_blank" rel="noopener">How Ankayma works &rarr;</a>
+  </main>
+</body>
+</html>
