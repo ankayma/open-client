@@ -14,6 +14,9 @@ class MainActivity : TauriActivity() {
         // Store JVM + Application context for Rust→Java calls in vpn_android.rs.
         initAndroidVpn(applicationContext)
 
+        // Deferred deep-link: capture Play Install Referrer (no-op / empty on sideload).
+        InstallReferrerHelper.fetch(applicationContext)
+
         // Request VPN permission once — shows the system consent dialog if needed.
         // After the user grants it, VpnService.Builder.establish() succeeds on
         // every subsequent vpn_connect without another prompt.

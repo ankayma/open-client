@@ -24,6 +24,9 @@ use tauri::{AppHandle, Emitter, Manager, State};
 // platforms; the iOS-only path is gated inside. [T:A.1.9]
 mod vpn;
 
+// Deferred deep-link InviteResolver for email invitations (clipboard / Install Referrer).
+mod deferred_invite;
+
 // Android VPN bridge (frontend → AnkaymaVpnService via JNI). Owns the TUN fd, the
 // in-process WireGuard pump, and the control-plane bypass proxy. [T:A.1.9, F-3]
 #[cfg(target_os = "android")]
@@ -2800,17 +2803,36 @@ async fn take_pending_join_team(state: State<'_, AppState>) -> Result<Option<Str
 /// Member magic-link join (no session, no OTP): redeem the emailed invite token — which
 /// IS the credential — to mint + store an email-rooted session → signed in. ZERO confirm
 /// at redeem (Part D §A invite-flow §Cases, doc lines 28-30). [T:Part D §A]
+/// `method` is the deferred-deeplink channel (clipboard/referrer/short_code/deeplink/…)
+/// reported to the control plane for join analytics; optional.
 #[tauri::command]
 async fn join_team_link(
     app: AppHandle,
     state: State<'_, AppState>,
     token: String,
+    method: Option<String>,
 ) -> Result<AuthState, String> {
-    let session = adapters::join_team_link(&state.http, &state.regional_base_url(), token.trim())
-        .await
-        .map_err(|e| e.to_string())?;
+    let session = adapters::join_team_link(
+        &state.http,
+        &state.regional_base_url(),
+        token.trim(),
+        method.as_deref(),
+    )
+    .await
+    .map_err(|e| e.to_string())?;
     let user = apply_session_token(&app, session).await?;
     Ok(AuthState::Authenticated { user })
+}
+
+/// First-run InviteResolver: Install Referrer (Android) → clipboard `ankayma-invite:`.
+/// Returns None when no channel has a credential (UI falls back to short code / paste).
+#[tauri::command]
+async fn resolve_deferred_invite() -> Result<Option<deferred_invite::DeferredInvite>, String> {
+    // Native clipboard/referrer is sync and short; run off the async worker so we
+    // never block the UI runtime. No direct `tokio` dep — use Tauri's runtime.
+    tauri::async_runtime::spawn_blocking(deferred_invite::resolve_deferred_invite)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -3347,6 +3369,7 @@ pub fn run() {
             poll_login,
             take_pending_join_team,
             join_team_link,
+            resolve_deferred_invite,
             submit_session_token,
             sign_out,
             get_connection_status,

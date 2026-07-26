@@ -762,3 +762,141 @@ pub fn stop_service() -> Result<(), String> {
         Ok(())
     })
 }
+
+// ── Deferred deep-link channels (email invite) ───────────────────────────────
+
+/// Install Referrer payload captured once by Kotlin; drained by InviteResolver.
+static INSTALL_REFERRER: Mutex<Option<String>> = Mutex::new(None);
+
+/// Called from Kotlin once Play Install Referrer returns (or immediately with
+/// empty if Play is unavailable / sideload APK).
+#[no_mangle]
+pub unsafe extern "C" fn Java_com_ankayma_app_InstallReferrerHelper_nativeSetReferrer(
+    mut env: JNIEnv,
+    _class: JObject,
+    referrer: JString,
+) {
+    let s: String = env
+        .get_string(&referrer)
+        .map(|v| v.into())
+        .unwrap_or_default();
+    if let Ok(mut g) = INSTALL_REFERRER.lock() {
+        *g = if s.trim().is_empty() {
+            None
+        } else {
+            Some(s)
+        };
+    }
+}
+
+/// Take (and clear) the cached Install Referrer string, if any.
+pub fn take_install_referrer() -> Option<String> {
+    INSTALL_REFERRER.lock().ok()?.take()
+}
+
+/// Read the system clipboard text (may be empty / denied).
+pub fn read_clipboard_text() -> Option<String> {
+    with_jni(|env, ctx| {
+        let svc_name = env
+            .get_static_field(
+                "android/content/Context",
+                "CLIPBOARD_SERVICE",
+                "Ljava/lang/String;",
+            )
+            .map_err(|e| e.to_string())?
+            .l()
+            .map_err(|e| e.to_string())?;
+        let cm = env
+            .call_method(
+                ctx.as_obj(),
+                "getSystemService",
+                "(Ljava/lang/String;)Ljava/lang/Object;",
+                &[JValue::Object(&svc_name)],
+            )
+            .map_err(|e| e.to_string())?
+            .l()
+            .map_err(|e| e.to_string())?;
+        if cm.is_null() {
+            return Err("no clipboard service".into());
+        }
+        let clip = env
+            .call_method(
+                &cm,
+                "getPrimaryClip",
+                "()Landroid/content/ClipData;",
+                &[],
+            )
+            .map_err(|e| e.to_string())?
+            .l()
+            .map_err(|e| e.to_string())?;
+        if clip.is_null() {
+            return Ok(String::new());
+        }
+        let item = env
+            .call_method(
+                &clip,
+                "getItemAt",
+                "(I)Landroid/content/ClipData$Item;",
+                &[JValue::Int(0)],
+            )
+            .map_err(|e| e.to_string())?
+            .l()
+            .map_err(|e| e.to_string())?;
+        if item.is_null() {
+            return Ok(String::new());
+        }
+        let text = env
+            .call_method(
+                &item,
+                "coerceToText",
+                "(Landroid/content/Context;)Ljava/lang/CharSequence;",
+                &[JValue::Object(ctx.as_obj())],
+            )
+            .map_err(|e| e.to_string())?
+            .l()
+            .map_err(|e| e.to_string())?;
+        if text.is_null() {
+            return Ok(String::new());
+        }
+        let s = env
+            .call_method(&text, "toString", "()Ljava/lang/String;", &[])
+            .map_err(|e| e.to_string())?
+            .l()
+            .map_err(|e| e.to_string())?;
+        let out: String = env
+            .get_string(&JString::from(s))
+            .map_err(|e| e.to_string())?
+            .into();
+        Ok(out)
+    })
+    .ok()
+    .filter(|s| !s.trim().is_empty())
+}
+
+pub fn clear_clipboard() {
+    let _ = with_jni(|env, ctx| {
+        let svc_name = env
+            .get_static_field(
+                "android/content/Context",
+                "CLIPBOARD_SERVICE",
+                "Ljava/lang/String;",
+            )
+            .map_err(|e| e.to_string())?
+            .l()
+            .map_err(|e| e.to_string())?;
+        let cm = env
+            .call_method(
+                ctx.as_obj(),
+                "getSystemService",
+                "(Ljava/lang/String;)Ljava/lang/Object;",
+                &[JValue::Object(&svc_name)],
+            )
+            .map_err(|e| e.to_string())?
+            .l()
+            .map_err(|e| e.to_string())?;
+        if !cm.is_null() {
+            let _ = env.call_method(&cm, "clearPrimaryClip", "()V", &[]);
+        }
+        Ok(())
+    });
+}

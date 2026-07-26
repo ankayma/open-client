@@ -751,14 +751,19 @@ pub async fn join_team_link(
     http: &reqwest::Client,
     base_url: &str,
     token: &str,
+    method: Option<&str>,
 ) -> Result<String, ApiError> {
     #[derive(serde::Deserialize)]
     struct Resp {
         token: String,
     }
+    let mut body = serde_json::json!({ "token": token });
+    if let Some(m) = method.filter(|s| !s.is_empty()) {
+        body["method"] = serde_json::json!(m);
+    }
     let resp = http
         .post(url(base_url, "/api/v1/members/join-link"))
-        .json(&serde_json::json!({ "token": token }))
+        .json(&body)
         .timeout(CP_REST_TIMEOUT)
         .send()
         .await

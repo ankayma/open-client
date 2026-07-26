@@ -3,7 +3,7 @@
 	import { onMount, onDestroy } from 'svelte';
 	import { get } from 'svelte/store';
 	import { auth, pendingInvite } from '$lib/stores';
-	import { signInGithub, pollLogin, submitSessionToken, joinTeamLink, joinEnrollNode, takePendingJoinTeam, getPlatform } from '$lib/tauri';
+	import { signInGithub, pollLogin, submitSessionToken, joinTeamLink, joinEnrollNode, takePendingJoinTeam, resolveDeferredInvite, getPlatform } from '$lib/tauri';
 	import { listen } from '@tauri-apps/api/event';
 
 	// idle   → initial screen with GitHub button
@@ -15,24 +15,35 @@
 	//             itself; this panel is the paste fallback + the future in-app scanner.
 	//             TODO[A]: in-app camera decode needs an owner-gated dep (A.1.21 —
 	//             jsQR / tauri-plugin-barcode-scanner); until then paste-only.
-	let step = $state<'idle' | 'waiting' | 'paste' | 'joining' | 'join-node'>('idle');
+	// invite  → Have-an-invite? short code / paste (deferred deep-link fallback)
+	let step = $state<'idle' | 'waiting' | 'paste' | 'joining' | 'join-node' | 'invite'>('idle');
 	let busy = $state(false);
 	let token = $state('');
 	let error = $state<string | null>(null);
+	let inviteInput = $state('');
 
 	// Magic-link team join (invitee has no GitHub): the emailed token IS the credential —
 	// redeem it directly, ZERO confirm, no OTP (Part D §A invite-flow §Cases, doc 28-30).
-	async function redeemInvite(inviteToken: string) {
+	async function redeemInvite(inviteToken: string, method?: string) {
 		step = 'joining';
 		error = null;
 		try {
-			const state = await joinTeamLink(inviteToken);
+			const state = await joinTeamLink(inviteToken, method);
 			auth.set(state);
 			goto('/services');
 		} catch (e) {
 			error = e instanceof Error ? e.message : 'Could not join the team — the invite may have expired';
 			step = 'idle';
 		}
+	}
+
+	async function redeemInviteManual() {
+		const raw = inviteInput.trim();
+		if (!raw) return;
+		const m = raw.match(/token=([^&\s]+)/);
+		const tok = m ? m[1] : raw.replace(/^ankayma-invite:/i, '').trim();
+		const method = tok.length <= 12 ? 'short_code' : 'manual';
+		await redeemInvite(tok, method);
 	}
 
 	// One-time handoff nonce + poll loop: bấm-là-vô without the ankayma:// deep link.
@@ -110,6 +121,7 @@
 		error = null;
 		token = '';
 		joinInput = '';
+		inviteInput = '';
 	}
 
 	// Node-invite paste path (mirrors add-device Cases C/D: scan = enrolled, the
@@ -187,7 +199,7 @@
 			const m = v.match(/token=([^&\s]+)/);
 			const tok = m ? m[1] : v;
 			if (/join-team/.test(v)) {
-				const state = await joinTeamLink(tok);
+				const state = await joinTeamLink(tok, 'manual');
 				auth.set(state);
 				goto('/services');
 			} else if (/\bjoin\b/.test(v)) {
@@ -204,7 +216,7 @@
 				}
 			} else {
 				// Bare token — try it as a team invite (the only kind that signs you in).
-				const state = await joinTeamLink(tok);
+				const state = await joinTeamLink(tok, tok.length <= 12 ? 'short_code' : 'manual');
 				auth.set(state);
 				goto('/services');
 			}
@@ -224,13 +236,23 @@
 		const inv = get(pendingInvite);
 		if (inv?.type === 'join-team') {
 			pendingInvite.set(null);
-			redeemInvite(inv.token);
+			redeemInvite(inv.token, 'deeplink');
 		} else {
 			// Cold-start path: the join-team-pending event fired before the JS listener
 			// registered (lost), but Rust holds the token in its mutex until we drain it.
 			try {
 				const tok = await takePendingJoinTeam();
-				if (tok) redeemInvite(tok);
+				if (tok) {
+					redeemInvite(tok, 'deeplink');
+				} else {
+					// Deferred deep-link: Install Referrer / clipboard (no return-to-browser).
+					try {
+						const deferred = await resolveDeferredInvite();
+						if (deferred?.token) {
+							redeemInvite(deferred.token, deferred.method);
+						}
+					} catch { /* native probe unavailable in browser dev */ }
+				}
 			} catch { /* Tauri not available in browser dev */ }
 		}
 
@@ -240,7 +262,7 @@
 			if (step === 'joining') return;
 			try {
 				const tok = await takePendingJoinTeam();
-				if (tok) redeemInvite(tok);
+				if (tok) redeemInvite(tok, 'deeplink');
 			} catch { /* browser dev */ }
 		});
 		const unsubCancel = await listen('auth-cancelled', () => reset());
@@ -315,6 +337,31 @@
 			<button class="btn-link" onclick={() => { step = 'paste'; error = null; }}>
 				Enter a token instead
 			</button>
+			<button class="btn-link" onclick={() => { step = 'invite'; error = null; inviteInput = ''; }}>
+				Have an invite?
+			</button>
+
+		{:else if step === 'invite'}
+			<div class="waiting-card">
+				<p class="waiting-text">Have an invite?</p>
+				<p class="waiting-sub">
+					Enter the 8-character code from the invite page, or paste the invite link.
+				</p>
+			</div>
+			{#if error}<p class="error">{error}</p>{/if}
+			<input
+				class="token-input"
+				type="text"
+				placeholder="Invite code or link"
+				bind:value={inviteInput}
+				autocomplete="off"
+				spellcheck="false"
+				onkeydown={(e) => e.key === 'Enter' && redeemInviteManual()}
+			/>
+			<button class="btn-primary" onclick={redeemInviteManual} disabled={busy || !inviteInput.trim()}>
+				{#if step === 'joining'}<span class="spinner"></span> Joining…{:else}Join team{/if}
+			</button>
+			<button class="btn-link" onclick={reset}>← Back</button>
 
 		{:else if step === 'join-node'}
 			<div class="waiting-card">

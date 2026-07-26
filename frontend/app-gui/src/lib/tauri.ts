@@ -414,14 +414,19 @@ export async function joinTeam(invite: string): Promise<void> {
 
 // Member magic-link join (no GitHub, no OTP): the emailed invite token IS the credential —
 // redeem it to become an email-rooted member and get signed in. ZERO confirm (Part D §A).
-export async function joinTeamLink(token: string): Promise<AuthState> {
-  return invoke<AuthState>("join_team_link", { token });
+// `method` = deferred-deeplink channel for join analytics (clipboard/referrer/short_code/…).
+export async function joinTeamLink(token: string, method?: string): Promise<AuthState> {
+  return invoke<AuthState>("join_team_link", { token, method: method ?? null });
 }
 // Drain the pending join-team invite token from Rust. The welcome page calls this on
 // cold start: the JS event fires before the listener registers (and is lost), but the
 // Rust mutex holds the token until this command explicitly drains it.
 export async function takePendingJoinTeam(): Promise<string | null> {
   return invoke<string | null>("take_pending_join_team");
+}
+/** First-run InviteResolver: Install Referrer / clipboard `ankayma-invite:`. */
+export async function resolveDeferredInvite(): Promise<{ token: string; method: string } | null> {
+  return invoke<{ token: string; method: string } | null>("resolve_deferred_invite");
 }
 // Offboard a member (admin). Gated behind a step-up — pass `proof` on retry (M-4).
 export async function removeMember(userId: string, proof?: StepUpProof): Promise<void> {
