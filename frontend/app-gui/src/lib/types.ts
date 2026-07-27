@@ -194,6 +194,9 @@ export interface AccessService {
   label: string;
   node: string;
   rule_ref: string;
+  // Auto-TLS state from my_access: "issued" → Open over HTTPS; otherwise HTTP
+  // (TLS not ready). Present for every service incl. a teammate's shared one.
+  cert_status?: string;
   // TODO[A]: my_access doesn't return these yet — UI hides them until the
   // command grows the field. tags/status mirror the mockup's pill/dot states.
   tags?: string[];
