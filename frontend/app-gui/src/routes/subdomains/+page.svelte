@@ -4,6 +4,8 @@
 	import { listSubdomains, createSubdomain, deleteSubdomain, openSubdomain, listNodes, publishSampleDemo, unpublishSampleDemo } from '$lib/tauri';
 	import { runWithStepUp } from '$lib/stepup';
 	import type { Subdomain, PeerBrief } from '$lib/types';
+	import { connection } from '$lib/stores';
+	import { canOpen, openScheme, openTitle } from '$lib/openService';
 
 	// F-3 branded subdomain (Part C §H.3.6.1, milestone 1.4): a private name mapped
 	// onto one of your mesh nodes. Private-default — resolves only on enrolled
@@ -122,6 +124,13 @@
 			default: return 'No TLS yet';
 		}
 	}
+
+	let connected = $derived($connection.status === 'connected');
+
+	function openEntry(entry: Subdomain) {
+		if (!canOpen(connected, true)) return;
+		openSubdomain(entry.fqdn, openScheme(entry.cert_status));
+	}
 </script>
 
 <main>
@@ -174,7 +183,13 @@
 								{/if}
 							</div>
 							<div class="entry-actions">
-								<button class="link-btn" onclick={() => openSubdomain(entry.fqdn)} aria-label="Open in browser">Open</button>
+								<button
+									class="link-btn"
+									disabled={!canOpen(connected, true)}
+									title={openTitle({ connected, reachable: true, certStatus: entry.cert_status })}
+									onclick={() => openEntry(entry)}
+									aria-label="Open in browser"
+								>Open</button>
 								<button
 									class="remove-btn"
 									onclick={() => isSampleDemo(entry) ? removeSampleDemo(entry.label) : removeSubdomain(entry.label)}
@@ -407,6 +422,11 @@
 	}
 
 	.link-btn:hover { background: color-mix(in srgb, var(--c-accent) 12%, transparent); }
+	.link-btn:disabled {
+		opacity: 0.45;
+		cursor: not-allowed;
+	}
+	.link-btn:disabled:hover { background: none; }
 
 	.remove-btn {
 		width: 32px;

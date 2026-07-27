@@ -1,11 +1,12 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { goto } from "$app/navigation";
-  import { myAccess, openSubdomain, getNodeInfo, listNodes, listCiPolicies, ciHistory, sshHistory, getPathProof, probeReachable } from "$lib/tauri";
+  import { myAccess, openSubdomain, getNodeInfo, listNodes, listCiPolicies, ciHistory, sshHistory, getPathProof, probeReachable, listSubdomains } from "$lib/tauri";
   import type { MyAccess, AccessService, PeerBrief, CiPolicy, CiRun, SshSession, PathProof, PathPeer } from "$lib/types";
   import { connection, myRole } from "$lib/stores";
   import ConnectionCard from "$lib/components/ConnectionCard.svelte";
   import PathChain from "$lib/components/PathChain.svelte";
+  import { canOpen, openScheme, openTitle } from "$lib/openService";
 
   // my-access (addendum §D): the services this identity may reach, derived from the
   // active PolicyBlock. Admin sees all (allow-within-owner); members see what policy
@@ -20,6 +21,8 @@
   let myNodeId = $state<string | null>(null);
   let peers = $state<PeerBrief[]>([]);
   let proof = $state<PathProof | null>(null);
+  // fqdn → cert_status from list_subdomains (my_access has no cert field yet).
+  let certByFqdn = $state<Map<string, string>>(new Map());
   // overlay_ip → reachable, from the active TCP probe (authoritative "reachable NOW").
   // Keyed by overlay IP, not hostname: the overlay is a node's canonical mesh identity
   // (unique + stable), whereas a default hostname ("localhost.localdomain") collides
@@ -137,8 +140,17 @@
     loading = true;
     error = "";
     try {
-      data = await myAccess();
+      const [access, subs] = await Promise.all([
+        myAccess(),
+        listSubdomains().catch(() => [] as Awaited<ReturnType<typeof listSubdomains>>),
+      ]);
+      data = access;
       myRole.set(data.role); // surface role app-wide (BottomTabBar admin-tab gate)
+      const m = new Map<string, string>();
+      for (const s of subs) {
+        if (s.cert_status) m.set(s.fqdn, s.cert_status);
+      }
+      certByFqdn = m;
     } catch (e: unknown) {
       error = e instanceof Error ? e.message : "Failed to load services";
     } finally {
@@ -170,6 +182,25 @@
   let ownedGroups = $derived(groups.filter((g) => g.owned));
   let teamGroups = $derived(groups.filter((g) => !g.owned));
   let connected = $derived($connection.status === "connected");
+
+  // Open: self-device counts as reachable when connected; scheme from cert map.
+  function openReachable(node: string, owned: boolean): boolean {
+    return owned || !probedDown(node);
+  }
+  function openEnabled(node: string, owned: boolean): boolean {
+    return canOpen(connected, openReachable(node, owned));
+  }
+  function openBtnTitle(svc: AccessService, owned: boolean): string {
+    return openTitle({
+      connected,
+      reachable: openReachable(svc.node, owned),
+      certStatus: certByFqdn.get(svc.fqdn),
+    });
+  }
+  function openSvc(svc: AccessService, owned: boolean) {
+    if (!openEnabled(svc.node, owned)) return;
+    openSubdomain(svc.fqdn, openScheme(certByFqdn.get(svc.fqdn)));
+  }
 
   // Filter (header dropdown) — narrows the list to my nodes / team-shared.
   let filter = $state<"all" | "mine" | "team">("all");
@@ -465,8 +496,8 @@
         {#if ciRules(svc.node).length > 0}
           <button class="btn-secondary ci-chip" title="CI deploy history for {svc.node}" onclick={() => openCiHistory(svc.node, "ci")}>🧾 CICD</button>
         {/if}
-        <!-- self device (this machine): Open/SSH/path chain to yourself are no-ops;
-             keep only CI/CD history. `owned` == the current device (hostname match). -->
+        <!-- Path/SSH to yourself are no-ops; Open is allowed (self overlay loop).
+             `owned` == the current device (hostname match). -->
         {#if !owned && sshPeer(svc.node)}
           <button
             class="btn-secondary ssh-btn"
@@ -478,9 +509,12 @@
             SSH
           </button>
         {/if}
-        {#if !owned}
-          <button class="btn-primary" disabled={!connected || probedDown(svc.node)} title={probedDown(svc.node) ? "Unreachable — no response over the mesh" : ""} onclick={() => openSubdomain(svc.fqdn)}>Open ↗</button>
-        {/if}
+        <button
+          class="btn-primary"
+          disabled={!openEnabled(svc.node, owned)}
+          title={openBtnTitle(svc, owned)}
+          onclick={() => openSvc(svc, owned)}
+        >Open ↗</button>
       </div>
     {/if}
   </div>
@@ -545,11 +579,15 @@
           </div>
           {#if svc.status === "denied"}
             <span class="denied-text">access denied</span>
-          {:else if !group.owned}
-            <!-- Per-domain action only: Open. Path chain + CI/CD are node-level (in
-                 the node header above) — they're identical for every service here. -->
+          {:else}
+            <!-- Per-domain Open (incl. self-device). Path + CI/CD are node-level above. -->
             <div class="child-actions">
-              <button class="btn-primary sm" disabled={!connected || probedDown(svc.node)} title={probedDown(svc.node) ? "Unreachable — no response over the mesh" : ""} onclick={() => openSubdomain(svc.fqdn)}>Open ↗</button>
+              <button
+                class="btn-primary sm"
+                disabled={!openEnabled(svc.node, group.owned)}
+                title={openBtnTitle(svc, group.owned)}
+                onclick={() => openSvc(svc, group.owned)}
+              >Open ↗</button>
             </div>
           {/if}
         </div>

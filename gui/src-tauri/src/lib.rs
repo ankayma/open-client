@@ -2880,11 +2880,16 @@ async fn delete_subdomain(
 }
 
 /// Open a branded name in the browser. It resolves only on an enrolled device once
-/// the mesh resolver is active; TLS works once the node's own relay has an issued
-/// cert (see `get_subdomain_cert` / `cert_status`) — best-effort until then.
+/// the mesh resolver is active. Prefer HTTPS when the caller knows TLS is ready
+/// (`cert_status == issued`); pass `scheme: "http"` to fall back when it is not —
+/// HTTP relay is available without a cert. Default remains HTTPS.
 #[tauri::command]
-async fn open_subdomain(fqdn: String) -> Result<(), String> {
-    open_url(&format!("https://{fqdn}"))
+async fn open_subdomain(fqdn: String, scheme: Option<String>) -> Result<(), String> {
+    let scheme = match scheme.as_deref() {
+        Some("http") => "http",
+        _ => "https",
+    };
+    open_url(&format!("{scheme}://{fqdn}"))
 }
 
 /// The label reserved for the one-click sample demo. A bare constant, not

@@ -393,8 +393,11 @@ export async function deleteSubdomain(label: string, proof?: StepUpProof): Promi
   return invoke("delete_subdomain", { label, proofToken: proof?.proofToken });
 }
 
-export async function openSubdomain(fqdn: string): Promise<void> {
-  return invoke("open_subdomain", { fqdn });
+export async function openSubdomain(
+  fqdn: string,
+  scheme: "https" | "http" = "https",
+): Promise<void> {
+  return invoke("open_subdomain", { fqdn, scheme });
 }
 
 // One-click "Publish a sample demo" (F0 step-2 friction killer): serves a
