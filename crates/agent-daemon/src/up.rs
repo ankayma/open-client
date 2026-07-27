@@ -759,9 +759,7 @@ impl Config {
                         .parse()
                         .context("--port must be a number")?
                 }
-                "--state" => {
-                    state_path = Some(it.next().context("--state needs a value")?.clone())
-                }
+                "--state" => state_path = Some(it.next().context("--state needs a value")?.clone()),
                 // Must be pinned BEFORE anything calls state_dir() — the OnceLock
                 // memoizes the first resolution, so a flag seen after a default
                 // resolution would be silently ignored. state_path's default is

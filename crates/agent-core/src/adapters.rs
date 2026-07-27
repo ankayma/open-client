@@ -150,6 +150,39 @@ pub async fn session_info(
     get_json(http, base_url, "/api/v1/session", session_token).await
 }
 
+/// Upload a user-triggered diagnostic bundle. `POST /api/v1/diagnostics`, session-authed.
+/// The bundle is connection-level operational metadata (daemon log tails + status
+/// snapshot) — never data-plane payload [T:A.1.1] — and the user consents per send
+/// (no background stream). Returns the server's report id, which the user quotes to
+/// support. The server caps the body and rate-limits; a 429 surfaces as `Status(429)`.
+pub async fn post_diagnostics(
+    http: &reqwest::Client,
+    base_url: &str,
+    session_token: &str,
+    bundle: &serde_json::Value,
+) -> Result<String, ApiError> {
+    let resp = http
+        .post(url(base_url, "/api/v1/diagnostics"))
+        .bearer_auth(session_token)
+        .json(bundle)
+        .timeout(CP_REST_TIMEOUT)
+        .send()
+        .await
+        .map_err(|e| ApiError::Transport(e.to_string()))?;
+    let status = resp.status();
+    if !status.is_success() {
+        return Err(ApiError::Status(status.as_u16()));
+    }
+    #[derive(serde::Deserialize)]
+    struct Out {
+        report_id: String,
+    }
+    resp.json::<Out>()
+        .await
+        .map(|o| o.report_id)
+        .map_err(|e| ApiError::Decode(e.to_string()))
+}
+
 /// Ask the control plane for a hosted checkout URL for `plan` (e.g. "F0-Plus", "F1-25").
 /// `POST /api/v1/billing/checkout`. Billing logic lives in the control plane `[T:A.1.1]`:
 /// the client only forwards the plan key and opens the returned URL. The CP stamps the

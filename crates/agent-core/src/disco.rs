@@ -229,7 +229,7 @@ mod tests {
         let reflexive = SocketAddr::from((Ipv4Addr::new(198, 51, 100, 4), 51820));
         std::thread::spawn(move || {
             let mut buf = [0u8; 512];
-            let (n, _from) = server.recv_from(&mut buf).unwrap();
+            let (_n, _from) = server.recv_from(&mut buf).unwrap();
             let mut txid = [0u8; 12];
             txid.copy_from_slice(&buf[8..20]);
             let resp = super::tests::success_response(&txid, reflexive);

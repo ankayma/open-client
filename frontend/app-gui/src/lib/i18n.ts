@@ -52,6 +52,18 @@ export const STRINGS: Record<Lang, Record<string, string>> = {
     pf_action_vpn:    'Cho phép VPN',
     pf_waiting:       'Đang chờ bạn phê duyệt…',
     pf_ready:         'Xong — có thể kết nối',
+
+    // user-triggered diagnostics (bug report on a Tunnel-down card)
+    diag_send:        'Gửi chẩn đoán',
+    diag_title:       'Gửi chẩn đoán về Ankayma',
+    diag_intro:       'Xem trước đúng nội dung sẽ gửi. Chỉ gồm log kết nối + trạng thái — KHÔNG có khóa, token hay dữ liệu của bạn. Chỉ gửi khi bạn bấm.',
+    diag_building:    'Đang gom…',
+    diag_send_btn:    'Gửi cho Ankayma',
+    diag_cancel:      'Không gửi',
+    diag_sending:     'Đang gửi…',
+    diag_sent:        'Đã gửi. Mã báo cáo:',
+    diag_sent_hint:   'Đưa mã này cho support để tra đúng báo cáo.',
+    diag_error:       'Không gửi được:',
   },
 
   en: {
@@ -105,6 +117,18 @@ export const STRINGS: Record<Lang, Record<string, string>> = {
     pf_action_vpn:    'Allow VPN access',
     pf_waiting:       'Waiting for your approval…',
     pf_ready:         'All set — you can connect now',
+
+    // user-triggered diagnostics (bug report on a Tunnel-down card)
+    diag_send:        'Send diagnostics',
+    diag_title:       'Send diagnostics to Ankayma',
+    diag_intro:       'Review exactly what will be sent. Connection logs + status only — NEVER keys, tokens, or your data. It is sent only when you tap Send.',
+    diag_building:    'Gathering…',
+    diag_send_btn:    'Send to Ankayma',
+    diag_cancel:      'Not now',
+    diag_sending:     'Sending…',
+    diag_sent:        'Sent. Report id:',
+    diag_sent_hint:   'Give this id to support to find your report.',
+    diag_error:       'Couldn’t send:',
   },
 };
 
