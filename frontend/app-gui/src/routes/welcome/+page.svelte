@@ -358,8 +358,11 @@
 				spellcheck="false"
 				onkeydown={(e) => e.key === 'Enter' && redeemInviteManual()}
 			/>
+			<!-- redeemInvite() flips step to 'joining' synchronously, so this button
+			     unmounts and the dedicated `step === 'joining'` card takes over — no
+			     in-button spinner needed here. -->
 			<button class="btn-primary" onclick={redeemInviteManual} disabled={busy || !inviteInput.trim()}>
-				{#if step === 'joining'}<span class="spinner"></span> Joining…{:else}Join team{/if}
+				Join team
 			</button>
 			<button class="btn-link" onclick={reset}>← Back</button>
 
