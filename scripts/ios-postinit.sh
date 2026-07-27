@@ -115,6 +115,26 @@ fi
 (cd "$GEN" && xcodegen generate)
 echo "✓ xcodegen done — gen/apple/ankayma-gui.xcodeproj (app + PacketTunnel targets)"
 
+# 4b. Drop raw `${FORCE_COLOR}` from the Build Rust Code script. cargo-mobile emits
+#     `… ${FORCE_COLOR} ${ARCHS:?}`; when FORCE_COLOR=0/1 (common), clap treats the digit
+#     as a positional ARCH → "Arch … isn't a known arch". Flag is optional; omit it.
+#     Must re-run xcodegen after patching project.yml. Idempotent.
+if grep -q '\${FORCE_COLOR}' "$PROJ"; then
+  python3 - "$PROJ" <<'PY'
+import pathlib, sys
+p = pathlib.Path(sys.argv[1])
+text = p.read_text()
+old = " ${FORCE_COLOR} ${ARCHS:?}"
+new = " ${ARCHS:?}"
+if old not in text:
+    raise SystemExit(0)
+p.write_text(text.replace(old, new, 1))
+print("patched FORCE_COLOR out of xcode-script line")
+PY
+  (cd "$GEN" && xcodegen generate)
+  echo "✓ Build Rust Code script: removed FORCE_COLOR digit-as-ARCH bug"
+fi
+
 # 5. Regenerate the App Icon from the CANONICAL source. `cargo tauri ios init` seeds
 #    gen/apple/Assets.xcassets/AppIcon from stale derived icons — it has shipped the
 #    WRONG swirl logo to the App Store before (0.1.0, 1.1.3-build1; see memory

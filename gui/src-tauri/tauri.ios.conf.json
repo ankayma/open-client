@@ -4,6 +4,9 @@
     "beforeBuildCommand": "cd ../frontend/app-gui && npm run build"
   },
   "bundle": {
-    "externalBin": []
+    "externalBin": [],
+    "iOS": {
+      "developmentTeam": "8UF87JS6WW"
+    }
   }
 }
