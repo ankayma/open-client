@@ -188,6 +188,7 @@ dependencies = [
  "log",
  "objc2",
  "open",
+ "security-framework 3.7.0",
  "serde",
  "serde_json",
  "smappservice-rs",

@@ -353,6 +353,27 @@ export async function webauthnRegisterFinish(stateId: string, credential: any, l
   return invoke("webauthn_register_finish", { stateId, credential, label });
 }
 
+// Touch ID / Face ID (E-7 StepUp — biometric-only factor, AAL2, owner-directed
+// 2026-07-28). Deliberately NOT WebAuthn/passkey — see stepup.rs
+// StepUpVerifyReq::PlatformKey doc for why. Everything (key creation, Touch ID
+// prompt, signing) happens natively in Rust; these commands are macOS-only
+// today (other platforms return an error/false, no UI is shown for them).
+
+export async function platformKeyStatus(): Promise<boolean> {
+  return invoke<boolean>("platform_key_status");
+}
+
+export async function platformKeyEnroll(): Promise<void> {
+  return invoke("platform_key_enroll");
+}
+
+// Full ceremony in one call: mint challenge, sign with Touch ID, verify —
+// returns the proof_token directly (unlike TOTP/OTP, there's no code for the
+// frontend to collect first).
+export async function platformKeySignChallenge(purpose: string): Promise<string> {
+  return invoke<string>("platform_key_sign_challenge", { purpose });
+}
+
 export async function webauthnAuthenticateStart(): Promise<any> {
   return invoke("webauthn_authenticate_start");
 }

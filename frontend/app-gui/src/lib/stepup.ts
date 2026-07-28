@@ -10,7 +10,15 @@
 // transparent pass-through for them.
 
 import { writable } from "svelte/store";
-import { requestStepUp, verifyStepUp, verifyStepUpTotp, totpStatus, type StepUpProof } from "./tauri";
+import {
+  requestStepUp,
+  verifyStepUp,
+  verifyStepUpTotp,
+  totpStatus,
+  platformKeyStatus,
+  platformKeySignChallenge,
+  type StepUpProof,
+} from "./tauri";
 import { verifyWithSecurityKey } from "./webauthn";
 
 export interface StepUpState {
@@ -93,6 +101,22 @@ export async function runWithStepUp<T>(
     // factor is correct per A.1.10).
     const proofToken = await verifyWithSecurityKey(purpose);
     return await action({ proofToken });
+  }
+
+  // Touch ID/Face ID, if enrolled: try it first, no modal — same "the ceremony
+  // IS the UI" shape as the AAL3 security-key path above. Unlike AAL3 there IS
+  // a fallback here: a cancelled/failed Touch ID (sensor issue, no finger
+  // enrolled, etc.) falls through to TOTP/OTP below rather than hard-failing —
+  // that's recovering via a DIFFERENT independent factor, not the same
+  // ceremony silently degrading to a password (which is exactly what this
+  // factor exists to avoid — see stepup.rs StepUpVerifyReq::PlatformKey doc).
+  if (await platformKeyStatus().catch(() => false)) {
+    try {
+      const proofToken = await platformKeySignChallenge(purpose);
+      return await action({ proofToken });
+    } catch {
+      // fall through to TOTP/OTP below
+    }
   }
 
   let factor: "totp" | "otp" = (await totpStatus().catch(() => false)) ? "totp" : "otp";

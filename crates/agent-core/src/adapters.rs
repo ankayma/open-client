@@ -1604,6 +1604,110 @@ pub async fn verify_step_up_webauthn(
     .await
 }
 
+/// `GET /api/v1/stepup/platform-key/status` — whether the caller has a
+/// registered Secure Enclave (Touch ID/Face ID) key, mirroring
+/// `webauthn_status`/`totp_status`.
+pub async fn platform_key_status(
+    http: &reqwest::Client,
+    base_url: &str,
+    session_token: &str,
+) -> Result<bool, ApiError> {
+    #[derive(serde::Deserialize)]
+    struct Resp {
+        registered: bool,
+    }
+    let r: Resp = get_json(
+        http,
+        base_url,
+        "/api/v1/stepup/platform-key/status",
+        session_token,
+    )
+    .await?;
+    Ok(r.registered)
+}
+
+/// `POST /api/v1/stepup/platform-key/register` — `public_key` is the
+/// base64-standard SEC1-uncompressed P-256 point the platform layer just
+/// created in the Secure Enclave (biometryCurrentSet, no passcode fallback).
+pub async fn platform_key_register(
+    http: &reqwest::Client,
+    base_url: &str,
+    session_token: &str,
+    public_key_b64: &str,
+    label: Option<&str>,
+) -> Result<(), ApiError> {
+    let resp = http
+        .post(url(base_url, "/api/v1/stepup/platform-key/register"))
+        .bearer_auth(session_token)
+        .json(&serde_json::json!({
+            "public_key": public_key_b64,
+            "label": label,
+        }))
+        .timeout(CP_REST_TIMEOUT)
+        .send()
+        .await
+        .map_err(|e| ApiError::Transport(e.to_string()))?;
+    expect_ok(resp).await
+}
+
+/// `POST /api/v1/stepup/platform-key/challenge` — mints a nonce for the
+/// platform layer to sign with Touch ID/Face ID. Returns `(challenge_id,
+/// nonce_b64)`.
+pub async fn platform_key_challenge(
+    http: &reqwest::Client,
+    base_url: &str,
+    session_token: &str,
+    purpose: &str,
+) -> Result<(String, String), ApiError> {
+    #[derive(serde::Deserialize)]
+    struct Resp {
+        challenge_id: String,
+        nonce: String,
+    }
+    let resp = http
+        .post(url(base_url, "/api/v1/stepup/platform-key/challenge"))
+        .bearer_auth(session_token)
+        .json(&serde_json::json!({ "purpose": purpose }))
+        .timeout(CP_REST_TIMEOUT)
+        .send()
+        .await
+        .map_err(|e| ApiError::Transport(e.to_string()))?;
+    if !resp.status().is_success() {
+        return Err(status_error(resp).await);
+    }
+    let r: Resp = resp
+        .json()
+        .await
+        .map_err(|e| ApiError::Decode(e.to_string()))?;
+    Ok((r.challenge_id, r.nonce))
+}
+
+/// Same exchange as `verify_step_up_webauthn`, against a Touch ID/Face ID
+/// Secure Enclave signature (AAL2 — see StepUpVerifyReq::PlatformKey doc for
+/// why this isn't AAL3). `signature_b64` is base64-standard ASN.1/DER
+/// ECDSA-P256-SHA256 over the challenge's raw nonce bytes.
+pub async fn verify_step_up_platform_key(
+    http: &reqwest::Client,
+    base_url: &str,
+    session_token: &str,
+    purpose: &str,
+    challenge_id: &str,
+    signature_b64: &str,
+) -> Result<String, ApiError> {
+    post_stepup_verify(
+        http,
+        base_url,
+        session_token,
+        &serde_json::json!({
+            "factor": "platform_key",
+            "purpose": purpose,
+            "challenge_id": challenge_id,
+            "signature": signature_b64,
+        }),
+    )
+    .await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

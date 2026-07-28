@@ -5,7 +5,16 @@
 	// button that does nothing is worse than no button (P.3 honest gap).
 	import { onMount } from 'svelte';
 	import { connection } from '$lib/stores';
-	import { totpStatus, totpEnroll, totpConfirm, totpDisable, webauthnStatus } from '$lib/tauri';
+	import {
+		totpStatus,
+		totpEnroll,
+		totpConfirm,
+		totpDisable,
+		webauthnStatus,
+		getPlatform,
+		platformKeyStatus,
+		platformKeyEnroll
+	} from '$lib/tauri';
 	import { runWithStepUp } from '$lib/stepup';
 	import { registerSecurityKey, webauthnAvailable } from '$lib/webauthn';
 
@@ -33,7 +42,34 @@
 		} catch {
 			webauthnRegistered = false;
 		}
+		try {
+			isMacOS = (await getPlatform()) === 'macos';
+			if (isMacOS) platformKeyRegistered = await platformKeyStatus();
+		} catch {
+			isMacOS = false;
+		}
 	});
+
+	// Touch ID (E-7 StepUp biometric-only factor, macOS-only for now — owner-directed
+	// 2026-07-28). Deliberately separate from the security-key section: this is a
+	// Secure Enclave key with biometryCurrentSet, not a WebAuthn/passkey credential.
+	let isMacOS = $state(false);
+	let platformKeyRegistered = $state(false);
+	let platformKeyBusy = $state(false);
+	let platformKeyError = $state('');
+
+	async function enrollPlatformKey() {
+		platformKeyBusy = true;
+		platformKeyError = '';
+		try {
+			await platformKeyEnroll();
+			platformKeyRegistered = true;
+		} catch (e) {
+			platformKeyError = e instanceof Error ? e.message : 'Could not set up Touch ID';
+		} finally {
+			platformKeyBusy = false;
+		}
+	}
 
 	// Security key (YubiKey/FIDO2) — E-7 StepUp Phase 3, AAL3.
 	let webauthnRegistered = $state(false);
@@ -185,6 +221,32 @@
 			</div>
 		{/if}
 	</section>
+
+	{#if isMacOS}
+		<section class="card">
+			<div class="section-label">Touch ID</div>
+			{#if platformKeyRegistered}
+				<div class="row">
+					<span class="label">Touch ID</span>
+					<span class="value">Set up</span>
+				</div>
+			{:else}
+				<div class="row">
+					<span class="value dim">
+						Use Touch ID to confirm sensitive actions instead of typing a code. A failed or
+						cancelled Touch ID never falls back to a password — you'll just be asked to try
+						again or use another factor.
+					</span>
+				</div>
+				<div class="row">
+					<button class="su-primary" onclick={enrollPlatformKey} disabled={platformKeyBusy}>
+						{platformKeyBusy ? 'Waiting for Touch ID…' : 'Set up Touch ID'}
+					</button>
+				</div>
+				{#if platformKeyError}<p class="err">{platformKeyError}</p>{/if}
+			{/if}
+		</section>
+	{/if}
 
 	{#if webauthnAvailable()}
 		<section class="card">

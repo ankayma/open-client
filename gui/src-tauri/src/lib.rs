@@ -1619,6 +1619,185 @@ async fn verify_step_up_webauthn(
     .map_err(|e| e.to_string())
 }
 
+// E-7 StepUp: Touch ID/Face ID biometric-only factor (owner-directed 2026-07-28).
+// Deliberately NOT the WebAuthn/passkey path — Apple's platform-authenticator
+// passkey ceremony falls back to the account password when biometry is
+// unavailable, which defeats the point. This uses the lower-level Keychain +
+// LocalAuthentication API directly: a Secure Enclave EC key created with access
+// control `biometryCurrentSet` and NO `devicePasscode` fallback flag, so a
+// failed/cancelled Touch ID fails the step-up outright, never degrades to a
+// weaker secret. `[T:developer.apple.com/forums/thread/786171 — SE access needs
+// an App ID authorised by a profile; a real signed app bundle satisfies this
+// where a bare CLI binary can't]`
+#[cfg(target_os = "macos")]
+const PLATFORM_KEY_LABEL: &str = "com.ankayma.app.stepup.touchid";
+
+#[cfg(target_os = "macos")]
+fn platform_key_access_control() -> Result<security_framework::access_control::SecAccessControl, String>
+{
+    use security_framework::access_control::SecAccessControl;
+    // Apple Security.framework SecAccessControlCreateFlags (SecAccessControl.h):
+    // kSecAccessControlBiometryCurrentSet = 1u<<3, kSecAccessControlPrivateKeyUsage
+    // = 1u<<30. Deliberately NOT combined with kSecAccessControlDevicePasscode
+    // (1u<<4) or kSecAccessControlUserPresence (1u<<0) — those allow passcode
+    // fallback, which this factor exists specifically to avoid.
+    const K_SEC_ACCESS_CONTROL_BIOMETRY_CURRENT_SET: usize = 1 << 3;
+    const K_SEC_ACCESS_CONTROL_PRIVATE_KEY_USAGE: usize = 1 << 30;
+    SecAccessControl::create_with_flags(
+        K_SEC_ACCESS_CONTROL_BIOMETRY_CURRENT_SET | K_SEC_ACCESS_CONTROL_PRIVATE_KEY_USAGE,
+    )
+    .map_err(|e| format!("create_with_flags failed: {e:?}"))
+}
+
+/// Find this app's previously-enrolled Secure Enclave key by its stable label,
+/// so `platform_key_sign_challenge` signs with the SAME key `platform_key_enroll`
+/// registered server-side (not a freshly-generated one).
+#[cfg(target_os = "macos")]
+fn find_platform_key() -> Result<Option<security_framework::key::SecKey>, String> {
+    use security_framework::item::{ItemClass, ItemSearchOptions, KeyClass, Reference, SearchResult};
+    let results = ItemSearchOptions::new()
+        .class(ItemClass::key())
+        .key_class(KeyClass::private())
+        .label(PLATFORM_KEY_LABEL)
+        .load_refs(true)
+        .search()
+        .map_err(|e| format!("keychain search failed: {e:?}"))?;
+    for r in results {
+        if let SearchResult::Ref(Reference::Key(k)) = r {
+            return Ok(Some(k));
+        }
+    }
+    Ok(None)
+}
+
+/// Create (or reuse) the Secure Enclave key and register its public half with
+/// the control plane. Key creation itself does not prompt Touch ID (only a
+/// SIGN operation does, per `platform_key_sign_challenge`) — the OS defers the
+/// biometric check to first use.
+#[cfg(target_os = "macos")]
+#[tauri::command]
+async fn platform_key_enroll(state: State<'_, AppState>) -> Result<(), String> {
+    use security_framework::key::{GenerateKeyOptions, KeyType, SecKey, Token};
+    let tok = state.token().ok_or("not signed in")?;
+
+    let public_key_b64 = tauri::async_runtime::spawn_blocking(
+        move || -> Result<String, String> {
+            let key = match find_platform_key()? {
+                Some(k) => k,
+                None => {
+                    let access_control = platform_key_access_control()?;
+                    let mut options = GenerateKeyOptions::default();
+                    options
+                        .set_key_type(KeyType::ec())
+                        .set_token(Token::SecureEnclave)
+                        .set_label(PLATFORM_KEY_LABEL.to_string())
+                        .set_access_control(access_control);
+                    SecKey::new(&options).map_err(|e| format!("SecKey::new failed: {e:?}"))?
+                }
+            };
+            let public = key.public_key().ok_or("key has no public half")?;
+            let raw = public
+                .external_representation()
+                .ok_or("no external representation")?;
+            use base64::Engine;
+            Ok(base64::engine::general_purpose::STANDARD.encode(raw.to_vec()))
+        },
+    )
+    .await
+    .map_err(|e| format!("task join error: {e:?}"))??;
+
+    adapters::platform_key_register(
+        &state.http,
+        &state.regional_base_url(),
+        &tok,
+        &public_key_b64,
+        Some("Touch ID"),
+    )
+    .await
+    .map_err(|e| e.to_string())
+}
+
+/// Full step-up ceremony in one round trip: mint a challenge, sign it locally
+/// (Touch ID gates the sign — cancel/fail returns an error, never a password
+/// prompt), verify server-side, return the proof_token. Mirrors
+/// `verify_step_up_totp`'s shape (purpose in, proof_token out) but — unlike a
+/// typed code — there's nothing for the frontend to collect from the user.
+#[cfg(target_os = "macos")]
+#[tauri::command]
+async fn platform_key_sign_challenge(
+    state: State<'_, AppState>,
+    purpose: String,
+) -> Result<String, String> {
+    use security_framework::key::Algorithm;
+    let tok = state.token().ok_or("not signed in")?;
+
+    let (challenge_id, nonce_b64) = adapters::platform_key_challenge(
+        &state.http,
+        &state.regional_base_url(),
+        &tok,
+        &purpose,
+    )
+    .await
+    .map_err(|e| e.to_string())?;
+
+    let signature_b64 = tauri::async_runtime::spawn_blocking(
+        move || -> Result<String, String> {
+            use base64::Engine;
+            let nonce = base64::engine::general_purpose::STANDARD
+                .decode(&nonce_b64)
+                .map_err(|e| format!("bad nonce from server: {e}"))?;
+            let key = find_platform_key()?.ok_or("no Touch ID key enrolled")?;
+            let sig = key
+                .create_signature(Algorithm::ECDSASignatureMessageX962SHA256, &nonce)
+                .map_err(|e| format!("Touch ID sign failed/cancelled: {e:?}"))?;
+            Ok(base64::engine::general_purpose::STANDARD.encode(sig))
+        },
+    )
+    .await
+    .map_err(|e| format!("task join error: {e:?}"))??;
+
+    adapters::verify_step_up_platform_key(
+        &state.http,
+        &state.regional_base_url(),
+        &tok,
+        &purpose,
+        &challenge_id,
+        &signature_b64,
+    )
+    .await
+    .map_err(|e| e.to_string())
+}
+
+#[cfg(target_os = "macos")]
+#[tauri::command]
+async fn platform_key_status(state: State<'_, AppState>) -> Result<bool, String> {
+    let tok = state.token().ok_or("not signed in")?;
+    adapters::platform_key_status(&state.http, &state.regional_base_url(), &tok)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[cfg(not(target_os = "macos"))]
+#[tauri::command]
+async fn platform_key_enroll(_state: State<'_, AppState>) -> Result<(), String> {
+    Err("Touch ID/Face ID step-up is macOS-only for now".into())
+}
+
+#[cfg(not(target_os = "macos"))]
+#[tauri::command]
+async fn platform_key_sign_challenge(
+    _state: State<'_, AppState>,
+    _purpose: String,
+) -> Result<String, String> {
+    Err("Touch ID/Face ID step-up is macOS-only for now".into())
+}
+
+#[cfg(not(target_os = "macos"))]
+#[tauri::command]
+async fn platform_key_status(_state: State<'_, AppState>) -> Result<bool, String> {
+    Ok(false)
+}
+
 /// Recipient side of the node-invite (`ankayma://join?token=…`): enroll THIS device
 /// into the invite's tenant using only the join token. No session is required — the
 /// token IS the authorization to join (A.1.10/A.1.22), so this works whether or not
@@ -3643,6 +3822,9 @@ pub fn run() {
             webauthn_register_finish,
             webauthn_authenticate_start,
             verify_step_up_webauthn,
+            platform_key_enroll,
+            platform_key_sign_challenge,
+            platform_key_status,
             join_enroll_node,
             start_dataplane,
             stop_dataplane,
