@@ -44,9 +44,17 @@
 		}
 		try {
 			isMacOS = (await getPlatform()) === 'macos';
-			if (isMacOS) platformKeyRegistered = await platformKeyStatus();
 		} catch {
 			isMacOS = false;
+		}
+		if (isMacOS) {
+			try {
+				platformKeyRegistered = await platformKeyStatus();
+			} catch {
+				// Server has no platform-key endpoint yet, or not signed in — the
+				// section still shows (this IS a Mac), just as not-yet-set-up.
+				platformKeyRegistered = false;
+			}
 		}
 	});
 
