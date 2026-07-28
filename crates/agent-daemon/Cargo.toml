@@ -77,6 +77,9 @@ windows-sys = { version = "0.59", features = [
     "Win32_System_RemoteDesktop",
     "Win32_Security_Authorization",
 ] }
+# Windows Service registration/control-handler for `agent service` (win_service) —
+# LocalSystem, auto-start (Change 3 of docs/windows-daemon-lifecycle-decision.md).
+windows-service = "0.8.1"
 
 [features]
 default = []

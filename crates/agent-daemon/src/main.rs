@@ -28,6 +28,8 @@ mod tun;
 mod up;
 #[cfg(target_os = "windows")]
 mod win_ipc;
+#[cfg(target_os = "windows")]
+mod win_service;
 mod win_supervisor;
 
 use anyhow::Result;
@@ -54,6 +56,21 @@ async fn main() -> Result<()> {
         Some("ci-policy") => ci_policy::run(&args[1..]).await,
         Some("agent-token") => agent_token::run(&args[1..]).await,
         Some("enroll-identity") => agent_identity::run(&args[1..]).await,
+        // SCM's registered binPath (Windows Service — Change 3 of
+        // docs/windows-daemon-lifecycle-decision.md). Blocks for the service's
+        // whole lifetime; `agent up` (above) is untouched and still used
+        // directly on macOS/Linux/CI/dev, and as the child process the service
+        // spawns per Connect on Windows (win_supervisor).
+        Some("service") => {
+            #[cfg(target_os = "windows")]
+            {
+                win_service::run().map_err(|e| anyhow::anyhow!("agent service: {e}"))
+            }
+            #[cfg(not(target_os = "windows"))]
+            {
+                anyhow::bail!("`agent service` is Windows-only")
+            }
+        }
         _ => run_gate(args).await,
     }
 }
