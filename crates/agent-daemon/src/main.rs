@@ -25,6 +25,7 @@ mod ssh_exec;
 mod tls_relay;
 mod tun;
 mod up;
+mod win_supervisor;
 
 use anyhow::Result;
 use chacha20poly1305::aead::{Aead, KeyInit};
