@@ -108,6 +108,21 @@ Migrate `agent.exe` on Windows to a registered **Windows Service**:
   rather than merely less likely.
 - New dependency: [`windows-service`](https://crates.io/crates/windows-service)
   (Windows-only) — flagged and approved as part of this decision.
+- **Migration safety net**: a pre-migration ankayma install ran `agent up` as a
+  bare elevated process, never registered with SCM — so on the device's very
+  first transition onto this architecture, `service_exists()` being false does
+  not just mean "never installed," it can also mean "the OLD bare process from
+  before this fix might still be alive" (per the original bug report, it could
+  survive an upgrade). `win_service_install::evict_pre_migration_agent_processes()`
+  (an elevated, waited `taskkill /IM agent.exe /F`, tolerant of "nothing to
+  kill") runs in exactly the two places this matters: inside `ensure_installed`
+  right before the service is first created, and inside `stop_service_verified`
+  when called by the auto-updater before the service has ever been created
+  (the very first auto-update onto this version can land before the user ever
+  clicks Connect). Deliberately **not** run unconditionally on every call — once
+  the service exists, the only `agent.exe` that should ever be running is the
+  supervisor's own tracked child, and a blind `taskkill /F` there would kill a
+  live, legitimate tunnel instead of a stale one.
 
 **Blast radius**: `crates/agent-daemon/Cargo.toml` only targets `macos`/`linux`/
 `windows` — iOS and Android never link this crate (they embed `agent-core` directly

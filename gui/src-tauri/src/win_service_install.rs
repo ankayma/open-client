@@ -72,6 +72,35 @@ pub fn service_exists() -> bool {
     query_state().is_some()
 }
 
+/// Migration safety net: a version of ankayma from *before* this Windows
+/// Service migration ran `agent up` as a bare elevated process (spawned via
+/// `Start-Process … -Verb RunAs`, never registered with SCM) — and per the
+/// original bug report, that process could survive an upgrade because the old
+/// `stop_dataplane_inner` didn't wait for its own `taskkill` to actually
+/// finish. `service_exists()` being false doesn't just mean "never installed"
+/// — on an upgrade from a pre-migration version, it can also mean "the OLD
+/// bare process might still be alive, holding the Wintun adapter / NRPT rule /
+/// port 53, invisible to and unmanaged by the new service." Call this ONLY
+/// where the caller has already confirmed `!service_exists()`, so it can never
+/// fire against a legitimate, currently-tracked child of an already-installed
+/// service. Best-effort: "nothing to kill" is success, not an error.
+fn evict_pre_migration_agent_processes() -> Result<(), String> {
+    let arg_list = "'/IM','agent.exe','/F'";
+    let ps = format!(
+        "Start-Process -FilePath 'taskkill' -ArgumentList {arg_list} -Verb RunAs -WindowStyle Hidden -Wait"
+    );
+    // Not run_elevated_wait: taskkill's own exit code is 128 ("process not
+    // found") when there's nothing to kill, which is success here, not a
+    // failure to surface — Start-Process's own exit status is what would
+    // signal a real problem (e.g. UAC declined), and that's still best-effort
+    // at this specific step (a rare failure here shouldn't block install/update;
+    // the real, hard-verified stop is the service-based one right after).
+    let _ = Command::new("powershell")
+        .args(["-NoProfile", "-NonInteractive", "-Command", &ps])
+        .status();
+    Ok(())
+}
+
 /// One-time install: register `Ankayma` as an `Automatic`, `LocalSystem`
 /// Windows Service (SCM then guarantees single-instance and start-at-boot —
 /// see the decision doc) and start it immediately so the mesh works without
@@ -81,6 +110,10 @@ pub fn ensure_installed(agent_bin: &Path) -> Result<(), String> {
     if service_exists() {
         return Ok(());
     }
+    // First-ever transition onto the service architecture on this device —
+    // clear out any pre-migration bare `agent.exe` before registering the
+    // service, so it never has to fight the new one for the Wintun adapter.
+    evict_pre_migration_agent_processes()?;
     let bin_path = format!("{} service", agent_bin.to_string_lossy());
     run_elevated_wait(
         "sc.exe",
@@ -106,7 +139,12 @@ pub fn ensure_installed(agent_bin: &Path) -> Result<(), String> {
 /// the original "old daemon survives the upgrade" bug, at the root this time.
 pub fn stop_service_verified() -> Result<(), String> {
     if !service_exists() {
-        return Ok(());
+        // The very first auto-update onto this architecture can land before
+        // the user ever clicks Connect — the service hasn't been created yet,
+        // so there's nothing for THIS function to stop, but a pre-migration
+        // bare `agent.exe` could still be holding the binary file open (the
+        // original bug, recurring right at the migration moment otherwise).
+        return evict_pre_migration_agent_processes();
     }
     run_elevated_wait("sc.exe", &["stop", SERVICE_NAME])?;
     let deadline = Instant::now() + Duration::from_secs(10);
