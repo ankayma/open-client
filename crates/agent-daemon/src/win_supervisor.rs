@@ -62,9 +62,25 @@ pub trait ChildSpawner: Send + Sync {
     fn spawn(&self, creds_token: &str, creds_control_plane: &str) -> std::io::Result<Child>;
 }
 
-/// Production spawner: `<current_exe> up --token <t> --control-plane <cp>` — the
-/// exact invocation the GUI uses today via `Start-Process`, minus the elevation
-/// (the supervisor process is already LocalSystem).
+/// The child's state dir — must be an explicit, well-known path, not `agent
+/// up`'s own default. Confirmed the hard way (T490, real end-to-end test):
+/// `up.rs`'s `default_state_dir()` checks `$HOME`/`%USERPROFILE%` *before*
+/// falling back to this same constant, and the supervisor's child inherits
+/// `LocalSystem`'s own environment — which DOES have a `%USERPROFILE%` (its
+/// own system profile, `...\config\systemprofile`), so the child silently
+/// wrote its status snapshot there instead. The GUI (running as the
+/// interactive user) only ever checks `%USERPROFILE%\.ankayma` for *that*
+/// user and this exact system path — never `LocalSystem`'s profile — so it
+/// showed "Tunnel down" forever despite a fully working tunnel. Passing
+/// `--state-dir` explicitly is exactly what the macOS helper already does for
+/// the identical reason (root's `$HOME` isn't the interactive user's either);
+/// this brings Windows to the same discipline.
+const CHILD_STATE_DIR: &str = r"C:\ProgramData\Ankayma";
+
+/// Production spawner: `<current_exe> up --token <t> --control-plane <cp>
+/// --state-dir <CHILD_STATE_DIR>` — the exact invocation the GUI uses today
+/// via `Start-Process`, minus the elevation (the supervisor process is
+/// already LocalSystem), plus the explicit state dir above.
 pub struct AgentUpSpawner;
 
 impl ChildSpawner for AgentUpSpawner {
@@ -76,6 +92,8 @@ impl ChildSpawner for AgentUpSpawner {
             .arg(token)
             .arg("--control-plane")
             .arg(control_plane)
+            .arg("--state-dir")
+            .arg(CHILD_STATE_DIR)
             .spawn()
     }
 }
