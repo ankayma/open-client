@@ -36,14 +36,13 @@ pub struct Response {
 }
 
 impl Response {
-    pub fn ok() -> Self {
-        Response {
-            ok: true,
-            connected: None,
-            error: None,
-        }
-    }
-
+    /// Every real reply carries a `connected` state — `Connect`/`Disconnect`/
+    /// `Status` all resolve to `Idle` or `Connected`, so there is no
+    /// bare-`{"ok":true}` reply any handler actually produces. (A confirmed-on-
+    /// real-Windows-build lesson: an earlier bare `ok()` constructor compiled
+    /// clean on macOS but showed up as genuine dead code — unused by any
+    /// production caller, only by its own test — the moment this crate was
+    /// actually built for `target_os = "windows"`.)
     pub fn ok_status(connected: bool) -> Self {
         Response {
             ok: true,
@@ -140,10 +139,13 @@ mod tests {
             r#"{"ok":true,"connected":true}"#
         );
         assert_eq!(
+            encode_response(&Response::ok_status(false)),
+            r#"{"ok":true,"connected":false}"#
+        );
+        assert_eq!(
             encode_response(&Response::err("not authorized")),
             r#"{"ok":false,"error":"not authorized"}"#
         );
-        assert_eq!(encode_response(&Response::ok()), r#"{"ok":true}"#);
     }
 
     #[test]
