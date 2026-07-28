@@ -17,6 +17,7 @@ mod agent_identity;
 mod agent_token;
 mod ci_deploy;
 mod ci_policy;
+mod ipc_protocol;
 mod netstack;
 mod resolve;
 mod resolver;
@@ -25,6 +26,8 @@ mod ssh_exec;
 mod tls_relay;
 mod tun;
 mod up;
+#[cfg(target_os = "windows")]
+mod win_ipc;
 mod win_supervisor;
 
 use anyhow::Result;

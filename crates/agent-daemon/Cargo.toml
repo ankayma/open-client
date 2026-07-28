@@ -23,7 +23,7 @@ async-nats = "0.40"
 chacha20poly1305 = "0.10"
 rand = "0.8"
 futures = "0.3"
-tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "time", "signal", "io-std", "io-util"] }
+tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "time", "signal", "io-std", "io-util", "net"] }
 anyhow = "1"
 # [T:A.1.21] data-plane deps (owner-reviewable, pinned). serde_json: agent state
 # file (persisted node identity, so re-runs don't leak a new control-plane node).
@@ -63,7 +63,20 @@ wintun = "0.5"
 # Console VT + raw-mode for the `agent ssh` client: without ENABLE_VIRTUAL_TERMINAL_
 # PROCESSING the remote PTY's ANSI escapes print literally (^[[01;32m…) and input
 # stays line-buffered. Mirrors the unix termios RawMode. [T:console VT]
-windows-sys = { version = "0.59", features = ["Win32_System_Console", "Win32_Foundation"] }
+# Win32_System_Pipes/Win32_Security/Win32_System_Threading/Win32_System_RemoteDesktop/
+# Win32_Security_Authorization: win_ipc's named-pipe identity check (ImpersonateNamedPipeClient
+# + OpenThreadToken + GetTokenInformation(TokenSessionId) + WTSGetActiveConsoleSessionId)
+# and the pipe's security descriptor (ConvertStringSecurityDescriptorToSecurityDescriptorW).
+# [T:decision docs/windows-daemon-lifecycle-decision.md]
+windows-sys = { version = "0.59", features = [
+    "Win32_System_Console",
+    "Win32_Foundation",
+    "Win32_System_Pipes",
+    "Win32_Security",
+    "Win32_System_Threading",
+    "Win32_System_RemoteDesktop",
+    "Win32_Security_Authorization",
+] }
 
 [features]
 default = []
