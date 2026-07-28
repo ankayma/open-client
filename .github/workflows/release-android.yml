@@ -97,6 +97,9 @@ jobs:
       # foreground (0% safe-zone margin) — the launcher's own mask then crops straight
       # into the logo, wrong/ugly corners on the home screen. Re-render with proper
       # padding before the APK is built. Same class of fix as scripts/ios-postinit.sh.
+      - name: Install Pillow (icon safe-zone fix)
+        run: pip install --quiet pillow
+
       - name: Fix Android adaptive-icon safe zone
         run: bash scripts/android-postinit.sh
 

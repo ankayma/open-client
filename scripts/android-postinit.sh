@@ -28,17 +28,30 @@ if [ ! -d "$RES/mipmap-xxxhdpi" ]; then
   echo "✗ $RES/mipmap-xxxhdpi not found — run 'cargo tauri android init' first." >&2
   exit 1
 fi
-command -v convert >/dev/null 2>&1 || { echo "✗ ImageMagick 'convert' not found (ubuntu-latest GitHub runners ship it by default)." >&2; exit 1; }
+command -v python3 >/dev/null 2>&1 || { echo "✗ python3 not found." >&2; exit 1; }
+python3 -c "import PIL" >/dev/null 2>&1 || { echo "✗ Pillow not installed — run 'pip install pillow' first (CI: separate step, not from this script)." >&2; exit 1; }
 
 # canvas px per density = 108dp * density scale (1x/1.5x/2x/3x/4x). content px =
 # canvas * 66/108 — Android's safe-zone ratio (all five divide evenly).
-for pair in mdpi:108 hdpi:162 xhdpi:216 xxhdpi:324 xxxhdpi:432; do
-  density="${pair%%:*}"
-  canvas="${pair##*:}"
-  content=$(( canvas * 66 / 108 ))
-  out="$RES/mipmap-$density/ic_launcher_foreground.png"
-  convert "$SRC" -resize "${content}x${content}" -background none -gravity center \
-    -extent "${canvas}x${canvas}" "$out"
-done
+SRC="$SRC" RES="$RES" python3 - <<'EOF'
+import os
+from PIL import Image
+
+SRC = os.environ["SRC"]
+RES = os.environ["RES"]
+SAFE_RATIO = 66 / 108  # Android Adaptive Icon safe zone: content within 66dp of 108dp canvas
+DENSITIES = {"mdpi": 108, "hdpi": 162, "xhdpi": 216, "xxhdpi": 324, "xxxhdpi": 432}
+
+src = Image.open(SRC).convert("RGBA")
+for density, canvas_px in DENSITIES.items():
+    content_px = round(canvas_px * SAFE_RATIO)
+    resized = src.resize((content_px, content_px), Image.LANCZOS)
+    canvas = Image.new("RGBA", (canvas_px, canvas_px), (0, 0, 0, 0))
+    offset = (canvas_px - content_px) // 2
+    canvas.paste(resized, (offset, offset), resized)
+    out = f"{RES}/mipmap-{density}/ic_launcher_foreground.png"
+    canvas.save(out)
+    print(f"  {out}: canvas={canvas_px} content={content_px} pad={offset}px ({100*offset/canvas_px:.1f}%)")
+EOF
 
 echo "✓ ic_launcher_foreground.png regenerated at 5 densities, logo confined to the adaptive-icon safe zone (~19% transparent margin)"
