@@ -25,8 +25,8 @@ use windows_sys::Win32::Foundation::{
     INVALID_HANDLE_VALUE,
 };
 use windows_sys::Win32::Storage::FileSystem::{
-    CreateFileW, ReadFile, WriteFile, FILE_ATTRIBUTE_NORMAL, OPEN_EXISTING,
-    SECURITY_IMPERSONATION, SECURITY_SQOS_PRESENT,
+    CreateFileW, ReadFile, WriteFile, FILE_ATTRIBUTE_NORMAL, OPEN_EXISTING, SECURITY_IMPERSONATION,
+    SECURITY_SQOS_PRESENT,
 };
 use windows_sys::Win32::System::Pipes::WaitNamedPipeW;
 
@@ -204,12 +204,7 @@ pub fn disconnect() -> Result<(), String> {
     Ok(())
 }
 
-/// `true` if the service reports a live tunnel right now.
-pub fn is_connected() -> Result<bool, String> {
-    let req = serde_json::json!({ "cmd": "status" });
-    let resp = expect_ok(call(&req.to_string())?)?;
-    Ok(resp
-        .get("connected")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false))
-}
+// Note: no `is_connected()`/Status query here — nothing calls it. The GUI's
+// existing `agent-status.json` polling (freshest_status_path()) already
+// covers "is the tunnel up," and adding an unused second path was flagged as
+// genuine dead code by the real Windows build (T490) this crate compiles for.
