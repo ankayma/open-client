@@ -271,12 +271,27 @@ mod imp {
 
     /// Spawn the agent daemon directly — no shell, so no shell-metacharacter risk
     /// (the osascript quick-fix it replaces had to single-quote around this).
+    ///
+    /// Evicts a stale live instance first (same gap class as the Windows
+    /// duplicate-`agent.exe` bug, `docs/windows-daemon-lifecycle-decision.md`):
+    /// nothing previously stopped two `agent up` processes from running
+    /// concurrently if `Start` ever arrived twice (e.g. the GUI retries after a
+    /// slow XPC round trip) — reuses `terminate_verified`, the same
+    /// verified-pid kill `stop_agent` already relies on, rather than a second,
+    /// divergent kill path.
     fn start_agent(
         agent_bin: &str,
         token: &str,
         control_plane: &str,
         state_json: Option<&str>,
     ) -> Result<(), String> {
+        if let Some(pid) = recorded_live_agent_pid() {
+            log_line(&format!(
+                "start_agent: evicting stale live agent pid {pid} before spawning a new one"
+            ));
+            terminate_verified(pid);
+            let _ = fs::remove_file(PID_PATH);
+        }
         // 0755 dir: agent.json inside stays 0600 (seed_state), while the status
         // snapshot the daemon writes is world-readable on purpose — the GUI's
         // path-proof panel reads it, and it carries connection-level metadata only.
@@ -360,17 +375,7 @@ mod imp {
                 ));
                 continue;
             }
-            let ret = unsafe { libc::kill(pid, libc::SIGTERM) };
-            log_line(&format!("stop_agent: kill({pid}, SIGTERM) = {ret}"));
-            if ret == 0 {
-                std::thread::sleep(std::time::Duration::from_millis(500));
-                let still_alive = unsafe { libc::kill(pid, 0) == 0 };
-                if still_alive {
-                    log_line(&format!(
-                        "stop_agent: pid {pid} survived SIGTERM, escalating to SIGKILL"
-                    ));
-                    unsafe { libc::kill(pid, libc::SIGKILL) };
-                }
+            if terminate_verified(pid) {
                 killed = true;
                 break;
             }
@@ -389,6 +394,45 @@ mod imp {
             let _ = fs::remove_file(PID_PATH);
         }
         Ok(())
+    }
+
+    /// [T:kill(2)] SIGTERM `pid`, then verify it actually died and escalate to
+    /// SIGKILL if not. Returns whether the initial signal was delivered at all
+    /// (`kill() == 0`) — the caller has already verified via
+    /// `is_agent_process` that `pid` is really the agent binary; this function
+    /// only does the signal-and-confirm half, shared by `stop_agent` (recorded
+    /// or status-file pid) and `start_agent` (evict-a-stale-instance).
+    fn terminate_verified(pid: libc::pid_t) -> bool {
+        let ret = unsafe { libc::kill(pid, libc::SIGTERM) };
+        log_line(&format!("terminate_verified: kill({pid}, SIGTERM) = {ret}"));
+        if ret != 0 {
+            return false;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        let still_alive = unsafe { libc::kill(pid, 0) == 0 };
+        if still_alive {
+            log_line(&format!(
+                "terminate_verified: pid {pid} survived SIGTERM, escalating to SIGKILL"
+            ));
+            unsafe { libc::kill(pid, libc::SIGKILL) };
+        }
+        true
+    }
+
+    /// The recorded pid, if it's currently alive AND really the `agent`
+    /// binary (never trust a bare pid number — it may have been reused by an
+    /// unrelated process since `start_agent` last wrote it).
+    fn recorded_live_agent_pid() -> Option<libc::pid_t> {
+        let pid = fs::read_to_string(PID_PATH)
+            .ok()?
+            .trim()
+            .parse::<libc::pid_t>()
+            .ok()?;
+        if pid <= 1 || !is_agent_process(pid) {
+            return None;
+        }
+        let alive = unsafe { libc::kill(pid, 0) == 0 };
+        alive.then_some(pid)
     }
 
     /// True iff `pid` currently runs an executable named `agent`.
