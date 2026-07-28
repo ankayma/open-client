@@ -32,7 +32,10 @@
 			auth.set(state);
 			goto('/services');
 		} catch (e) {
-			error = e instanceof Error ? e.message : 'Could not join the team — the invite may have expired';
+			error =
+				e instanceof Error
+					? e.message
+					: 'Could not join — the invite may have expired. Ask your team admin for a fresh invite, or email hello@ankayma.com if Ankayma set up your account.';
 			step = 'idle';
 		}
 	}
@@ -221,7 +224,10 @@
 				goto('/services');
 			}
 		} catch (e) {
-			error = e instanceof Error ? e.message : 'Could not join — the invite may have expired.';
+			error =
+				e instanceof Error
+					? e.message
+					: 'Could not join — the invite may have expired. Ask your team admin for a fresh invite, or email hello@ankayma.com if Ankayma set up your account.';
 		} finally {
 			joinBusy = false;
 		}
