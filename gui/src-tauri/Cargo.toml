@@ -64,6 +64,18 @@ tauri-plugin-updater = "2"
 [target.'cfg(target_os = "macos")'.dependencies]
 smappservice-rs = "0.1.3"
 
+# Windows-only: win_service_client's blocking named-pipe I/O to the always-on
+# Ankayma service (CreateFileW/ReadFile/WriteFile/WaitNamedPipeW) — Change 4 of
+# docs/windows-daemon-lifecycle-decision.md. `ensure_installed`/upgrade stop-start
+# shell out to sc.exe (elevated Start-Process) instead, so no windows-service
+# crate needed here — only agent-daemon hosts the service itself.
+[target.'cfg(target_os = "windows")'.dependencies]
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Pipes",
+] }
+
 # iOS-only: send one Objective-C message to the WKWebView's scroll view so it
 # stops double-applying the home-indicator safe area (see run() setup). objc2 is
 # already in the tree transitively (via wry/tao); we pin the same 0.6 line and

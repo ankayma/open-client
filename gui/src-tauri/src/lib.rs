@@ -32,6 +32,15 @@ mod deferred_invite;
 #[cfg(target_os = "android")]
 mod vpn_android;
 
+// Windows data-plane lifecycle (Change 4 of docs/windows-daemon-lifecycle-decision.md):
+// one-time SCM install + the auto-updater's verified stop/start (win_service_install),
+// and the named-pipe client to the always-on service for everyday Connect/Disconnect/
+// Status (win_service_client) — replaces the old Start-Process/taskkill pair.
+#[cfg(target_os = "windows")]
+mod win_service_client;
+#[cfg(target_os = "windows")]
+mod win_service_install;
+
 // Unified cross-platform pre-flight permission gate. Lets the UI ask "is the OS
 // permission this platform needs for the tunnel already granted?" and request it
 // up front (right after sign-in), instead of only discovering it as a Connect
@@ -2059,39 +2068,21 @@ fn bring_up_dataplane(
     )
 }
 
-/// Windows: the Wintun adapter needs admin and the GUI runs unelevated, so launch
-/// the agent via ShellExecute "runas" (one UAC prompt — the Windows analogue of the
-/// macOS admin prompt). Pass the session token the same way the macOS helper does:
-/// the GUI's `connect` enroll writes identity to agent.json but not the scoped node
-/// service token, so `agent up` needs `--token` to refresh it. The elevated process
-/// is owned by the elevated context, not this one, so the tunnel stays up after we
-/// return; `waitForEstablished` polls the status file the daemon writes. `[T:A.1.3]`
-///
-/// TODO[A]: the token rides the elevated command line (visible to local admins in
-/// the process list). macOS hands it over IPC; a private Windows handoff (env-file
-/// the elevated agent reads, like the VPS `up.env`) is the follow-up. Verify-by:
-/// spawn with no `--token` on the cmdline and the tunnel still comes up.
+/// Windows: the `Ankayma` service (LocalSystem, always running — see
+/// `docs/windows-daemon-lifecycle-decision.md`) already holds the Wintun
+/// adapter; this just asks it, over the named pipe, to bring a tunnel up for
+/// `token`/`control_plane` — **no elevation, no UAC**, unlike the old
+/// `Start-Process … -Verb RunAs` this replaces. `ensure_installed` is the one
+/// remaining elevation point, and only the very first time this device ever
+/// connects (no-op, no prompt, on every call after that). `[T:A.1.3]`
 #[cfg(target_os = "windows")]
 fn bring_up_dataplane(
     agent_bin: &std::path::Path,
     token: &str,
     control_plane: &str,
 ) -> Result<(), String> {
-    let bin = agent_bin.to_string_lossy().replace('\'', "''");
-    let cp = control_plane.replace('\'', "''");
-    let tok = token.replace('\'', "''");
-    let ps = format!(
-        "Start-Process -FilePath '{bin}' -ArgumentList \
-         'up','--token','{tok}','--control-plane','{cp}' -Verb RunAs -WindowStyle Hidden"
-    );
-    let status = std::process::Command::new("powershell")
-        .args(["-NoProfile", "-NonInteractive", "-Command", &ps])
-        .status()
-        .map_err(|e| format!("launch elevated agent: {e}"))?;
-    if !status.success() {
-        return Err("could not start the agent daemon (was the UAC prompt declined?)".into());
-    }
-    Ok(())
+    win_service_install::ensure_installed(agent_bin)?;
+    win_service_client::connect(token, control_plane)
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
@@ -2155,19 +2146,16 @@ fn stop_dataplane_inner() -> Result<(), String> {
     helper_ipc::stop(&home)
 }
 
-/// Windows: the agent runs elevated, so tearing it down needs elevation too (one
-/// UAC prompt). Best-effort — a missing daemon is not an error.
+/// Windows: a `Disconnect` over the named pipe to the always-on `Ankayma`
+/// service — **no elevation** (replaces the old elevated `taskkill /IM
+/// agent.exe /F`, which returned before the kill, or its UAC prompt, actually
+/// resolved). Verified: the reply only comes back once the service's
+/// supervisor has actually finished `Child::kill()` + `Child::wait()` on the
+/// real child process — nothing left to guess via `tasklist` afterward.
+/// `docs/windows-daemon-lifecycle-decision.md`
 #[cfg(target_os = "windows")]
 fn stop_dataplane_inner() -> Result<(), String> {
-    let _ = std::process::Command::new("powershell")
-        .args([
-            "-NoProfile",
-            "-NonInteractive",
-            "-Command",
-            "Start-Process taskkill -ArgumentList '/IM','agent.exe','/F' -Verb RunAs -WindowStyle Hidden",
-        ])
-        .status();
-    Ok(())
+    win_service_client::disconnect()
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
@@ -3408,9 +3396,37 @@ async fn check_for_update(app: AppHandle) -> tauri_plugin_updater::Result<()> {
         return Ok(());
     };
     log::info!("update available: {}", update.version);
+
+    // Windows: stop the always-on service (verified — bounded poll until SCM
+    // reports STOPPED) BEFORE the updater overwrites agent.exe, so the binary
+    // is provably not in use. This is what makes "the old daemon survives the
+    // upgrade" (the original bug report) structurally impossible rather than
+    // merely less likely. `docs/windows-daemon-lifecycle-decision.md`
+    #[cfg(target_os = "windows")]
+    {
+        tauri::async_runtime::spawn_blocking(win_service_install::stop_service_verified)
+            .await
+            .map_err(|e| std::io::Error::other(format!("stop-service task panicked: {e}")))?
+            .map_err(std::io::Error::other)?;
+    }
+
     update
         .download_and_install(|_chunk_len, _total_len| {}, || {})
         .await?;
+
+    // Explicit restart so the new version is live immediately — otherwise the
+    // user would need to reboot for `start_type: Automatic` to pick it up at
+    // next boot. Best-effort: a failure here just means "starts on next boot"
+    // rather than blocking the (already-succeeded) update from completing.
+    #[cfg(target_os = "windows")]
+    match tauri::async_runtime::spawn_blocking(win_service_install::start_service).await {
+        Ok(Err(e)) => {
+            log::warn!("post-update service restart failed (will start on next boot): {e}")
+        }
+        Err(e) => log::warn!("post-update service restart task panicked: {e}"),
+        Ok(Ok(())) => {}
+    }
+
     app.restart();
 }
 
