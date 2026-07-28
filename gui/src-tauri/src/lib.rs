@@ -1633,8 +1633,8 @@ async fn verify_step_up_webauthn(
 const PLATFORM_KEY_LABEL: &str = "com.ankayma.app.stepup.touchid";
 
 #[cfg(target_os = "macos")]
-fn platform_key_access_control() -> Result<security_framework::access_control::SecAccessControl, String>
-{
+fn platform_key_access_control(
+) -> Result<security_framework::access_control::SecAccessControl, String> {
     use security_framework::access_control::SecAccessControl;
     // Apple Security.framework SecAccessControlCreateFlags (SecAccessControl.h):
     // kSecAccessControlBiometryCurrentSet = 1u<<3, kSecAccessControlPrivateKeyUsage
@@ -1654,7 +1654,9 @@ fn platform_key_access_control() -> Result<security_framework::access_control::S
 /// registered server-side (not a freshly-generated one).
 #[cfg(target_os = "macos")]
 fn find_platform_key() -> Result<Option<security_framework::key::SecKey>, String> {
-    use security_framework::item::{ItemClass, ItemSearchOptions, KeyClass, Reference, SearchResult};
+    use security_framework::item::{
+        ItemClass, ItemSearchOptions, KeyClass, Reference, SearchResult,
+    };
     let results = ItemSearchOptions::new()
         .class(ItemClass::key())
         .key_class(KeyClass::private())
@@ -1680,29 +1682,27 @@ async fn platform_key_enroll(state: State<'_, AppState>) -> Result<(), String> {
     use security_framework::key::{GenerateKeyOptions, KeyType, SecKey, Token};
     let tok = state.token().ok_or("not signed in")?;
 
-    let public_key_b64 = tauri::async_runtime::spawn_blocking(
-        move || -> Result<String, String> {
-            let key = match find_platform_key()? {
-                Some(k) => k,
-                None => {
-                    let access_control = platform_key_access_control()?;
-                    let mut options = GenerateKeyOptions::default();
-                    options
-                        .set_key_type(KeyType::ec())
-                        .set_token(Token::SecureEnclave)
-                        .set_label(PLATFORM_KEY_LABEL.to_string())
-                        .set_access_control(access_control);
-                    SecKey::new(&options).map_err(|e| format!("SecKey::new failed: {e:?}"))?
-                }
-            };
-            let public = key.public_key().ok_or("key has no public half")?;
-            let raw = public
-                .external_representation()
-                .ok_or("no external representation")?;
-            use base64::Engine;
-            Ok(base64::engine::general_purpose::STANDARD.encode(raw.to_vec()))
-        },
-    )
+    let public_key_b64 = tauri::async_runtime::spawn_blocking(move || -> Result<String, String> {
+        let key = match find_platform_key()? {
+            Some(k) => k,
+            None => {
+                let access_control = platform_key_access_control()?;
+                let mut options = GenerateKeyOptions::default();
+                options
+                    .set_key_type(KeyType::ec())
+                    .set_token(Token::SecureEnclave)
+                    .set_label(PLATFORM_KEY_LABEL.to_string())
+                    .set_access_control(access_control);
+                SecKey::new(&options).map_err(|e| format!("SecKey::new failed: {e:?}"))?
+            }
+        };
+        let public = key.public_key().ok_or("key has no public half")?;
+        let raw = public
+            .external_representation()
+            .ok_or("no external representation")?;
+        use base64::Engine;
+        Ok(base64::engine::general_purpose::STANDARD.encode(raw.to_vec()))
+    })
     .await
     .map_err(|e| format!("task join error: {e:?}"))??;
 
@@ -1731,28 +1731,22 @@ async fn platform_key_sign_challenge(
     use security_framework::key::Algorithm;
     let tok = state.token().ok_or("not signed in")?;
 
-    let (challenge_id, nonce_b64) = adapters::platform_key_challenge(
-        &state.http,
-        &state.regional_base_url(),
-        &tok,
-        &purpose,
-    )
-    .await
-    .map_err(|e| e.to_string())?;
+    let (challenge_id, nonce_b64) =
+        adapters::platform_key_challenge(&state.http, &state.regional_base_url(), &tok, &purpose)
+            .await
+            .map_err(|e| e.to_string())?;
 
-    let signature_b64 = tauri::async_runtime::spawn_blocking(
-        move || -> Result<String, String> {
-            use base64::Engine;
-            let nonce = base64::engine::general_purpose::STANDARD
-                .decode(&nonce_b64)
-                .map_err(|e| format!("bad nonce from server: {e}"))?;
-            let key = find_platform_key()?.ok_or("no Touch ID key enrolled")?;
-            let sig = key
-                .create_signature(Algorithm::ECDSASignatureMessageX962SHA256, &nonce)
-                .map_err(|e| format!("Touch ID sign failed/cancelled: {e:?}"))?;
-            Ok(base64::engine::general_purpose::STANDARD.encode(sig))
-        },
-    )
+    let signature_b64 = tauri::async_runtime::spawn_blocking(move || -> Result<String, String> {
+        use base64::Engine;
+        let nonce = base64::engine::general_purpose::STANDARD
+            .decode(&nonce_b64)
+            .map_err(|e| format!("bad nonce from server: {e}"))?;
+        let key = find_platform_key()?.ok_or("no Touch ID key enrolled")?;
+        let sig = key
+            .create_signature(Algorithm::ECDSASignatureMessageX962SHA256, &nonce)
+            .map_err(|e| format!("Touch ID sign failed/cancelled: {e:?}"))?;
+        Ok(base64::engine::general_purpose::STANDARD.encode(sig))
+    })
     .await
     .map_err(|e| format!("task join error: {e:?}"))??;
 

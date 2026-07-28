@@ -781,11 +781,7 @@ pub unsafe extern "C" fn Java_com_ankayma_app_InstallReferrerHelper_nativeSetRef
         .map(|v| v.into())
         .unwrap_or_default();
     if let Ok(mut g) = INSTALL_REFERRER.lock() {
-        *g = if s.trim().is_empty() {
-            None
-        } else {
-            Some(s)
-        };
+        *g = if s.trim().is_empty() { None } else { Some(s) };
     }
 }
 
@@ -820,12 +816,7 @@ pub fn read_clipboard_text() -> Option<String> {
             return Err("no clipboard service".into());
         }
         let clip = env
-            .call_method(
-                &cm,
-                "getPrimaryClip",
-                "()Landroid/content/ClipData;",
-                &[],
-            )
+            .call_method(&cm, "getPrimaryClip", "()Landroid/content/ClipData;", &[])
             .map_err(|e| e.to_string())?
             .l()
             .map_err(|e| e.to_string())?;

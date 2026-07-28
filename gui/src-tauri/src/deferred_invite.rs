@@ -168,10 +168,7 @@ mod tests {
 
     #[test]
     fn parses_short_code() {
-        assert_eq!(
-            parse_invite_payload("AB23CD45"),
-            Some("AB23CD45".into())
-        );
+        assert_eq!(parse_invite_payload("AB23CD45"), Some("AB23CD45".into()));
     }
 
     #[test]
