@@ -632,16 +632,16 @@ impl server::Handler for ConnHandler {
         let _ = session.channel_success(channel);
 
         // [F-2 §H.4] Same auto-drop as the shell path: an elevated exec is killed
-        // at the grant's TTL rather than allowed to outlive it.
+        // at the grant's TTL rather than allowed to outlive it. The shell path
+        // gets this for free from portable-pty's cross-platform `clone_killer()`;
+        // this exec path spawns a bare `std::process::Child` (no PTY needed), so
+        // it needs its own per-platform kill-by-pid.
         if let Some(deadline) = elevate_deadline {
             let secs = deadline.saturating_sub(unix_now()).max(0) as u64;
             let pid = child.id();
             tokio::spawn(async move {
                 tokio::time::sleep(Duration::from_secs(secs)).await;
-                #[cfg(unix)]
-                unsafe {
-                    libc::kill(pid as i32, libc::SIGKILL);
-                }
+                kill_pid(pid);
             });
         }
 
@@ -800,6 +800,37 @@ fn audit_elevation(grant: &ElevationGrant, device_key: Option<&str>) {
             .open(&path)
         {
             let _ = writeln!(f, "{} {line}", unix_now());
+        }
+    }
+}
+
+/// Best-effort hard-kill of `pid` (the F-2 §H.4 elevated-exec TTL auto-drop —
+/// see `exec_request` above). The shell path gets this cross-platform for free
+/// via portable-pty's `clone_killer()`; the bare-`std::process::Child` exec
+/// path needs its own per-platform primitive. `[T:kill(2)]` `[T:Win32
+/// OpenProcess/TerminateProcess]`
+#[cfg(unix)]
+fn kill_pid(pid: u32) {
+    unsafe {
+        libc::kill(pid as i32, libc::SIGKILL);
+    }
+}
+
+#[cfg(windows)]
+fn kill_pid(pid: u32) {
+    use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::System::Threading::{OpenProcess, TerminateProcess, PROCESS_TERMINATE};
+    // SAFETY: OpenProcess/TerminateProcess/CloseHandle per their documented
+    // Win32 contracts; `pid` names a process this same node's agent spawned
+    // moments ago (not attacker-controlled), and every outcome (pid already
+    // exited, access denied) is handled by simply not calling the next step —
+    // matching the original `libc::kill` call's own best-effort semantics
+    // (return value was never checked there either).
+    unsafe {
+        let handle = OpenProcess(PROCESS_TERMINATE, 0, pid);
+        if !handle.is_null() {
+            TerminateProcess(handle, 1);
+            CloseHandle(handle);
         }
     }
 }
