@@ -1,9 +1,9 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { goto } from "$app/navigation";
-  import { myAccess, openSubdomain, getNodeInfo, listNodes, listCiPolicies, ciHistory, sshHistory, getPathProof, probeReachable } from "$lib/tauri";
+  import { myAccess, openSubdomain, getNodeInfo, listNodes, listCiPolicies, ciHistory, sshHistory, getPathProof, probeReachable, getQuota } from "$lib/tauri";
   import type { MyAccess, AccessService, PeerBrief, CiPolicy, CiRun, SshSession, PathProof, PathPeer } from "$lib/types";
-  import { connection, myRole } from "$lib/stores";
+  import { connection, myRole, quota } from "$lib/stores";
   import ConnectionCard from "$lib/components/ConnectionCard.svelte";
   import PathChain from "$lib/components/PathChain.svelte";
   import { canOpen, openScheme, openTitle } from "$lib/openService";
@@ -27,6 +27,10 @@
   // across nodes and the iOS path-proof snapshot can carry a hostname that has since
   // drifted from the live roster. [T:A.1.1 overlay = identity]
   let reachMap = $state<Map<string, boolean>>(new Map());
+  // Guards the "Add device" nudge below the Connected card (A — session 2026-07-28): don't render
+  // it — prominent or not — before the roster answers, or it flashes prominent
+  // then shrinks once myDeviceCount resolves. [T:session 2026-07-28]
+  let peersLoaded = $state(false);
 
   onMount(() => {
     load();
@@ -38,7 +42,14 @@
       .catch(() => {});
     // Peer list backs the SSH button (hostname → node_id for /terminal). A member
     // without the nodes scope just gets no SSH buttons — not an error state.
-    listNodes().then((p) => (peers = p)).catch(() => {});
+    listNodes()
+      .then((p) => (peers = p))
+      .catch(() => {})
+      .finally(() => (peersLoaded = true));
+    // Node quota (H.2.1.4) — same source as Settings › My Devices — backs the
+    // "Add device" disabled/limit-reached state below, so the landing-screen
+    // entry point never routes into a page that can't mint a new invite.
+    getQuota().then((q) => quota.set(q)).catch(() => {});
     // [F-1 viewer] Deploy rules back the CI/CD chip: a node targeted by a rule
     // shows the chip; clicking opens its CI run history. Owner/admin sees by
     // default; a member the server doesn't authorize simply gets no chips.
@@ -171,6 +182,18 @@
   let ownedGroups = $derived(groups.filter((g) => g.owned));
   let teamGroups = $derived(groups.filter((g) => !g.owned));
   let connected = $derived($connection.status === "connected");
+
+  // How many devices THIS identity (not the whole tenant roster) has enrolled —
+  // backs the "Add device" prominence below (A — session 2026-07-28): a solo F0 on their first
+  // device sees a filled nudge, a teammate who already added a second device
+  // sees a quiet text link instead. Same join (peer.owner_user_id === my own
+  // user_id, found via myNodeId) Settings › My Devices already uses. `[T per
+  // settings/devices ownerLabel/myUserId pattern]`
+  let myUserId = $derived(peers.find((p) => p.node_id === myNodeId)?.owner_user_id ?? null);
+  let myDeviceCount = $derived(
+    myUserId ? peers.filter((p) => p.owner_user_id === myUserId).length : 1
+  );
+  let atNodeLimit = $derived($quota ? $quota.nodes_used >= $quota.nodes_limit : false);
 
   // Open: self-device counts as reachable when connected; scheme from svc.cert_status
   // (my_access carries it for every service, incl. a teammate's shared one).
@@ -360,6 +383,27 @@
   <div class="layout">
     <aside class="conn-panel">
       <ConnectionCard />
+      {#if peersLoaded}
+        <!-- A — session 2026-07-28: standalone action below the status card, not nested inside it
+             (card = status display; this = action) — prominent only while this
+             identity has ≤1 device, quiet text link after. Same join-link mint
+             flow as Settings › My Devices "+ Add my device" / "Add a device" screen. -->
+        <div class="add-device-wrap">
+          <button
+            class="add-device-btn"
+            class:prominent={myDeviceCount <= 1}
+            onclick={() => goto("/add-device")}
+            disabled={atNodeLimit}
+            title={atNodeLimit ? "Limit reached. Remove a node or contact admin." : ""}
+          >
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 5v14M5 12h14"/></svg>
+            Add device
+          </button>
+          {#if myDeviceCount <= 1 && !atNodeLimit}
+            <p class="add-device-hint">No password needed — just open the link on your other device.</p>
+          {/if}
+        </div>
+      {/if}
     </aside>
 
     <section class="services-panel">
@@ -709,6 +753,11 @@
     gap: 16px;
     min-width: 0;
   }
+  .conn-panel {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
   @media (min-width: 760px) {
     .layout {
       flex-direction: row;
@@ -724,6 +773,56 @@
     .services-panel {
       flex: 1;
     }
+  }
+  /* Standalone action under the Connected card — deliberately NOT part of
+     ConnectionCard (status display vs action, A — session 2026-07-28). Two prominence tiers:
+     filled accent while this identity has ≤1 device (nudge toward multi-device),
+     quiet text link once they already have another — avoids permanent clutter
+     for users who don't need the nudge anymore. */
+  .add-device-wrap {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 6px;
+  }
+  .add-device-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    width: 100%;
+    padding: 6px 10px;
+    border-radius: 8px;
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--c-text-dim);
+    background: transparent;
+    border: 1px solid transparent;
+  }
+  .add-device-btn:hover:not(:disabled) {
+    color: var(--c-text);
+    background: var(--c-surface);
+  }
+  .add-device-btn.prominent {
+    padding: 10px 14px;
+    color: #fff;
+    background: var(--c-accent);
+    border-color: var(--c-accent);
+  }
+  .add-device-btn.prominent:hover:not(:disabled) {
+    background: var(--c-accent-dim);
+    color: #fff;
+  }
+  .add-device-btn:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+  }
+  .add-device-hint {
+    font-size: 11px;
+    color: var(--c-text-dim);
+    text-align: center;
+    line-height: 1.4;
+    padding: 0 8px;
   }
   header {
     display: flex;

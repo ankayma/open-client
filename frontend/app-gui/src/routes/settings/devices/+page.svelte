@@ -209,7 +209,7 @@
 				title={atLimit ? 'Limit reached. Remove a node or contact admin.' : ''}
 			>
 				<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 5v14M5 12h14"/></svg>
-				Add Node
+				Add my device
 			</button>
 		</div>
 	</header>
