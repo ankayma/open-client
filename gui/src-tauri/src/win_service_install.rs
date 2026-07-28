@@ -27,27 +27,82 @@ use std::time::{Duration, Instant};
 
 const SERVICE_NAME: &str = "Ankayma";
 
-/// Run one elevated command and wait for it to actually finish (`-Wait`) —
-/// the same fix Change 1's stop path needed for the old `taskkill`: a
-/// non-waited `Start-Process -Verb RunAs` returns before the elevated action,
-/// or its UAC prompt, is resolved.
+/// Run one elevated command and wait for it to actually finish (`-Wait`),
+/// verifying the ELEVATED process's own exit code — not just that the outer,
+/// unelevated `powershell.exe` launched and returned.
+///
+/// Confirmed missing the hard way (T490, real end-to-end test): `-Wait` alone
+/// only fixes Change 1's original bug (a non-waited `Start-Process -Verb
+/// RunAs` returning before the elevated action resolves) — it does **not**
+/// verify the elevated command actually succeeded. Without `-PassThru` +
+/// propagating `$p.ExitCode`, the outer `powershell.exe` exits 0 regardless of
+/// whether `sc.exe create` itself succeeded, and — worse — if the UAC prompt
+/// is declined, `Start-Process` throws inside the script but that exception
+/// alone still didn't turn into a non-zero exit here either. Net effect: a
+/// declined/failed elevation was silently treated as success, so
+/// `ensure_installed` returned `Ok(())` without ever actually creating the
+/// service, and the very next step (`win_service_client::connect`) failed
+/// with a confusing "is the Ankayma service running?" instead of the real
+/// "the UAC prompt was declined" cause.
 fn run_elevated_wait(exe: &str, args: &[&str]) -> Result<(), String> {
-    let arg_list = args
+    // Build ONE Win32-command-line-style string ourselves, rather than handing
+    // `-ArgumentList` a PowerShell array. Confirmed the hard way (T490): given
+    // an array, `Start-Process` does not reliably quote elements containing
+    // spaces for the *child* process — `sc.exe create`'s `binPath=` value
+    // (`C:\Program Files\Ankayma\agent.exe service`, which has two spaces) got
+    // torn into multiple separate argv entries, and sc.exe failed to parse
+    // its own command line (exit 1639) — silently, since nothing upstream
+    // caught that either before this fix. Building the exact command line
+    // ourselves and passing it as a single string removes the ambiguity.
+    let arg_string = args
         .iter()
-        .map(|a| format!("'{}'", a.replace('\'', "''")))
+        .map(|a| win32_quote_arg(a))
         .collect::<Vec<_>>()
-        .join(",");
+        .join(" ");
+    // `-PassThru` returns the elevated process object so `-Wait` gives us
+    // something to read `.ExitCode` from; `exit $p.ExitCode` propagates it as
+    // THIS script's own exit code. A declined/failed UAC prompt makes
+    // `Start-Process` itself throw — caught and turned into a distinct
+    // non-zero exit (1223 = ERROR_CANCELLED) rather than silently exiting 0.
     let ps = format!(
-        "Start-Process -FilePath '{exe}' -ArgumentList {arg_list} -Verb RunAs -WindowStyle Hidden -Wait"
+        "try {{ \
+           $p = Start-Process -FilePath '{exe}' -ArgumentList '{arg_string_escaped}' -Verb RunAs -WindowStyle Hidden -Wait -PassThru; \
+           exit $p.ExitCode \
+         }} catch {{ \
+           Write-Error $_; \
+           exit 1223 \
+         }}",
+        arg_string_escaped = arg_string.replace('\'', "''"),
     );
     let status = Command::new("powershell")
         .args(["-NoProfile", "-NonInteractive", "-Command", &ps])
         .status()
         .map_err(|e| format!("launch elevated {exe}: {e}"))?;
     if !status.success() {
-        return Err(format!("elevated {exe} exited {status} (UAC declined?)"));
+        return Err(format!(
+            "elevated {exe} {} exited {status} (UAC declined, or the command itself failed)",
+            args.join(" ")
+        ));
     }
     Ok(())
+}
+
+/// Quote one argument the way the standard Win32 C-runtime argv parser (the
+/// one `sc.exe` and virtually every other Windows executable uses) expects,
+/// so a value containing spaces (a `C:\Program Files\...` path, in practice)
+/// survives as ONE argument rather than being split apart by the child
+/// process's own command-line parsing. Simplified for this crate's actual
+/// inputs (plain paths/words, no embedded `"` — every arg here is a literal
+/// or a filesystem path): wrap in `"…"` whenever the argument contains
+/// whitespace, escaping any literal `"` defensively even though none of our
+/// current call sites produce one.
+/// `[T:Win32 CommandLineToArgvW argv-quoting convention]`
+fn win32_quote_arg(arg: &str) -> String {
+    if arg.is_empty() || arg.chars().any(char::is_whitespace) {
+        format!("\"{}\"", arg.replace('"', "\\\""))
+    } else {
+        arg.to_string()
+    }
 }
 
 /// Unelevated: `SERVICE_QUERY_STATUS` is available to any local user by SCM's
@@ -89,12 +144,14 @@ fn evict_pre_migration_agent_processes() -> Result<(), String> {
     let ps = format!(
         "Start-Process -FilePath 'taskkill' -ArgumentList {arg_list} -Verb RunAs -WindowStyle Hidden -Wait"
     );
-    // Not run_elevated_wait: taskkill's own exit code is 128 ("process not
-    // found") when there's nothing to kill, which is success here, not a
-    // failure to surface — Start-Process's own exit status is what would
-    // signal a real problem (e.g. UAC declined), and that's still best-effort
-    // at this specific step (a rare failure here shouldn't block install/update;
-    // the real, hard-verified stop is the service-based one right after).
+    // Not run_elevated_wait: taskkill's own exit code (0 = killed, 128 =
+    // "process not found") isn't meaningfully distinguishable here without
+    // -PassThru anyway (see run_elevated_wait's doc comment on why plain
+    // Start-Process -Wait doesn't surface the elevated command's real outcome
+    // — confirmed on T490), and this step is genuinely best-effort by design:
+    // a failure here (UAC declined, taskkill itself failing) shouldn't block
+    // install/update — the real, hard-verified stop is the service-based one
+    // right after, once the service actually exists.
     let _ = Command::new("powershell")
         .args(["-NoProfile", "-NonInteractive", "-Command", &ps])
         .status();
@@ -161,4 +218,45 @@ pub fn stop_service_verified() -> Result<(), String> {
 /// asked to reboot to pick up the new version.
 pub fn start_service() -> Result<(), String> {
     run_elevated_wait("sc.exe", &["start", SERVICE_NAME])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn quotes_args_with_spaces_but_not_plain_words() {
+        assert_eq!(win32_quote_arg("auto"), "auto");
+        assert_eq!(win32_quote_arg("LocalSystem"), "LocalSystem");
+        assert_eq!(
+            win32_quote_arg(r"C:\Program Files\Ankayma\agent.exe service"),
+            r#""C:\Program Files\Ankayma\agent.exe service""#
+        );
+        assert_eq!(win32_quote_arg("Ankayma Mesh"), "\"Ankayma Mesh\"");
+    }
+
+    #[test]
+    fn quoted_args_join_into_the_exact_sc_create_command_line() {
+        let args = [
+            "create",
+            "Ankayma",
+            "binPath=",
+            r"C:\Program Files\Ankayma\agent.exe service",
+            "start=",
+            "auto",
+            "obj=",
+            "LocalSystem",
+            "DisplayName=",
+            "Ankayma Mesh",
+        ];
+        let joined = args
+            .iter()
+            .map(|a| win32_quote_arg(a))
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert_eq!(
+            joined,
+            r#"create Ankayma binPath= "C:\Program Files\Ankayma\agent.exe service" start= auto obj= LocalSystem DisplayName= "Ankayma Mesh""#
+        );
+    }
 }
