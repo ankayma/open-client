@@ -13,16 +13,20 @@
 //! (Authenticated Users, via the SDDL below). The real authorization boundary
 //! is the per-connection identity check in `identity_authorized` — `Connect`
 //! carries a bearer session token in-band to a LocalSystem-privileged process,
-//! so every accepted connection is checked against the currently active
-//! interactive (console) session **before a single command byte is read**. An
-//! unauthorized peer gets the pipe dropped silently — no response, so it learns
-//! nothing about why. `[T:Win32 ImpersonateNamedPipeClient/OpenThreadToken/
-//! GetTokenInformation/WTSGetActiveConsoleSessionId — docs.microsoft.com Win32 API]`
+//! so every accepted connection is checked (via its own `WTSConnectState`,
+//! `ipc_protocol::session_authorized`) before a single command byte is read.
+//! An unauthorized peer gets the pipe dropped silently — no response, so it
+//! learns nothing about why. `[T:Win32 ImpersonateNamedPipeClient/
+//! OpenThreadToken/GetTokenInformation/WTSQuerySessionInformationW —
+//! docs.microsoft.com Win32 API]`
 //!
-//! ⚠️ Not yet built or exercised on a real Windows host (this workspace is
-//! developed on macOS) — see the plan's Verification section. Review the Win32
-//! call sequence carefully before shipping; this is Critical-intensity code
-//! per the T/A discipline (crypto/platform `#[cfg]`).
+//! Built and verified on a real Windows host (T490, `docs/windows-daemon-
+//! lifecycle-decision.md`'s Verification section) — `cargo build/check/test/
+//! clippy -D warnings` all pass. The identity check specifically was
+//! redesigned after that real-host testing: comparing against
+//! `WTSGetActiveConsoleSessionId()` (an earlier draft) turned out to reject
+//! every real caller on a machine reachable only over RDP — see
+//! `query_session_connect_state`'s doc comment.
 
 #![cfg(target_os = "windows")]
 
@@ -39,7 +43,9 @@ use windows_sys::Win32::Security::{
     GetTokenInformation, RevertToSelf, TokenSessionId, SECURITY_ATTRIBUTES, TOKEN_QUERY,
 };
 use windows_sys::Win32::System::Pipes::ImpersonateNamedPipeClient;
-use windows_sys::Win32::System::RemoteDesktop::WTSGetActiveConsoleSessionId;
+use windows_sys::Win32::System::RemoteDesktop::{
+    WTSConnectState, WTSFreeMemory, WTSQuerySessionInformationW, WTS_CURRENT_SERVER_HANDLE,
+};
 use windows_sys::Win32::System::Threading::{GetCurrentThread, OpenThreadToken};
 
 use crate::ipc_protocol::{encode_response, parse_request, session_authorized, Request, Response};
@@ -178,9 +184,46 @@ fn identity_authorized(pipe: &NamedPipeServer) -> bool {
     let Some(session_id) = session_id else {
         return false;
     };
-    // SAFETY: no arguments; a plain Win32 query.
-    let active = unsafe { WTSGetActiveConsoleSessionId() };
-    session_authorized(session_id, active)
+    let Some(connect_state) = query_session_connect_state(session_id) else {
+        return false;
+    };
+    session_authorized(session_id, connect_state)
+}
+
+/// The connecting session's own `WTSConnectState` (`WTSActive`,
+/// `WTSDisconnected`, …) — **not** a comparison against some other "the"
+/// session. An earlier draft compared against `WTSGetActiveConsoleSessionId()`
+/// (only the physical console); confirmed wrong on a real Windows host
+/// reachable only over RDP, where that call's answer never matched any real
+/// caller's actual (RDP) session id. Querying the caller's own state instead
+/// correctly authorizes console and RDP alike. `[T:Win32
+/// WTSQuerySessionInformationW — docs.microsoft.com/windows/win32/api/wtsapi32]`
+fn query_session_connect_state(session_id: u32) -> Option<i32> {
+    // SAFETY: `buf`/`len` are valid out-params; `WTS_CURRENT_SERVER_HANDLE` is
+    // the documented pseudo-handle for "this local machine," needing no
+    // separate open/close. The returned buffer (freed via `WTSFreeMemory` on
+    // every path) holds exactly one `WTS_CONNECTSTATE_CLASS` (a 4-byte enum)
+    // for the `WTSConnectState` info class.
+    unsafe {
+        let mut buf: *mut u16 = std::ptr::null_mut();
+        let mut len: u32 = 0;
+        let ok = WTSQuerySessionInformationW(
+            WTS_CURRENT_SERVER_HANDLE,
+            session_id,
+            WTSConnectState,
+            &mut buf,
+            &mut len,
+        );
+        if ok == 0 || buf.is_null() || (len as usize) < std::mem::size_of::<i32>() {
+            if !buf.is_null() {
+                WTSFreeMemory(buf as *mut c_void);
+            }
+            return None;
+        }
+        let state = *(buf as *const i32);
+        WTSFreeMemory(buf as *mut c_void);
+        Some(state)
+    }
 }
 
 /// Must only be called while this thread is impersonating the pipe client
