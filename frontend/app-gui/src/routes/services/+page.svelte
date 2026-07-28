@@ -399,9 +399,6 @@
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 5v14M5 12h14"/></svg>
             Add device
           </button>
-          {#if myDeviceCount <= 1 && !atNodeLimit}
-            <p class="add-device-hint">No password needed — just open the link on your other device.</p>
-          {/if}
         </div>
       {/if}
     </aside>
@@ -816,13 +813,6 @@
   .add-device-btn:disabled {
     opacity: 0.4;
     cursor: not-allowed;
-  }
-  .add-device-hint {
-    font-size: 11px;
-    color: var(--c-text-dim);
-    text-align: center;
-    line-height: 1.4;
-    padding: 0 8px;
   }
   header {
     display: flex;
