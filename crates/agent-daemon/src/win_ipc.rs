@@ -20,13 +20,18 @@
 //! OpenThreadToken/GetTokenInformation/WTSQuerySessionInformationW —
 //! docs.microsoft.com Win32 API]`
 //!
-//! Built and verified on a real Windows host (T490, `docs/windows-daemon-
-//! lifecycle-decision.md`'s Verification section) — `cargo build/check/test/
-//! clippy -D warnings` all pass. The identity check specifically was
-//! redesigned after that real-host testing: comparing against
-//! `WTSGetActiveConsoleSessionId()` (an earlier draft) turned out to reject
-//! every real caller on a machine reachable only over RDP — see
-//! `query_session_connect_state`'s doc comment.
+//! Built and verified end-to-end on a real Windows host (T490, `docs/windows-
+//! daemon-lifecycle-decision.md`'s Verification section): `cargo build/check/
+//! test/clippy -D warnings` all pass, and the full pipe protocol (Connect,
+//! idempotent reconnect, self-healing Status, verified Disconnect) round-trips
+//! correctly against the real service from a client running in a genuine
+//! interactive (RDP) session. Two real bugs surfaced only by that live
+//! testing and are now fixed: the identity check originally compared against
+//! `WTSGetActiveConsoleSessionId()` (see `query_session_connect_state`'s doc
+//! comment), and the GUI-side client (`win_service_client.rs`) was missing
+//! `SECURITY_SQOS_PRESENT | SECURITY_IMPERSONATION` on its `CreateFileW` call,
+//! without which `ImpersonateNamedPipeClient` here fails with
+//! `ERROR_ALREADY_EXISTS` (183) for every caller, by Win32 design.
 
 #![cfg(target_os = "windows")]
 
@@ -158,16 +163,21 @@ pub async fn serve(supervisor: Arc<Supervisor>) -> std::io::Result<()> {
     }
 }
 
-/// Read the connecting client's session id via impersonation and compare it to
-/// the active console session. The impersonation window is kept as short as
-/// possible: revert immediately after reading the one piece of information
-/// needed, before doing anything else on this thread.
+/// Read the connecting client's session id via impersonation, then check its
+/// own connect state (not a comparison against some other session — see
+/// `query_session_connect_state`'s doc comment for why). The impersonation
+/// window is kept as short as possible: revert immediately after reading the
+/// one piece of information needed, before doing anything else on this
+/// thread.
 fn identity_authorized(pipe: &NamedPipeServer) -> bool {
     let pipe_handle = pipe.as_raw_handle() as HANDLE;
 
     // SAFETY: `pipe_handle` is a live, valid named-pipe server handle owned by
     // `pipe` for the duration of this call (borrowed, not consumed) — the
-    // documented way to read a connected client's identity on a pipe.
+    // documented way to read a connected client's identity on a pipe. Requires
+    // the client to have opened its end with SECURITY_SQOS_PRESENT |
+    // SECURITY_IMPERSONATION (win_service_client.rs) — without it this fails
+    // with ERROR_ALREADY_EXISTS, confirmed on a real Windows host.
     if unsafe { ImpersonateNamedPipeClient(pipe_handle) } == 0 {
         return false;
     }

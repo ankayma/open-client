@@ -26,6 +26,7 @@ use windows_sys::Win32::Foundation::{
 };
 use windows_sys::Win32::Storage::FileSystem::{
     CreateFileW, ReadFile, WriteFile, FILE_ATTRIBUTE_NORMAL, OPEN_EXISTING,
+    SECURITY_IMPERSONATION, SECURITY_SQOS_PRESENT,
 };
 use windows_sys::Win32::System::Pipes::WaitNamedPipeW;
 
@@ -61,6 +62,18 @@ fn open_pipe() -> Result<PipeHandle, String> {
     loop {
         // SAFETY: `name` is a live, NUL-terminated UTF-16 buffer for the
         // duration of this call; no other lifetime requirements.
+        //
+        // SECURITY_SQOS_PRESENT | SECURITY_IMPERSONATION is not optional here:
+        // without it, the server's `ImpersonateNamedPipeClient` call fails
+        // with ERROR_ALREADY_EXISTS (183) — confirmed on a real Windows host
+        // (T490) via a bare CreateFileW client that omitted these flags, which
+        // is exactly what this function used to do. A client that doesn't
+        // request impersonation-level access simply cannot be impersonated by
+        // the server, by Win32 design — the flag is the client's consent to
+        // be impersonated at all, which every legitimate caller of this
+        // in-band-bearer-token protocol needs to grant.
+        // `[T:Win32 CreateFile SECURITY_SQOS_PRESENT/SECURITY_IMPERSONATION —
+        // docs.microsoft.com/windows/win32/api/fileapi/nf-fileapi-createfilew]`
         let handle = unsafe {
             CreateFileW(
                 name.as_ptr(),
@@ -68,7 +81,7 @@ fn open_pipe() -> Result<PipeHandle, String> {
                 0,
                 std::ptr::null(),
                 OPEN_EXISTING,
-                FILE_ATTRIBUTE_NORMAL,
+                FILE_ATTRIBUTE_NORMAL | SECURITY_SQOS_PRESENT | SECURITY_IMPERSONATION,
                 std::ptr::null_mut(),
             )
         };
