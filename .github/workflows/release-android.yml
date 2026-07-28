@@ -93,6 +93,13 @@ jobs:
         working-directory: gui
         run: cargo tauri android init
 
+      # `android init` scales the full-bleed icon edge-to-edge into the adaptive-icon
+      # foreground (0% safe-zone margin) — the launcher's own mask then crops straight
+      # into the logo, wrong/ugly corners on the home screen. Re-render with proper
+      # padding before the APK is built. Same class of fix as scripts/ios-postinit.sh.
+      - name: Fix Android adaptive-icon safe zone
+        run: bash scripts/android-postinit.sh
+
       # No signingConfig in the generated Gradle → assembleRelease emits an UNSIGNED
       # apk. We sign the artifact directly with apksigner afterwards (deterministic,
       # independent of Tauri's Gradle internals) — the Android analogue of macOS
