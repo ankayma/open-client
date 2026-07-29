@@ -14,9 +14,9 @@
 > **Scope**: client only — `gui/src-tauri` (new native module + Tauri command),
 > `frontend/app-gui/src/lib/webauthn.ts`, `crates/agent-core/src/adapters.rs`
 > (comments only; the wire format does not change).
-> **Server: no change.** `control-plane/bin/control-plane/src/stepup.rs`
-> (webauthn-rs) speaks the standard browser JSON transport and does not care
-> which side of the FFI ran the ceremony.
+> **Server: no change.** The control plane's step-up service (webauthn-rs) speaks
+> the standard browser JSON transport and does not care which side of the FFI ran
+> the ceremony.
 > **Owner ratification**: required and given — this changes *how* an A.1.10 AAL3
 > factor is obtained, not *whether* (no Part A invariant amended). Also adds a
 > platform dependency, which CLAUDE.md reserves for the owner.
