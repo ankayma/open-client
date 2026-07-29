@@ -256,7 +256,10 @@
 			{#if platformKeyRegistered}
 				<div class="row">
 					<span class="label">Touch ID</span>
-					<span class="value">Set up</span>
+					<!-- This is the ENROLLED state, so it must not read "Set up" — that looked
+					     like an action, was a plain span, and did nothing when clicked.
+					     Mirrors the Security key row below. -->
+					<span class="value">Registered</span>
 				</div>
 			{:else}
 				<div class="row">

@@ -1865,13 +1865,30 @@ async fn platform_key_sign_challenge(
     .map_err(|e| e.to_string())
 }
 
+/// Whether Touch ID step-up is usable **on this device**.
+///
+/// The server answer alone is not that question. `platform_stepup_keys` is keyed on
+/// `key_id` with only an index on `user_id` — many keys per user is the intended
+/// design, one per machine, since the private half lives in that machine's Secure
+/// Enclave and cannot move. So "the account has a platform key" says nothing about
+/// whether *this* Mac can produce a signature.
+///
+/// Asking the server only produced a dead end: on a Mac that had never enrolled but
+/// whose account had a key from elsewhere, the UI hid the enrol button (nothing to
+/// set up) while `platform_key_sign_challenge` would have failed with "no Touch ID
+/// key enrolled" at the moment the factor was actually needed. Requiring the local
+/// key too means an unenrolled Mac is offered enrolment, which registers an
+/// additional key for the account — exactly what the schema is shaped for, and a
+/// plain INSERT server-side, so it overwrites nothing. [T: migration 035 has no
+/// unique constraint on user_id; platform_key_register INSERTs a fresh key_id]
 #[cfg(target_os = "macos")]
 #[tauri::command]
 async fn platform_key_status(state: State<'_, AppState>) -> Result<bool, String> {
     let tok = state.token().ok_or("not signed in")?;
-    adapters::platform_key_status(&state.http, &state.regional_base_url(), &tok)
+    let on_server = adapters::platform_key_status(&state.http, &state.regional_base_url(), &tok)
         .await
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+    Ok(on_server && find_platform_key()?.is_some())
 }
 
 #[cfg(not(target_os = "macos"))]
