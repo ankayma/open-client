@@ -18,6 +18,17 @@
 	<key>com.apple.developer.team-identifier</key>
 	<string>8UF87JS6WW</string>
 
+	<!-- The Touch ID step-up factor keeps its Secure Enclave key in the data protection
+	     keychain, which is the only keychain Secure Enclave keys may live in, and which
+	     "requires the calling binary to be codesigned with entitlements for the
+	     KeychainAccessGroups it is supposed to access"
+	     [T:security-framework-3.7.0 src/item.rs Location docs].
+	     The embedded provisioning profile grants 8UF87JS6WW.*, so this is authorized. -->
+	<key>keychain-access-groups</key>
+	<array>
+		<string>8UF87JS6WW.com.ankayma.app</string>
+	</array>
+
 	<!-- Lets the OS accept "ankayma.com" as the WebAuthn RP ID for this app, by
 	     checking it against https://ankayma.com/.well-known/apple-app-site-association
 	     (which must declare 8UF87JS6WW.com.ankayma.app under "webcredentials").

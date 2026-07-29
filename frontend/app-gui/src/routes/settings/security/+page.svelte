@@ -62,11 +62,18 @@
 			securityKeySupported = false;
 		}
 		try {
-			isMacOS = (await getPlatform()) === 'macos';
+			const plat = await getPlatform();
+			// Same Secure Enclave + LocalAuthentication factor on both Apple platforms; only
+			// the name the user knows it by differs, and on iPad/older iPhones it is Touch ID
+			// rather than Face ID, so keep the wording covering both there.
+			isMacOS = plat === 'macos';
+			biometricSupported = plat === 'macos' || plat === 'ios';
+			biometricName = plat === 'ios' ? 'Face ID' : 'Touch ID';
 		} catch {
 			isMacOS = false;
+			biometricSupported = false;
 		}
-		if (isMacOS) {
+		if (biometricSupported) {
 			try {
 				platformKeyRegistered = await platformKeyStatus();
 			} catch {
@@ -81,6 +88,8 @@
 	// 2026-07-28). Deliberately separate from the security-key section: this is a
 	// Secure Enclave key with biometryCurrentSet, not a WebAuthn/passkey credential.
 	let isMacOS = $state(false);
+	let biometricSupported = $state(false);
+	let biometricName = $state('Touch ID');
 	let platformKeyRegistered = $state(false);
 	let platformKeyBusy = $state(false);
 	let platformKeyError = $state('');
@@ -250,28 +259,40 @@
 		{/if}
 	</section>
 
-	{#if isMacOS}
+	{#if biometricSupported}
 		<section class="card">
-			<div class="section-label">Touch ID</div>
+			<div class="section-label">{biometricName}</div>
 			{#if platformKeyRegistered}
 				<div class="row">
-					<span class="label">Touch ID</span>
+					<span class="label">{biometricName}</span>
 					<!-- This is the ENROLLED state, so it must not read "Set up" — that looked
 					     like an action, was a plain span, and did nothing when clicked.
 					     Mirrors the Security key row below. -->
 					<span class="value">Registered</span>
 				</div>
+				<!-- The key is bound to the biometrics enrolled at the time and dies for good
+				     when those change, after which signing fails with no prompt at all. Without
+				     this the factor would be stuck in that state permanently, since enrolment is
+				     the only way back and the row above offers no action. -->
+				<div class="row">
+					<button class="su-primary" onclick={enrollPlatformKey} disabled={platformKeyBusy}>
+						{platformKeyBusy
+							? `Waiting for ${biometricName}…`
+							: `Set up again on this ${isMacOS ? 'Mac' : 'device'}`}
+					</button>
+				</div>
+				{#if platformKeyError}<p class="err">{platformKeyError}</p>{/if}
 			{:else}
 				<div class="row">
 					<span class="value dim">
-						Use Touch ID to confirm sensitive actions instead of typing a code. A failed or
-						cancelled Touch ID never falls back to a password — you'll just be asked to try
-						again or use another factor.
+						Use {biometricName} to confirm sensitive actions instead of typing a code. A failed
+						or cancelled {biometricName} never falls back to a password — you'll just be asked
+						to try again or use another factor.
 					</span>
 				</div>
 				<div class="row">
 					<button class="su-primary" onclick={enrollPlatformKey} disabled={platformKeyBusy}>
-						{platformKeyBusy ? 'Waiting for Touch ID…' : 'Set up Touch ID'}
+						{platformKeyBusy ? `Waiting for ${biometricName}…` : `Set up ${biometricName}`}
 					</button>
 				</div>
 				{#if platformKeyError}<p class="err">{platformKeyError}</p>{/if}

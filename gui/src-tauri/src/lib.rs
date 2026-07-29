@@ -30,7 +30,7 @@ mod deferred_invite;
 // Native FIDO2 security-key ceremony (E-7 Phase 3 / AAL3). WKWebView cannot run
 // navigator.credentials against a roaming key at all, so macOS drives the ceremony
 // through AuthenticationServices instead. [T:docs/webauthn-security-key-decision.md]
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "ios"))]
 mod webauthn_apple;
 
 // Android VPN bridge (frontend → AnkaymaVpnService via JNI). Owns the TUN fd, the
@@ -1556,49 +1556,61 @@ async fn totp_disable(
 
 // ── WebAuthn / YubiKey (Settings → Security + step-up AAL3) ──────────────────
 // These commands are opaque JSON pass-throughs to the control plane. Where the
-// ceremony itself runs depends on the platform: on macOS it CANNOT run in the webview
-// (WKWebView does not support FIDO2 security keys — see
+// ceremony itself runs depends on the platform: on macOS and iOS it CANNOT run in the
+// webview (WKWebView does not support FIDO2 security keys — see
 // docs/webauthn-security-key-decision.md), so `webauthn_native_*` below drives it
 // through AuthenticationServices and hands back the same JSON the browser path would
-// have produced. Other platforms still use `navigator.credentials` in the frontend.
+// have produced. On iOS that also buys NFC — tapping a YubiKey to the phone is handled
+// by the system sheet, no cable — which is the more natural way to use a key there.
+// Other platforms still use `navigator.credentials` in the frontend.
 
 /// Whether this platform can run the ceremony natively. The frontend calls this to
 /// decide which path to take, rather than sniffing the user agent.
 #[tauri::command]
 async fn webauthn_native_available() -> bool {
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
     {
         webauthn_apple::is_supported()
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(any(target_os = "macos", target_os = "ios")))]
     {
         false
     }
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "ios"))]
 async fn webauthn_native_run(
     app: tauri::AppHandle,
     options: serde_json::Value,
     which: webauthn_apple::Ceremony,
 ) -> Result<serde_json::Value, String> {
+    // Only the macOS branch below reaches for a Tauri window; iOS finds its own.
+    #[cfg(target_os = "macos")]
     use tauri::Manager;
 
-    // The ceremony needs a presentation anchor (NSWindow) and must be started on the
-    // main thread; the result arrives asynchronously on the run loop. So: hop to main,
-    // start it there, and wait on the channel from this worker. Blocking on the main
-    // thread instead would deadlock — the callback we are waiting for is delivered by
-    // the very run loop we would be holding.
+    // The ceremony needs a presentation anchor and must be started on the main thread;
+    // the result arrives asynchronously on the run loop. So: hop to main, start it there,
+    // and wait on the channel from this worker. Blocking on the main thread instead would
+    // deadlock — the callback we are waiting for is delivered by the very run loop we
+    // would be holding.
+    //
+    // The anchor is `NSWindow` on macOS and `UIWindow` on iOS. Tauri hands us the former;
+    // it exposes nothing for the latter, so the iOS side digs the key window out of
+    // UIApplication itself (webauthn_apple::presentation_anchor).
+    #[cfg(target_os = "macos")]
     let window = app
         .get_webview_window("main")
         .ok_or("no main window to anchor the security key prompt to")?;
     let (tx, rx) = webauthn_apple::channel();
 
     app.run_on_main_thread(move || {
+        #[cfg(target_os = "macos")]
         let anchor = window
             .ns_window()
             .map(|w| w as *mut objc2::runtime::AnyObject)
             .unwrap_or(std::ptr::null_mut());
+        #[cfg(target_os = "ios")]
+        let anchor = webauthn_apple::presentation_anchor();
         webauthn_apple::start_on_main(anchor, &options, which, tx);
     })
     .map_err(|e| format!("could not start the security key prompt: {e}"))?;
@@ -1619,11 +1631,11 @@ async fn webauthn_native_register(
     app: tauri::AppHandle,
     options: serde_json::Value,
 ) -> Result<serde_json::Value, String> {
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
     {
         webauthn_native_run(app, options, webauthn_apple::Ceremony::Register).await
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(any(target_os = "macos", target_os = "ios")))]
     {
         let _ = (app, options);
         Err("native security key support is not available on this platform".to_string())
@@ -1636,11 +1648,11 @@ async fn webauthn_native_authenticate(
     app: tauri::AppHandle,
     options: serde_json::Value,
 ) -> Result<serde_json::Value, String> {
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
     {
         webauthn_native_run(app, options, webauthn_apple::Ceremony::Authenticate).await
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(any(target_os = "macos", target_os = "ios")))]
     {
         let _ = (app, options);
         Err("native security key support is not available on this platform".to_string())
@@ -1723,10 +1735,10 @@ async fn verify_step_up_webauthn(
 // weaker secret. `[T:developer.apple.com/forums/thread/786171 — SE access needs
 // an App ID authorised by a profile; a real signed app bundle satisfies this
 // where a bare CLI binary can't]`
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "ios"))]
 const PLATFORM_KEY_LABEL: &str = "com.ankayma.app.stepup.touchid";
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "ios"))]
 fn platform_key_access_control(
 ) -> Result<security_framework::access_control::SecAccessControl, String> {
     use security_framework::access_control::SecAccessControl;
@@ -1743,11 +1755,82 @@ fn platform_key_access_control(
     .map_err(|e| format!("create_with_flags failed: {e:?}"))
 }
 
+/// Ask LocalAuthentication whether biometrics can be used AT ALL before starting
+/// anything, and translate the refusal into something a person can act on.
+///
+/// Worth the extra call: the common failure is not a broken install, it is a MacBook
+/// with the lid shut on an external display. The Touch ID sensor is on the built-in
+/// keyboard, so the OS has no way to read a fingerprint and cancels the operation
+/// without ever showing a prompt — `LAError.systemCancel` (-4). Other Apple apps quietly
+/// fall back to a password in that state, which is why nothing looks broken elsewhere.
+/// Surfacing the raw `CFError` for that is a bad message for an ordinary situation, and
+/// it cost most of a debugging session to recognise. [T — reproduced 2026-07-29/30:
+/// unavailable with the lid closed, works with it open, no code change in between]
+#[cfg(any(target_os = "macos", target_os = "ios"))]
+fn biometrics_unavailable_reason() -> Option<String> {
+    use objc2_local_authentication::{LAContext, LAPolicy};
+    let ctx = unsafe { LAContext::new() };
+    // Biometrics ONLY — never DeviceOwnerAuthentication, which would offer the account
+    // password as a fallback. This factor exists precisely to avoid that (A.1.10).
+    let checked =
+        unsafe { ctx.canEvaluatePolicy_error(LAPolicy::DeviceOwnerAuthenticationWithBiometrics) };
+    let e = match checked {
+        Ok(()) => return None,
+        Err(e) => e,
+    };
+    let code = e.code();
+    eprintln!(
+        "[stepup/platform-key] biometrics unavailable: LAError {code}: {}",
+        e.localizedDescription()
+    );
+    // LAError codes (LAError.h): -5 passcodeNotSet, -6 biometryNotAvailable,
+    // -7 biometryNotEnrolled, -8 biometryLockout.
+    //
+    // The -6 wording is macOS-specific on purpose: a lid shut over an external display is
+    // by far the most likely way to reach it there, and naming that saves the reader the
+    // debugging session it cost us. On iOS the sensor cannot be "unavailable" for a
+    // physical reason, so keep that message plain.
+    #[cfg(target_os = "macos")]
+    const NAME: &str = "Touch ID";
+    #[cfg(target_os = "ios")]
+    const NAME: &str = "Face ID / Touch ID";
+    Some(match code {
+        #[cfg(target_os = "macos")]
+        -6 => "Touch ID isn't available right now. If your Mac's lid is closed while you \
+               use an external display, open the lid — the sensor is on the built-in keyboard."
+            .to_owned(),
+        #[cfg(target_os = "ios")]
+        -6 => format!("{NAME} isn't available on this device right now."),
+        -7 => {
+            format!("{NAME} isn't set up on this device yet. Add it in Settings, then try again.")
+        }
+        -8 => format!(
+            "{NAME} is locked after too many failed attempts. Unlock this device with your \
+             passcode first, then try again."
+        ),
+        -5 => format!("{NAME} needs a passcode set on this device."),
+        _ => format!("{NAME} isn't available here (LocalAuthentication error {code})."),
+    })
+}
+
 /// Find this app's previously-enrolled Secure Enclave key by its stable label,
 /// so `platform_key_sign_challenge` signs with the SAME key `platform_key_enroll`
 /// registered server-side (not a freshly-generated one).
-#[cfg(target_os = "macos")]
-fn find_platform_key() -> Result<Option<security_framework::key::SecKey>, String> {
+#[cfg(any(target_os = "macos", target_os = "ios"))]
+/// `auth_ctx` is a retained `LAContext` pointer, or null.
+///
+/// Signing with a `biometryCurrentSet` Secure Enclave key needs an explicit
+/// authentication context. Without one the OS builds an implicit context for the
+/// operation and immediately cancels it off the main thread — observed as
+/// `com.apple.LocalAuthentication` code -4 (`LAError.systemCancel`, "Authentication
+/// canceled"), with no Touch ID prompt ever shown. The documented fix is to create and
+/// RETAIN an LAContext and hand it over as `kSecUseAuthenticationContext` on the query
+/// that fetches the key; the returned key reference carries it into the signature.
+/// Callers that only test for existence pass null — they never trigger biometrics.
+/// [T:developer.apple.com/forums/thread/84309 + security-framework src/item.rs:486]
+fn find_platform_key(
+    auth_ctx: *mut std::os::raw::c_void,
+) -> Result<Option<security_framework::key::SecKey>, String> {
     use security_framework::item::{
         ItemClass, ItemSearchOptions, KeyClass, Reference, SearchResult,
     };
@@ -1756,13 +1839,34 @@ fn find_platform_key() -> Result<Option<security_framework::key::SecKey>, String
     // Treating it as Err made "Set up Touch ID" fail before SecKey::new ran.
     // [T:security-framework ItemSearchOptions::search + errSecItemNotFound]
     const ERR_SEC_ITEM_NOT_FOUND: i32 = -25300;
-    let results = match ItemSearchOptions::new()
-        .class(ItemClass::key())
+    // Must search the SAME keychain the key was written to. Secure Enclave keys can
+    // only live in the data protection keychain, and a search without this looks in the
+    // legacy file keychain instead and finds nothing — which is precisely how an
+    // enrolled key appeared to vanish. `ignore_legacy_keychains()` is what sets
+    // kSecUseDataProtectionKeychain on the query; ItemSearchOptions has no `location`
+    // setter (that field belongs to ItemAddOptions).
+    // [T:security-framework-3.7.0 src/item.rs:384 sets kSecUseDataProtectionKeychain]
+    let mut opts = ItemSearchOptions::new();
+    opts.class(ItemClass::key())
         .key_class(KeyClass::private())
         .label(PLATFORM_KEY_LABEL)
-        .load_refs(true)
-        .search()
-    {
+        .load_refs(true);
+    // macOS only, in both senses: security-framework compiles this method solely for
+    // macOS, and iOS has no legacy keychain to steer away from — the data protection
+    // keychain is the only one there, so the query already looks in the right place.
+    #[cfg(target_os = "macos")]
+    opts.ignore_legacy_keychains();
+    if !auth_ctx.is_null() {
+        use core_foundation::base::TCFType;
+        // wrap_under_GET_rule retains, balancing the Retained<LAContext> the caller
+        // still owns. The deprecated `authentication_context` takes a CREATE rule
+        // (consumes a +1) and would over-release a pointer we did not hand ownership of.
+        // SAFETY: auth_ctx is a live LAContext the caller keeps alive past the signature.
+        let ctx =
+            unsafe { core_foundation::base::CFType::wrap_under_get_rule(auth_ctx as *const _) };
+        opts.local_authentication_context(Some(ctx));
+    }
+    let results = match opts.search() {
         Ok(r) => r,
         Err(e) if e.code() == ERR_SEC_ITEM_NOT_FOUND => return Ok(None),
         Err(e) => return Err(format!("keychain search failed: {e:?}")),
@@ -1775,18 +1879,58 @@ fn find_platform_key() -> Result<Option<security_framework::key::SecKey>, String
     Ok(None)
 }
 
+/// Drop this device's Secure Enclave key so the next enrolment makes a fresh one.
+///
+/// Needed because a `biometryCurrentSet` key is permanently invalidated the moment the
+/// user's enrolled fingerprints change — and, as this session discovered the hard way,
+/// a key created under different entitlements can become unusable to a later build:
+/// signing fails with `LAError.systemCancel` and no prompt is ever shown. Without a way
+/// to discard it the factor is stuck forever, because enrolment used to reuse whatever
+/// key it found. Deleting is safe: the private half never leaves the Secure Enclave and
+/// cannot be backed up, so there is nothing to preserve, and the server keeps accepting
+/// the other keys on the account.
+#[cfg(any(target_os = "macos", target_os = "ios"))]
+fn delete_platform_key() -> Result<(), String> {
+    use security_framework::item::{ItemClass, ItemSearchOptions, KeyClass};
+    const ERR_SEC_ITEM_NOT_FOUND: i32 = -25300;
+    let mut opts = ItemSearchOptions::new();
+    opts.class(ItemClass::key())
+        .key_class(KeyClass::private())
+        .label(PLATFORM_KEY_LABEL);
+    // See find_platform_key: macOS-only method, and iOS needs no equivalent.
+    #[cfg(target_os = "macos")]
+    opts.ignore_legacy_keychains();
+    match opts.delete() {
+        Ok(()) => Ok(()),
+        // Nothing enrolled is the same end state as a successful delete.
+        Err(e) if e.code() == ERR_SEC_ITEM_NOT_FOUND => Ok(()),
+        Err(e) => Err(format!("could not remove the old Touch ID key: {e:?}")),
+    }
+}
+
 /// Create (or reuse) the Secure Enclave key and register its public half with
 /// the control plane. Key creation itself does not prompt Touch ID (only a
 /// SIGN operation does, per `platform_key_sign_challenge`) — the OS defers the
 /// biometric check to first use.
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "ios"))]
 #[tauri::command]
 async fn platform_key_enroll(state: State<'_, AppState>) -> Result<(), String> {
+    use security_framework::item::Location;
     use security_framework::key::{GenerateKeyOptions, KeyType, SecKey, Token};
     let tok = state.token().ok_or("not signed in")?;
+    // Check before creating anything: enrolling a key this Mac cannot sign with would
+    // leave the account advertising a factor it cannot produce.
+    if let Some(reason) = biometrics_unavailable_reason() {
+        return Err(reason);
+    }
 
     let public_key_b64 = tauri::async_runtime::spawn_blocking(move || -> Result<String, String> {
-        let key = match find_platform_key()? {
+        // Enrolment is an explicit "set this up on this device" action, so it must not
+        // silently reuse a key it cannot verify is still usable — that is exactly how an
+        // unusable key survived across builds and left the factor permanently broken
+        // with no way out. Always start from a fresh key.
+        delete_platform_key()?;
+        let key = match find_platform_key(std::ptr::null_mut())? {
             Some(k) => k,
             None => {
                 let access_control = platform_key_access_control()?;
@@ -1795,10 +1939,54 @@ async fn platform_key_enroll(state: State<'_, AppState>) -> Result<(), String> {
                     .set_key_type(KeyType::ec())
                     .set_token(Token::SecureEnclave)
                     .set_label(PLATFORM_KEY_LABEL.to_string())
+                    // WITHOUT this the key is never stored. security-framework derives
+                    // kSecAttrIsPermanent from `location` (`is_permanent =
+                    // CFBoolean::from(self.location.is_some())`, src/key.rs), so leaving
+                    // it unset creates the Secure Enclave key, hands back its public half
+                    // — which we happily registered with the server — and then drops the
+                    // private half on the floor. Enrolment looked successful and every
+                    // later step-up silently fell back to an emailed code.
+                    // DataProtectionKeychain is also the only keychain Secure Enclave
+                    // keys may live in. [T:security-framework-3.7.0 src/key.rs:417 +
+                    // src/item.rs Location docs]
+                    .set_location(Location::DataProtectionKeychain)
                     .set_access_control(access_control);
                 SecKey::new(&options).map_err(|e| format!("SecKey::new failed: {e:?}"))?
             }
         };
+        // Prove the key can actually SIGN before telling the user (and the server) that
+        // Touch ID is set up. Key *generation* never prompts — the OS defers the
+        // biometric check to first use — so without this, enrolment succeeds silently on
+        // a key that may be unusable, and the failure only surfaces later at the moment
+        // the factor is genuinely needed, where it is swallowed as a fallback to an
+        // emailed code. That is exactly how a completely non-functional factor reported
+        // itself as "Registered". The test signature also gives the user the Touch ID
+        // prompt they rightly expect while setting up a fingerprint factor.
+        {
+            use objc2::rc::Retained;
+            use security_framework::key::Algorithm;
+            let ctx = unsafe { objc2_local_authentication::LAContext::new() };
+            unsafe {
+                ctx.setLocalizedReason(&objc2_foundation::NSString::from_str(
+                    "set up this device as a step-up factor",
+                ))
+            };
+            let ctx_ptr = Retained::as_ptr(&ctx) as *mut std::os::raw::c_void;
+            let probe = find_platform_key(ctx_ptr)?
+                .ok_or("the new Touch ID key vanished right after it was created")?;
+            if let Err(e) = probe.create_signature(
+                Algorithm::ECDSASignatureMessageX962SHA256,
+                b"ankayma-enrollment-probe",
+            ) {
+                eprintln!("[stepup/platform-key] enrolment probe failed: {e:?}");
+                // Leave nothing half-enrolled behind: a key we cannot sign with is worse
+                // than none, because status would report the factor as available.
+                let _ = delete_platform_key();
+                return Err(format!("Touch ID could not be set up: {e:?}"));
+            }
+            drop(ctx);
+        }
+
         let public = key.public_key().ok_or("key has no public half")?;
         let raw = public
             .external_representation()
@@ -1825,7 +2013,7 @@ async fn platform_key_enroll(state: State<'_, AppState>) -> Result<(), String> {
 /// prompt), verify server-side, return the proof_token. Mirrors
 /// `verify_step_up_totp`'s shape (purpose in, proof_token out) but — unlike a
 /// typed code — there's nothing for the frontend to collect from the user.
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "ios"))]
 #[tauri::command]
 async fn platform_key_sign_challenge(
     state: State<'_, AppState>,
@@ -1833,21 +2021,66 @@ async fn platform_key_sign_challenge(
 ) -> Result<String, String> {
     use security_framework::key::Algorithm;
     let tok = state.token().ok_or("not signed in")?;
+    // Fail before minting a server challenge we cannot answer. The caller falls through to
+    // TOTP/OTP on any error here, which is right — a lid-shut Mac must not block the
+    // action — but the reason still belongs in the log rather than nowhere.
+    if let Some(reason) = biometrics_unavailable_reason() {
+        return Err(reason);
+    }
 
-    let (challenge_id, nonce_b64) =
-        adapters::platform_key_challenge(&state.http, &state.regional_base_url(), &tok, &purpose)
-            .await
-            .map_err(|e| e.to_string())?;
+    // Every failure below is swallowed by the caller (stepup.ts falls through to
+    // TOTP/OTP so a dead sensor never blocks the user), so log the reason here or a
+    // completely broken factor is indistinguishable from a working one that the user
+    // declined. [P.3 — this silence hid a non-functional factor for weeks]
+    let (challenge_id, nonce_b64) = match adapters::platform_key_challenge(
+        &state.http,
+        &state.regional_base_url(),
+        &tok,
+        &purpose,
+    )
+    .await
+    {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("[stepup/platform-key] challenge failed for {purpose}: {e}");
+            return Err(e.to_string());
+        }
+    };
 
     let signature_b64 = tauri::async_runtime::spawn_blocking(move || -> Result<String, String> {
         use base64::Engine;
         let nonce = base64::engine::general_purpose::STANDARD
             .decode(&nonce_b64)
             .map_err(|e| format!("bad nonce from server: {e}"))?;
-        let key = find_platform_key()?.ok_or("no Touch ID key enrolled")?;
+        // Create + retain the context BEFORE the lookup, and keep it alive past the
+        // signature — dropping it early is the same as never passing one.
+        use objc2::rc::Retained;
+        let ctx = unsafe { objc2_local_authentication::LAContext::new() };
+        unsafe {
+            ctx.setLocalizedReason(&objc2_foundation::NSString::from_str(
+                "confirm this sensitive action",
+            ))
+        };
+        let ctx_ptr = Retained::as_ptr(&ctx) as *mut std::os::raw::c_void;
+
+        let key = match find_platform_key(ctx_ptr) {
+            Ok(Some(k)) => k,
+            Ok(None) => {
+                eprintln!("[stepup/platform-key] no key found in the keychain");
+                return Err("no Touch ID key enrolled".into());
+            }
+            Err(e) => {
+                eprintln!("[stepup/platform-key] keychain search failed: {e}");
+                return Err(e);
+            }
+        };
         let sig = key
             .create_signature(Algorithm::ECDSASignatureMessageX962SHA256, &nonce)
-            .map_err(|e| format!("Touch ID sign failed/cancelled: {e:?}"))?;
+            .map_err(|e| {
+                eprintln!("[stepup/platform-key] sign failed: {e:?}");
+                format!("Touch ID sign failed/cancelled: {e:?}")
+            })?;
+        drop(ctx); // explicit: the context must outlive the signature, not the lookup
         Ok(base64::engine::general_purpose::STANDARD.encode(sig))
     })
     .await
@@ -1862,7 +2095,10 @@ async fn platform_key_sign_challenge(
         &signature_b64,
     )
     .await
-    .map_err(|e| e.to_string())
+    .map_err(|e| {
+        eprintln!("[stepup/platform-key] server rejected the signature: {e}");
+        e.to_string()
+    })
 }
 
 /// Whether Touch ID step-up is usable **on this device**.
@@ -1881,32 +2117,32 @@ async fn platform_key_sign_challenge(
 /// additional key for the account — exactly what the schema is shaped for, and a
 /// plain INSERT server-side, so it overwrites nothing. [T: migration 035 has no
 /// unique constraint on user_id; platform_key_register INSERTs a fresh key_id]
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "ios"))]
 #[tauri::command]
 async fn platform_key_status(state: State<'_, AppState>) -> Result<bool, String> {
     let tok = state.token().ok_or("not signed in")?;
     let on_server = adapters::platform_key_status(&state.http, &state.regional_base_url(), &tok)
         .await
         .map_err(|e| e.to_string())?;
-    Ok(on_server && find_platform_key()?.is_some())
+    Ok(on_server && find_platform_key(std::ptr::null_mut())?.is_some())
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "ios")))]
 #[tauri::command]
 async fn platform_key_enroll(_state: State<'_, AppState>) -> Result<(), String> {
-    Err("Touch ID/Face ID step-up is macOS-only for now".into())
+    Err("Face ID / Touch ID step-up is not available on this platform".into())
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "ios")))]
 #[tauri::command]
 async fn platform_key_sign_challenge(
     _state: State<'_, AppState>,
     _purpose: String,
 ) -> Result<String, String> {
-    Err("Touch ID/Face ID step-up is macOS-only for now".into())
+    Err("Face ID / Touch ID step-up is not available on this platform".into())
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "ios")))]
 #[tauri::command]
 async fn platform_key_status(_state: State<'_, AppState>) -> Result<bool, String> {
     Ok(false)
