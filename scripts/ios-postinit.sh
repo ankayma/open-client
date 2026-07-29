@@ -113,6 +113,25 @@ if ! grep -q "associated-domains" "$PROJ"; then
   echo "✓ associated-domains (webcredentials:ankayma.com) injected into project.yml — WebAuthn in WKWebView"
 fi
 
+# 3e. Face ID usage string for the E-7 step-up factor (Secure Enclave key gated by
+#     biometryCurrentSet — same code as macOS Touch ID, see gui/src-tauri/src/lib.rs
+#     platform_key_enroll). iOS does NOT return an error when this key is missing: it
+#     TERMINATES the app the moment Face ID is invoked, so shipping without it turns the
+#     first step-up into a crash. Touch ID devices need no equivalent key. Same
+#     xcodegen-wipes-the-plist reason as the camera key, so it lives in project.yml.
+#     [T:developer.apple.com/documentation/bundleresources/information_property_list/nsfaceidusagedescription]
+if ! grep -q "NSFaceIDUsageDescription" "$PROJ"; then
+  awk '
+    { print }
+    /^      path: ankayma-gui_iOS\/Info\.plist$/ { app_info=1 }
+    app_info && /^      properties:$/ && !done {
+      print "        NSFaceIDUsageDescription: Ankayma uses Face ID to confirm sensitive actions, such as adding a device or changing who can reach your mesh."
+      done=1
+    }
+  ' "$PROJ" >"$PROJ.tmp" && mv "$PROJ.tmp" "$PROJ"
+  echo "✓ NSFaceIDUsageDescription injected into project.yml (Face ID step-up would crash without it)"
+fi
+
 # 3d. Keep the app's own Rust static lib (libapp.a) OUT of the app bundle. The app
 #     target globs `- path: Externals` as sources and tauri writes libapp.a there, so
 #     xcodegen adds it to BOTH "Link Binary" (correct) AND "Copy Bundle Resources"

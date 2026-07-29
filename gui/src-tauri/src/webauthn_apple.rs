@@ -54,6 +54,69 @@ use serde_json::{json, Value};
 use std::cell::RefCell;
 use std::sync::mpsc::{sync_channel, SyncSender};
 
+/// The `ASPresentationAnchor` the system's security-key sheet attaches to.
+///
+/// macOS gets this from Tauri (`WebviewWindow::ns_window`), but Tauri exposes no
+/// `UIWindow` on iOS, so find the key window ourselves. Deliberately via
+/// `connectedScenes` rather than `UIApplication.windows`: the latter is deprecated
+/// since iOS 15 and returns nothing useful in a scene-based app. The deployment target
+/// is iOS 16 (`tauri.conf.json`), so `connectedScenes` is always available and needs no
+/// fallback. `respondsToSelector:` avoids having to compare against `UIWindowScene`,
+/// which would mean pulling in UIKit bindings for one check.
+///
+/// Must be called on the main thread — `UIApplication` is main-thread-only — which
+/// `start_on_main` already guarantees.
+#[cfg(target_os = "ios")]
+pub fn presentation_anchor() -> *mut AnyObject {
+    use objc2::runtime::AnyClass;
+    use objc2::{msg_send, sel};
+
+    unsafe {
+        let Some(cls) = AnyClass::get(c"UIApplication") else {
+            return std::ptr::null_mut();
+        };
+        let app: *mut AnyObject = msg_send![cls, sharedApplication];
+        if app.is_null() {
+            return std::ptr::null_mut();
+        }
+        let scenes: *mut AnyObject = msg_send![app, connectedScenes];
+        if scenes.is_null() {
+            return std::ptr::null_mut();
+        }
+        let all: *mut AnyObject = msg_send![scenes, allObjects];
+        if all.is_null() {
+            return std::ptr::null_mut();
+        }
+        let scene_count: usize = msg_send![all, count];
+        let mut first_window: *mut AnyObject = std::ptr::null_mut();
+        for i in 0..scene_count {
+            let scene: *mut AnyObject = msg_send![all, objectAtIndex: i];
+            let responds: bool = msg_send![scene, respondsToSelector: sel!(windows)];
+            if !responds {
+                continue;
+            }
+            let windows: *mut AnyObject = msg_send![scene, windows];
+            if windows.is_null() {
+                continue;
+            }
+            let count: usize = msg_send![windows, count];
+            for j in 0..count {
+                let w: *mut AnyObject = msg_send![windows, objectAtIndex: j];
+                let is_key: bool = msg_send![w, isKeyWindow];
+                if is_key {
+                    return w;
+                }
+                if first_window.is_null() {
+                    first_window = w;
+                }
+            }
+        }
+        // No key window (can happen briefly during scene setup) — any window still gives
+        // the sheet something to attach to, which beats failing the ceremony outright.
+        first_window
+    }
+}
+
 /// Whether this OS can run the native ceremony at all. Callers must check first —
 /// `tauri.conf.json` pins no macOS deployment target, so the binary may legally run
 /// somewhere older than the 12.0 floor, where the class simply does not exist.
