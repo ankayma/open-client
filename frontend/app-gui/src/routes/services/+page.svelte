@@ -659,7 +659,9 @@
       onkeydown={(e) => e.stopPropagation()}
     >
       <div class="ci-head">
-        <span class="ci-title">{ciMode === "ci" ? "🧾 CI deploys" : "🧾 Activity &amp; receipts"} → {ciNode}</span>
+        <!-- Plain "&" — this is a JS string interpolated as TEXT, not markup, so an
+             HTML entity here renders literally as "&amp;". -->
+        <span class="ci-title">{ciMode === "ci" ? "🧾 CI deploys" : "🧾 Activity & receipts"} → {ciNode}</span>
         <button class="ci-close" onclick={() => (ciNode = null)}>✕</button>
       </div>
 
@@ -788,17 +790,23 @@
     justify-content: center;
     gap: 6px;
     width: 100%;
-    padding: 6px 10px;
+    padding: 8px 12px;
     border-radius: 8px;
     font-size: 13px;
     font-weight: 600;
-    color: var(--c-text-dim);
-    background: transparent;
-    border: 1px solid transparent;
+    /* Quiet tier = outlined secondary button, NOT dim-text-on-transparent:
+       --c-text-dim (#7070a0) with no surface behind it reads as a disabled
+       control, which is what this tier looked like once a second device
+       enrolled and the button dropped out of its prominent tier. Tier
+       difference stays (filled accent vs outlined), legibility does not. */
+    color: var(--c-text);
+    background: var(--c-surface);
+    border: 1px solid var(--c-border);
   }
   .add-device-btn:hover:not(:disabled) {
     color: var(--c-text);
-    background: var(--c-surface);
+    background: var(--c-border);
+    border-color: var(--c-accent);
   }
   .add-device-btn.prominent {
     padding: 10px 14px;
