@@ -396,6 +396,12 @@ pub(crate) async fn serve_dataplane(
     // TLS-terminating relay running once a cert lands — peer-to-peer, no
     // vendor edge in the data path (A.1.1).
     let relay = crate::tls_relay::Relay::new();
+    // F0 "Publish a sample demo": bind the fixed-port loopback responder here
+    // (daemon — long-lived, auto-respawned by the privileged helper) rather
+    // than in the GUI process, whose restart used to orphan the port the
+    // relay forwards to. See `sample_demo` module doc. Unconditional and
+    // harmless if this node never publishes one.
+    agent_core::sample_demo::ensure_running();
     let startup_token = ctx.service_token.read().unwrap().clone();
     let resolver_zone =
         match adapters::resolve_subdomains(&ctx.http, &ctx.control_plane, &startup_token).await {

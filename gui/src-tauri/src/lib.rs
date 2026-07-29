@@ -3066,11 +3066,13 @@ async fn open_subdomain(fqdn: String, scheme: Option<String>) -> Result<(), Stri
 /// user input — the whole point is zero typing.
 const SAMPLE_DEMO_LABEL: &str = "demo";
 
-/// One-click "Publish a sample demo": ensure the bundled static page is being
-/// served locally, then map it onto this node exactly like any other F-3
-/// subdomain — no new control-plane surface, no `tls_relay` change. Reuses an
-/// existing `demo`-labeled entry pointed at this node instead of minting a
-/// second one on repeat clicks (ND-R6 subdomain cap is scarce on F0).
+/// One-click "Publish a sample demo": map the bundled static page — served by
+/// the DAEMON on a fixed port (`agent_core::sample_demo`, bound once at
+/// `agent up` startup, not by this GUI process) — onto this node exactly
+/// like any other F-3 subdomain — no new control-plane surface, no
+/// `tls_relay` change. Reuses an existing `demo`-labeled entry pointed at
+/// this node instead of minting a second one on repeat clicks (ND-R6
+/// subdomain cap is scarce on F0).
 #[tauri::command]
 async fn publish_sample_demo(
     state: State<'_, AppState>,
@@ -3085,7 +3087,7 @@ async fn publish_sample_demo(
         .map(|n| n.node_id.clone())
         .ok_or("enroll and connect a device first")?;
 
-    let port = agent_core::sample_demo::ensure_running();
+    let port = agent_core::sample_demo::configured_port();
 
     let existing = adapters::list_subdomains(&state.http, &state.regional_base_url(), &tok)
         .await
@@ -3134,8 +3136,11 @@ async fn publish_sample_demo(
     }
 }
 
-/// Tear down the sample demo: remove the subdomain mapping (same endpoint as a
-/// normal `delete_subdomain`) and stop the local responder from answering.
+/// Tear down the sample demo: remove the subdomain mapping (same endpoint as
+/// a normal `delete_subdomain`). The daemon's loopback responder (fixed
+/// port, started once at `agent up` startup — see `sample_demo` module doc)
+/// keeps running; nothing outside the host can dial it directly, and with no
+/// subdomain mapping left, no name routes to it either.
 #[tauri::command]
 async fn unpublish_sample_demo(
     label: String,
@@ -3151,9 +3156,7 @@ async fn unpublish_sample_demo(
         proof_token.as_deref(),
     )
     .await
-    .map_err(|e| e.to_string())?;
-    agent_core::sample_demo::set_enabled(false);
-    Ok(())
+    .map_err(|e| e.to_string())
 }
 
 // ── F1 team membership ────────────────────────────────────────────────────────
