@@ -26,3 +26,11 @@ cosign.key
 # packaging/windows/build-ankayma-windows.bat (not vendored, to avoid shipping a
 # third-party binary blob in this repo). [T:workspace private §5]
 /gui/src-tauri/wintun.dll
+
+# macOS Developer ID provisioning profile — supplied at build time (CI secret
+# APPLE_PROVISION_PROFILE_BASE64, decoded by release-macos.yml). Not a secret in
+# the cryptographic sense (it carries only the PUBLIC Developer ID certificate),
+# but it is team-specific signing material, so it stays out of this public repo.
+# Required whenever bundle.macOS.entitlements is wired — see scripts/release-macos.sh
+# preflight and docs/macos-associated-domains.md. [T:A.1.21]
+/gui/src-tauri/macos/*.provisionprofile
