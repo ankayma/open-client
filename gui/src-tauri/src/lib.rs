@@ -1657,13 +1657,22 @@ fn find_platform_key() -> Result<Option<security_framework::key::SecKey>, String
     use security_framework::item::{
         ItemClass, ItemSearchOptions, KeyClass, Reference, SearchResult,
     };
-    let results = ItemSearchOptions::new()
+    // SecItemCopyMatching returns errSecItemNotFound (-25300) when the label
+    // has never been enrolled — that is the empty case, not a hard failure.
+    // Treating it as Err made "Set up Touch ID" fail before SecKey::new ran.
+    // [T:security-framework ItemSearchOptions::search + errSecItemNotFound]
+    const ERR_SEC_ITEM_NOT_FOUND: i32 = -25300;
+    let results = match ItemSearchOptions::new()
         .class(ItemClass::key())
         .key_class(KeyClass::private())
         .label(PLATFORM_KEY_LABEL)
         .load_refs(true)
         .search()
-        .map_err(|e| format!("keychain search failed: {e:?}"))?;
+    {
+        Ok(r) => r,
+        Err(e) if e.code() == ERR_SEC_ITEM_NOT_FOUND => return Ok(None),
+        Err(e) => return Err(format!("keychain search failed: {e:?}")),
+    };
     for r in results {
         if let SearchResult::Ref(Reference::Key(k)) = r {
             return Ok(Some(k));
