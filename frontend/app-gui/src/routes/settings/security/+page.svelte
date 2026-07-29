@@ -18,6 +18,17 @@
 	import { runWithStepUp } from '$lib/stepup';
 	import { registerSecurityKey, webauthnAvailable } from '$lib/webauthn';
 
+	// Tauri's invoke() rejects a failed `Result<T, String>` command with the raw
+	// string, NOT an Error instance — only browser-thrown errors (e.g.
+	// navigator.credentials.* in webauthn.ts) are real Error objects. `e
+	// instanceof Error ? e.message : fallback` silently swallows every Tauri-side
+	// error behind a generic fallback. This covers both shapes correctly.
+	function errMsg(e: unknown, fallback: string): string {
+		if (typeof e === 'string' && e) return e;
+		if (e instanceof Error && e.message) return e.message;
+		return fallback;
+	}
+
 	// idle: not enrolled, offer setup. enrolling: secret shown, awaiting a code
 	// to confirm. enrolled: a confirmed factor exists. No backup-codes step
 	// (removed 2026-07-20): a lost authenticator recovers via
@@ -73,7 +84,7 @@
 			await platformKeyEnroll();
 			platformKeyRegistered = true;
 		} catch (e) {
-			platformKeyError = e instanceof Error ? e.message : 'Could not set up Touch ID';
+			platformKeyError = errMsg(e, 'Could not set up Touch ID');
 		} finally {
 			platformKeyBusy = false;
 		}
@@ -91,7 +102,7 @@
 			await registerSecurityKey();
 			webauthnRegistered = true;
 		} catch (e) {
-			webauthnError = e instanceof Error ? e.message : 'Could not register the security key';
+			webauthnError = errMsg(e, 'Could not register the security key');
 		} finally {
 			webauthnBusy = false;
 		}
@@ -104,7 +115,7 @@
 			[otpauthUrl, secret] = await totpEnroll();
 			totpState = 'enrolling';
 		} catch (e) {
-			totpError = e instanceof Error ? e.message : 'Could not start TOTP setup';
+			totpError = errMsg(e, 'Could not start TOTP setup');
 		} finally {
 			busy = false;
 		}
@@ -119,7 +130,7 @@
 			confirmCode = '';
 			totpState = 'enrolled';
 		} catch (e) {
-			totpError = e instanceof Error ? e.message : 'Incorrect code';
+			totpError = errMsg(e, 'Incorrect code');
 		} finally {
 			busy = false;
 		}
@@ -138,7 +149,7 @@
 			totpState = 'idle';
 		} catch (e) {
 			if (e instanceof Error && e.message === 'Step-up cancelled') return;
-			totpError = e instanceof Error ? e.message : 'Could not disable the authenticator';
+			totpError = errMsg(e, 'Could not disable the authenticator');
 		} finally {
 			busy = false;
 		}
