@@ -457,6 +457,11 @@ export async function inviteMember(
     proofToken: proof?.proofToken,
   });
 }
+// Session-authed redeem. NOT used by the invite deep-link flow, and should not be wired
+// back into it: it binds the invite to whoever is currently signed in rather than to the
+// address the invite was issued to, so opening someone else's invite on a signed-in device
+// joins the wrong identity. Deep links go through `joinTeamLink` (magic-link), which roots
+// membership in the invite's own email.
 export async function joinTeam(invite: string): Promise<void> {
   return invoke("join_team", { invite });
 }

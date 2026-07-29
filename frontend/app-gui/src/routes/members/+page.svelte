@@ -1,8 +1,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { get } from "svelte/store";
-  import { listMembers, inviteMember, joinTeam, removeMember, resetMemberTotp } from "$lib/tauri";
-  import { pendingInvite, auth } from "$lib/stores";
+  import { listMembers, inviteMember, removeMember, resetMemberTotp } from "$lib/tauri";
+  import { auth } from "$lib/stores";
   import { runWithStepUp } from "$lib/stepup";
   import type { MembersView } from "$lib/types";
 
@@ -30,24 +29,13 @@
   ];
   let memberTtl = $state(604800);
 
+  // Invite deep links are NOT consumed here any more. This page used to redeem a held
+  // `join-team` token through the session-authed endpoint, which binds the invite to
+  // whoever is logged in rather than to the address it was issued to. The layout now
+  // redeems every such token through the magic-link path, so there is a single redeem
+  // route for a single kind of token — and no way to join as the wrong identity.
   onMount(async () => {
     await load();
-    // Arrived here from a `ankayma://join-team?token=…` deep link: redeem the
-    // invite automatically so the recipient lands already a member. [A] invite-flow.
-    const invite = get(pendingInvite);
-    if (invite?.type === "join-team") {
-      pendingInvite.set(null);
-      busy = true;
-      error = "";
-      try {
-        await joinTeam(invite.token);
-        await load();
-      } catch (e: unknown) {
-        error = e instanceof Error ? e.message : "Failed to join team";
-      } finally {
-        busy = false;
-      }
-    }
   });
 
   async function load() {

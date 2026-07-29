@@ -4,7 +4,7 @@
 	import { page } from '$app/state';
 	import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 	import { auth, connection, quota, activeTheme, activeLang, pendingInvite, myRole } from '$lib/stores';
-	import { checkAuthState, getConnectionStatus, getQuota } from '$lib/tauri';
+	import { checkAuthState, getConnectionStatus, getQuota, joinTeamLink } from '$lib/tauri';
 	import { applyTheme, THEMES, THEME_PAIRS } from '$lib/theme';
 	import { STRINGS, type Lang } from '$lib/i18n';
 	import type { ConnectionState } from '$lib/types';
@@ -58,11 +58,28 @@
 				await listen<string>('tray-navigate', (e) => goto(e.payload)),
 				// Warm start: the running app received the deep link.
 				await listen('auth-pending', () => refreshAuth(true)),
-				// Invite deep links, handed over by Rust once authenticated: stash the
-				// token and route to the page that consumes it. [A] Part D (invite flow).
-				await listen<string>('join-team-pending', (e) => {
-					pendingInvite.set({ type: 'join-team', token: e.payload });
-					goto('/members');
+				// A team/F0 invite arriving while ALREADY signed in.
+				//
+				// This used to route to /members, which redeemed through the session-authed
+				// endpoint — and that endpoint binds the invite to whoever happens to be
+				// logged in, ignoring the address the invite was actually issued to. Opening
+				// someone else's invite on a signed-in device therefore joined the WRONG
+				// identity, silently. The magic-link path roots the membership in the
+				// invite's own email instead, which is the whole point of an emailed invite,
+				// so use it here too and keep one redeem path for one kind of token.
+				//
+				// When the invite is for the person already signed in, the email anchor
+				// resolves to their existing user id, so nothing changes for them.
+				await listen<string>('join-team-pending', async (e) => {
+					try {
+						const state = await joinTeamLink(e.payload, 'deeplink');
+						auth.set(state);
+						goto('/services');
+					} catch {
+						// Expired / already used / not for this account: send them to the
+						// invite screen, which explains it and offers the short-code entry.
+						goto('/welcome');
+					}
 				}),
 				await listen<string>('join-node-pending', (e) => {
 					pendingInvite.set({ type: 'join-node', token: e.payload });
