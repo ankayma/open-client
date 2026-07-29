@@ -182,6 +182,25 @@ jobs:
           echo "APK_OUT=$OUT" >> "$GITHUB_ENV"
           echo "VERSION=$VERSION" >> "$GITHUB_ENV"
 
+      # A version-stable filename, published alongside the versioned one.
+      #
+      # Anything that links to the APK from outside this repo needs a URL that does not
+      # change every release. The control plane's invite landing page is the live case:
+      # it hands cold-install visitors a download link, and pinning that link to a
+      # version silently rots — it once served 1.1.19 long after the code that reads the
+      # deferred invite had shipped in 1.1.20, so every Android invite recipient
+      # downloaded a build that could not pick their invite up.
+      #
+      # Generating the alias here means it can never fall behind the release: it is a
+      # byte-identical copy of the artifact just signed, and it is hashed into
+      # SHA256SUMS below like any other file, so the Cosign verification story covers
+      # both names.
+      - name: Create version-stable download alias (Lane A)
+        run: |
+          set -euo pipefail
+          cp "$APK_OUT" "publish/Ankayma_latest_arm64.apk"
+          echo "  ✓ alias: publish/Ankayma_latest_arm64.apk → $(basename "$APK_OUT")"
+
       # ---------------------------------------------------------------------------
       # LANE B — AAB for Google Play (separate upload key)
       # ---------------------------------------------------------------------------
@@ -247,8 +266,10 @@ jobs:
           curl -sSfL "https://github.com/sigstore/cosign/releases/download/${COSIGN_VERSION}/cosign-linux-amd64" -o /usr/local/bin/cosign
           chmod +x /usr/local/bin/cosign
 
-      # Cosign detached signature over SHA256SUMS — one signature authenticates the
-      # APK, verifiable with the committed cosign.pub.
+      # Cosign detached signature over SHA256SUMS — one signature authenticates every
+      # APK listed, verifiable with the committed cosign.pub. The glob covers both the
+      # versioned artifact and the alias copy, so a visitor who downloads either name
+      # can verify it.
       - name: Checksums + Cosign signature (website verify — Lane A)
         env:
           COSIGN_PRIVATE_KEY: ${{ secrets.COSIGN_PRIVATE_KEY }}
@@ -257,7 +278,7 @@ jobs:
           set -euo pipefail
           echo "$COSIGN_PRIVATE_KEY" | base64 -d > cosign.key
           cp cosign.pub publish/
-          ( cd publish && sha256sum "$(basename "$APK_OUT")" > SHA256SUMS )
+          ( cd publish && sha256sum Ankayma_*.apk > SHA256SUMS )
           cosign sign-blob --yes --tlog-upload=false --key cosign.key \
             --output-signature publish/SHA256SUMS.sig publish/SHA256SUMS
           cosign verify-blob --insecure-ignore-tlog --key cosign.pub \
