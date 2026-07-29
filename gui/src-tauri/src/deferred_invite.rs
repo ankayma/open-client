@@ -11,10 +11,14 @@ pub struct DeferredInvite {
     pub method: String,
 }
 
-/// Parse clipboard / referrer payload into a token. Accepts:
+/// Parse a payload that is KNOWN to be an invite channel (Play Install Referrer, or a
+/// clipboard entry already confirmed to carry our prefix). Accepts:
 /// - `ankayma-invite:{token}`
 /// - `invite={token}` (Play Install Referrer form)
 /// - raw token / short code
+///
+/// The bare token/short-code form makes this too permissive for a general clipboard read
+/// — see `parse_clipboard_invite`.
 #[allow(dead_code)] // used on ios/android; kept public for unit tests on all targets
 pub fn parse_invite_payload(raw: &str) -> Option<String> {
     let t = raw.trim();
@@ -45,6 +49,28 @@ pub fn parse_invite_payload(raw: &str) -> Option<String> {
         return Some(t.to_string());
     }
     None
+}
+
+/// Parse a payload read from the SYSTEM CLIPBOARD. Requires the `ankayma-invite:` prefix.
+///
+/// The clipboard belongs to the user, not to us: whatever they last copied is in there,
+/// and on first launch we read it without being asked to. `parse_invite_payload` also
+/// accepts a bare 6–12 character alphanumeric string as a short code, which describes an
+/// enormous amount of ordinary text — a password, an order number, a name. Accepting those
+/// meant a user who had copied anything at all before installing got their clipboard
+/// treated as an invite, auto-redeemed, and was greeted by "the invite may have expired"
+/// on the very first screen — plus we wiped what they had copied.
+///
+/// The prefix is what the landing page writes, so requiring it costs the real flow nothing
+/// and makes a false positive essentially impossible. iOS already enforced this; Android
+/// did not, so the two platforms disagreed about the same channel.
+#[allow(dead_code)] // used on android; kept compiled for unit tests on all targets
+pub fn parse_clipboard_invite(raw: &str) -> Option<String> {
+    let t = raw.trim();
+    if !t.to_ascii_lowercase().starts_with(INVITE_PREFIX) {
+        return None;
+    }
+    parse_invite_payload(t)
 }
 
 #[cfg(target_os = "ios")]
@@ -101,7 +127,9 @@ mod android_channels {
 
     pub fn read_clipboard_invite() -> Option<DeferredInvite> {
         let raw = crate::vpn_android::read_clipboard_text()?;
-        let token = parse_invite_payload(&raw)?;
+        // Prefix required — the clipboard is the user's, and anything else in it is not
+        // ours to interpret. Matches the iOS bridge, which has always required it.
+        let token = parse_clipboard_invite(&raw)?;
         Some(DeferredInvite {
             token,
             method: "clipboard".into(),
@@ -175,5 +203,48 @@ mod tests {
     fn rejects_garbage() {
         assert!(parse_invite_payload("hello world").is_none());
         assert!(parse_invite_payload("").is_none());
+    }
+
+    // A clipboard read must require our prefix. Everything below is ordinary text a user
+    // could plausibly have copied before installing; treating any of it as an invite would
+    // auto-redeem, fail, and greet them with an error on the first screen they ever see.
+    #[test]
+    fn clipboard_requires_the_invite_prefix() {
+        for ordinary in [
+            "Hoadon2026",                       // an order/invoice reference
+            "password1",                        // a password
+            "AB23CD45",                         // valid short-code SHAPE, but not ours to assume
+            "deadbeefcafebabedeadbeefcafebabe", // valid token shape, same problem
+            "Nguyen Van A",
+            "",
+        ] {
+            assert!(
+                parse_clipboard_invite(ordinary).is_none(),
+                "clipboard content {ordinary:?} must not be taken for an invite"
+            );
+        }
+    }
+
+    #[test]
+    fn clipboard_accepts_what_the_landing_page_writes() {
+        assert_eq!(
+            parse_clipboard_invite("ankayma-invite:abcDEF12"),
+            Some("abcDEF12".into())
+        );
+        // Case-insensitive prefix, surrounding whitespace tolerated.
+        assert_eq!(
+            parse_clipboard_invite("  Ankayma-Invite:AB23CD45  "),
+            Some("AB23CD45".into())
+        );
+    }
+
+    // The referrer channel is unaffected: Play hands us `invite=…` directly, and that
+    // string never came from the user's clipboard.
+    #[test]
+    fn referrer_channel_still_accepts_bare_forms() {
+        assert_eq!(
+            parse_invite_payload("utm_source=x&invite=deadbeefcafebabe"),
+            Some("deadbeefcafebabe".into())
+        );
     }
 }
