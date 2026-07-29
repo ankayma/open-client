@@ -269,6 +269,13 @@ mod imp {
         Ok(())
     }
 
+    /// What THIS helper process itself last spawned via `start_agent` — pid +
+    /// the creds it was started with — so a *redundant* `Start` (same creds,
+    /// still alive) is a no-op rather than a kill+respawn. `Mutex::new` is a
+    /// const fn, so a plain `static` needs no lazy-init wrapper.
+    static LAST_SPAWNED: std::sync::Mutex<Option<(libc::pid_t, String, String)>> =
+        std::sync::Mutex::new(None);
+
     /// Spawn the agent daemon directly — no shell, so no shell-metacharacter risk
     /// (the osascript quick-fix it replaces had to single-quote around this).
     ///
@@ -279,15 +286,48 @@ mod imp {
     /// slow XPC round trip) — reuses `terminate_verified`, the same
     /// verified-pid kill `stop_agent` already relies on, rather than a second,
     /// divergent kill path.
+    ///
+    /// **Idempotent for identical creds** — this is not optional. An earlier
+    /// version of this fix evicted *unconditionally* on every `Start`,
+    /// including a redundant one arriving while an already-healthy agent (with
+    /// the SAME creds) was still mid-flight doing something that takes
+    /// minutes, like a freshly-added subdomain's CSR-submit-then-poll-for-cert
+    /// cycle (`tls_relay::spawn_owner_task`) — killing it there aborted that
+    /// cycle and the subdomain's TLS relay never came up, even though the cert
+    /// itself was later issued fine (confirmed live: v1.1.24, a real "Publish
+    /// sample demo" subdomain stuck unreachable after an unrelated reconnect).
+    /// Only a PID this helper did **not** itself just spawn (a genuine
+    /// leftover from a prior helper/app lifetime — the actual migration-safety
+    /// scenario this was meant for) gets evicted.
     fn start_agent(
         agent_bin: &str,
         token: &str,
         control_plane: &str,
         state_json: Option<&str>,
     ) -> Result<(), String> {
+        {
+            let mut last = LAST_SPAWNED.lock().expect("LAST_SPAWNED poisoned");
+            if let Some((pid, last_token, last_cp)) = last.as_ref() {
+                let same_creds = last_token == token && last_cp == control_plane;
+                let still_alive = is_agent_process(*pid) && unsafe { libc::kill(*pid, 0) == 0 };
+                if same_creds && still_alive {
+                    log_line(&format!(
+                        "start_agent: pid {pid} already running with these creds — no-op"
+                    ));
+                    return Ok(());
+                }
+                if still_alive {
+                    log_line(&format!(
+                        "start_agent: creds changed — evicting our own pid {pid} before respawning"
+                    ));
+                    terminate_verified(*pid);
+                }
+            }
+            *last = None;
+        }
         if let Some(pid) = recorded_live_agent_pid() {
             log_line(&format!(
-                "start_agent: evicting stale live agent pid {pid} before spawning a new one"
+                "start_agent: evicting a stale live agent pid {pid} we did not ourselves spawn (leftover from a prior helper/app lifetime)"
             ));
             terminate_verified(pid);
             let _ = fs::remove_file(PID_PATH);
@@ -329,6 +369,11 @@ mod imp {
         // falling back to the (verified) status-file pid.
         let _ = fs::write(PID_PATH, child.id().to_string());
         let _ = fs::set_permissions(PID_PATH, fs::Permissions::from_mode(0o600));
+        *LAST_SPAWNED.lock().expect("LAST_SPAWNED poisoned") = Some((
+            child.id() as libc::pid_t,
+            token.to_string(),
+            control_plane.to_string(),
+        ));
         Ok(())
     }
 
@@ -393,6 +438,7 @@ mod imp {
                 .status();
             let _ = fs::remove_file(PID_PATH);
         }
+        *LAST_SPAWNED.lock().expect("LAST_SPAWNED poisoned") = None;
         Ok(())
     }
 
