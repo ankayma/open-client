@@ -337,7 +337,14 @@ pub(crate) async fn serve_dataplane(
         }
     };
 
-    pump::spawn_tx(tun.clone(), udp.clone(), peers.clone(), relay.clone(), None);
+    pump::spawn_tx(
+        tun.clone(),
+        udp.clone(),
+        peers.clone(),
+        relay.clone(),
+        None,
+        self_overlay,
+    );
     pump::spawn_rx(tun, udp.clone(), peers.clone());
     pump::spawn_timers(
         udp.clone(),

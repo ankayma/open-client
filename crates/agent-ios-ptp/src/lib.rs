@@ -437,6 +437,7 @@ fn start_inner(fd: i32, config_json: &str, bound_if: u32) -> Result<Box<PtpHandl
         peers.clone(),
         relay.clone(),
         p.dns,
+        p.self_overlay,
     );
     pump::spawn_rx(tun, udp.clone(), peers.clone());
     pump::spawn_timers(

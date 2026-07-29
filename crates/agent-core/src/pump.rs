@@ -504,12 +504,26 @@ pub fn dns_fail(token: u64) {
 /// tun → encapsulate → UDP. Reads bare IP packets, routes by destination.
 /// `dns`: if a packet is a query addressed at our own overlay IP on port 53,
 /// answer it locally and never route it to a peer (self_ip is never a mesh peer).
+/// `self_overlay`: hairpin — a packet addressed to OUR OWN overlay IP (e.g. opening
+/// a private subdomain that happens to point at this same node) is routed into the
+/// tun device by the OS same as any other overlay-destined packet, but `peers`
+/// deliberately never contains an entry for self (`to_dialable` in dataplane.rs — no
+/// point WireGuard-encrypting to ourselves), so without this check it hits "NO PEER
+/// owns it" and is silently dropped, hanging the connection forever. Fix: loop it
+/// straight back into the tun device, unmodified — the kernel already has a real
+/// TCP/IP stack bound to this interface (that's exactly how it delivers genuine
+/// peer-inbound traffic to a local listener today), so a self-addressed SYN/ACK/etc
+/// gets processed for free by writing it back as if it had arrived from the network.
+/// Same pattern Tailscale documents (remap connections to own address → loopback),
+/// adapted to a real kernel TUN instead of a userspace netstack. `[T: Tailscale
+/// NewConnectionEx/NewPacketConnectionEx doc + this session's live repro 2026-07-29]`
 pub fn spawn_tx(
     tun: crate::tundev::TunHandle,
     udp: Arc<UdpSocket>,
     peers: Peers,
     relay: Option<Arc<RelayClient>>,
     dns: Option<DnsResponder>,
+    self_overlay: IpAddr,
 ) {
     std::thread::spawn(move || {
         let mut pkt = [0u8; MTU + 80];
@@ -596,6 +610,14 @@ pub fn spawn_tx(
             let Some(dst) = dataplane::packet_dst(&pkt[..n]) else {
                 continue; // not a routable IPv4/IPv6 packet (truncated / unknown version)
             };
+            // Hairpin: a packet addressed to OUR OWN overlay IP — isolated early-exit,
+            // touches nothing below (`peers` never holding a self-entry, and the
+            // existing peer-lookup/encapsulate path, are both untouched). See the
+            // `spawn_tx` doc comment for why this is safe and necessary.
+            if dst == self_overlay {
+                let _ = tun.write_packet(&pkt[..n]);
+                continue;
+            }
             let Some(entry) = peer_by_overlay(&peers, dst) else {
                 plog(&format!("tun→pkt dst {dst} — NO PEER owns it (dropped)"));
                 continue; // no peer owns this overlay address

@@ -426,7 +426,14 @@ fn start_tunnel(
             _ => None,
         };
 
-    pump::spawn_tx(tun.clone(), udp.clone(), peers.clone(), relay.clone(), dns);
+    pump::spawn_tx(
+        tun.clone(),
+        udp.clone(),
+        peers.clone(),
+        relay.clone(),
+        dns,
+        self_overlay,
+    );
     pump::spawn_rx(tun, udp.clone(), peers.clone());
     pump::spawn_timers(
         udp.clone(),
