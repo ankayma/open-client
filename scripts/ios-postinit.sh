@@ -113,6 +113,29 @@ if ! grep -q "associated-domains" "$PROJ"; then
   echo "✓ associated-domains (webcredentials:ankayma.com) injected into project.yml — WebAuthn in WKWebView"
 fi
 
+# 3f. Link AuthenticationServices + LocalAuthentication into the APP target.
+#     Cargo emits the objc2 crates' link directives when it builds the binary itself, as
+#     on macOS — but on iOS the final link is Xcode's, and it never sees them, because
+#     they do not survive into the Rust staticlib. The native security-key ceremony
+#     references three C globals (…DescriptorTransportUSB/NFC/Bluetooth), so without this
+#     the app fails to link with "Undefined symbols for architecture arm64". Caught by the
+#     first real iOS build, not by `cargo check --target aarch64-apple-ios`, which never
+#     links. LocalAuthentication is listed for the same reason should the Face ID factor
+#     ever reference a symbol rather than looking the class up at runtime.
+#     The APP target's `dependencies:` is the FIRST one in the generated file; the
+#     extension's comes later and must not be touched. [T — reproduced 2026-07-30]
+if ! grep -q "AuthenticationServices.framework" "$PROJ"; then
+  awk '
+    { print }
+    /^    dependencies:$/ && !done {
+      print "      - sdk: AuthenticationServices.framework"
+      print "      - sdk: LocalAuthentication.framework"
+      done=1
+    }
+  ' "$PROJ" >"$PROJ.tmp" && mv "$PROJ.tmp" "$PROJ"
+  echo "✓ AuthenticationServices + LocalAuthentication linked into the app target"
+fi
+
 # 3e. Face ID usage string for the E-7 step-up factor (Secure Enclave key gated by
 #     biometryCurrentSet — same code as macOS Touch ID, see gui/src-tauri/src/lib.rs
 #     platform_key_enroll). iOS does NOT return an error when this key is missing: it

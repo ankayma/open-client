@@ -32,6 +32,8 @@ APPLE_DEVELOPMENT_TEAM=8UF87JS6WW cargo tauri ios build --export-method debuggin
 | 5 | **`NSCameraUsageDescription`** | In-app QR scanner needs it; App Store rejects a camera app without it (90683) | key present with a usage string |
 | 6 | **No `*.a` static lib in bundle** | A `libapp.a` / `libagent_ios_ptp.a` copied into the bundle = App Store validation 90171 | `find <app> -name '*.a'` is EMPTY |
 | 7 | **PacketTunnel extension embedded** | The VPN data plane runs in this extension; missing = no tunnel | `PlugIns/AnkaymaTunnel.appex` present |
+| 8 | **`NSFaceIDUsageDescription`** | E-7 step-up uses a Secure Enclave key gated by Face ID. iOS does **not** return an error when this key is absent — it **terminates the app** the moment Face ID is invoked, so the first step-up becomes a crash, in front of a reviewer | key present with a usage string |
+| 9 | **`com.apple.developer.associated-domains`** in the app's entitlements | The RP ID for the native security-key ceremony is validated against the AASA file; without it registering a key fails. The App Store profile must be regenerated **after** the capability was enabled on the App ID, or Archive fails "profile doesn't include the entitlement" | `webcredentials:ankayma.com`, app target only (not the extension) |
 
 ## Ready-to-run verifier (paste after build)
 
@@ -46,6 +48,9 @@ echo "camera    : $(plutil -p "$APP/Info.plist" | grep -c NSCameraUsageDescripti
 echo "staticlib : $(find "$APP" -name '*.a' | wc -l | tr -d ' ')  (MUST be 0 — else 90171)"
 echo "extension : $(ls "$APP/PlugIns" 2>/dev/null)  (want AnkaymaTunnel.appex)"
 echo "appicon   : $(ls "$APP" | grep -c -i appicon)  (>0)"
+echo "faceid    : $(plutil -p "$APP/Info.plist" | grep -c NSFaceIDUsageDescription)  (MUST be 1 — 0 means the first Face ID step-up CRASHES)"
+echo "assocdom  : $(codesign -d --entitlements - --xml "$APP" 2>/dev/null | plutil -convert xml1 -o - - | grep -c associated-domains)  (must be 1)"
+echo "extver    : $(plutil -p "$APP/PlugIns/AnkaymaTunnel.appex/Info.plist" 2>/dev/null | grep -m1 ShortVersion)  (must equal the app version above)"
 ```
 
 ## Gotchas that cost real builds
