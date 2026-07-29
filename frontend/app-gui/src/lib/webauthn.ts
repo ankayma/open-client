@@ -26,14 +26,19 @@
 // command; the wire format below does not change, only who runs the ceremony.
 // Decision + rejected alternatives: `docs/webauthn-security-key-decision.md`.
 //
-// Windows/Linux are untested and may still work through the webview — do not
-// delete this path on their behalf without checking. `[A?]`
+// Windows keeps the webview path below: WebView2 defers WebAuthn to the native
+// Windows WebAuthn API the same way Chrome does, so `navigator.credentials` there
+// reaches a real security key rather than a dead end. Linux does not — WebKitGTK
+// has no WebAuthn implementation at all (WebKit bug 205350, still open), so the
+// feature is hidden there instead of offering a button that can only throw. `[A —
+// sourced, not measured on hardware]`
 
 import {
   webauthnRegisterStart,
   webauthnRegisterFinish,
   webauthnAuthenticateStart,
   verifyStepUpWebauthn,
+  getPlatform,
   webauthnNativeAvailable,
   webauthnNativeRegister,
   webauthnNativeAuthenticate,
@@ -150,11 +155,24 @@ export async function verifyWithSecurityKey(purpose: string): Promise<string> {
 // the "register a security key" UI so we fail honestly (P.3) instead of showing a
 // button that throws.
 //
-// Two ways to qualify. The native path is checked FIRST and wins: on macOS the webview
-// advertises `navigator.credentials` and `window.PublicKeyCredential` perfectly happily
-// and then rejects every roaming key with NotAllowedError, so the browser check is
-// actively misleading there and cannot be the one that decides.
+// The native path is checked FIRST and wins: on macOS the webview advertises
+// `navigator.credentials` and `window.PublicKeyCredential` perfectly happily and then
+// rejects every roaming key with NotAllowedError, so the browser check is actively
+// misleading there and cannot be the one that decides.
+//
+// Linux is then excluded outright. WebKitGTK ships no WebAuthn implementation
+// (WebKit bug 205350), so the API surface the check below looks for is either absent
+// or non-functional; showing the section there would be a button that only ever
+// throws. Windows is left to the browser check on purpose — WebView2 forwards
+// WebAuthn to the native Windows API, so it is expected to work.
 export async function webauthnAvailable(): Promise<boolean> {
   if (await useNative()) return true;
+  try {
+    if ((await getPlatform()) === "linux") return false;
+  } catch {
+    // Platform unknown — fall through to the capability check rather than hiding a
+    // factor the user may well have. Failing open here is the honest default: the
+    // worst case is the existing error message, not a missing feature.
+  }
   return typeof navigator !== "undefined" && !!navigator.credentials && !!window.PublicKeyCredential;
 }

@@ -2,12 +2,31 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-	<!-- Required for WKWebView's navigator.credentials (WebAuthn — YubiKey / security
-	     keys, E-7 StepUp Phase 3) to be allowed at all for our RP ID (WEBAUTHN_RP_ID=
-	     ankayma.com). Needs a matching apple-app-site-association served at
-	     https://ankayma.com/.well-known/apple-app-site-association declaring this
-	     app's Team ID (8UF87JS6WW) + bundle ID (com.ankayma.app) under the
-	     "webcredentials" service — see part-d-e7-stepup.md for the full chain.
+	<!-- Identifies this process to AuthenticationServices. Without it the native
+	     security-key ceremony fails at the framework with error 1004, "The calling
+	     process does not have an application identifier" — observed live 2026-07-29,
+	     which is how this entry came to exist. It is NOT redundant with the embedded
+	     provisioning profile: the profile *authorizes* the entitlement, but an
+	     entitlement only takes effect when the code signature *claims* it, and Tauri
+	     signs with exactly this file and nothing else. [T — reproduced then fixed]
+
+	     Must match the app's Team ID + bundle identifier exactly, and both values must
+	     appear in the embedded profile's Entitlements dict or the app will not launch
+	     (see docs/macos-associated-domains.md for that failure mode). -->
+	<key>com.apple.application-identifier</key>
+	<string>8UF87JS6WW.com.ankayma.app</string>
+	<key>com.apple.developer.team-identifier</key>
+	<string>8UF87JS6WW</string>
+
+	<!-- Lets the OS accept "ankayma.com" as the WebAuthn RP ID for this app, by
+	     checking it against https://ankayma.com/.well-known/apple-app-site-association
+	     (which must declare 8UF87JS6WW.com.ankayma.app under "webcredentials").
+
+	     This is for the NATIVE ceremony — ASAuthorizationSecurityKeyPublicKeyCredential-
+	     Provider in gui/src-tauri/src/webauthn_apple.rs. It does NOT enable
+	     navigator.credentials in the webview: WKWebView does not support FIDO2 security
+	     keys at all, entitlement or not, which is the whole reason the native path
+	     exists. See docs/webauthn-security-key-decision.md.
 	     [T:developer.apple.com/documentation/xcode/supporting-associated-domains] -->
 	<key>com.apple.developer.associated-domains</key>
 	<array>

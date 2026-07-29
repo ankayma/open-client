@@ -115,6 +115,49 @@ After bundling it runs a **launch gate** — `open` the built app and confirm it
 because that is the only check that catches this class of failure. Set `SKIP_LAUNCH_CHECK=1`
 to bypass it only when the failure mode is understood.
 
+## 3.1 Two more things the entitlement alone does not buy
+
+Both of these surfaced while getting the first real ceremony to run, and both look
+like "the entitlement is broken" when they are not.
+
+**The signature must also claim `com.apple.application-identifier`.** Without it,
+AuthenticationServices fails with error 1004, *"The calling process does not have an
+application identifier"*. The embedded provisioning profile *authorizes* that
+entitlement, but authorization is not a claim — Tauri signs with exactly
+`entitlements.plist` and nothing else, so it has to be listed there:
+
+```xml
+<key>com.apple.application-identifier</key>
+<string>8UF87JS6WW.com.ankayma.app</string>
+<key>com.apple.developer.team-identifier</key>
+<string>8UF87JS6WW</string>
+```
+
+**`swcd` must actually have the association registered, and it registers per
+*installed* app.** The next failure was error 1004 again, this time *"Application
+with identifier 8UF87JS6WW.com.ankayma.app is not associated with domain
+ankayma.com"* — while `sudo swcutil dl -d ankayma.com` downloaded the correct AASA
+and Apple's CDN served it fine. The AASA was never the problem.
+
+The cause was a **stale copy of the app at `/Applications` with the same bundle ID
+and no entitlement**. macOS registers associated domains for the installed app, so
+with an entitlement-less `/Applications/Ankayma.app` shadowing a freshly built one
+under `target/`, the honest answer to "is this app id associated with that domain"
+was no. Installing the new build over it fixed the ceremony immediately.
+
+Useful commands (all need root):
+
+```
+sudo swcutil get -d <domain> -a <TEAMID>.<bundleid> -s webcredentials
+sudo swcutil dl  -d <domain>      # force a re-fetch from Apple's CDN
+sudo swcutil show                 # what the system currently has associated
+sudo swcutil reset                # wipe the database and restart swcd
+```
+
+`swcutil show` takes no `-d`. If the domain is absent from `show`, the association
+was never *registered* — a different problem from being registered and rejected, and
+worth distinguishing before chasing the AASA.
+
 ## 4. iOS wiring
 
 The iOS project (`gui/src-tauri/gen/apple/`) is generated and gitignored; xcodegen rewrites

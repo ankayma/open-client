@@ -1,13 +1,15 @@
 # WebAuthn security keys (E-7 StepUp Phase 3, AAL3) — decision record: drive the ceremony through native AuthenticationServices, not the webview
 
 > **Created**: 2026-07-29
-> **Status**: decision ratified by owner 2026-07-29. **macOS implementation written
-> and compiler-verified the same day** — `gui/src-tauri/src/webauthn_apple.rs` plus
-> the `webauthn_native_*` commands and the frontend branch. `cargo fmt --check`,
-> `cargo clippy -- -D warnings`, `cargo test -p ankayma-gui` (19 passed) and
-> `svelte-check` (0 errors) are all green. **NOT hardware-verified** — no YubiKey has
-> completed a ceremony through this path yet, so it is `[A]`, not `[T]`. iOS shares
-> the framework but is not wired (different presentation anchor: `UIWindow`).
+> **Status**: **WORKING on macOS, hardware-verified 2026-07-29** `[T]`. A physical
+> YubiKey completed a registration ceremony end to end: the macOS system sheet
+> appeared, the key was touched, and the control plane accepted the attestation and
+> stored the credential (the Security page reads "Registered" from the server, not
+> from local state). `cargo fmt --check`, `cargo clippy -- -D warnings`,
+> `cargo test -p ankayma-gui` (19 passed) and `svelte-check` (0 errors) are green.
+> **Still unproven:** the *assertion* half (proving possession for a step-up) has not
+> been exercised — registration is what was tested. iOS shares the framework but is
+> not wired (different presentation anchor: `UIWindow`).
 > The prerequisite entitlement plumbing is done and committed
 > (`fix(macos): embed the Developer ID provisioning profile…`,
 > `feat(ios): claim the Associated Domains entitlement…`).
@@ -134,20 +136,37 @@ runtime — do not assume. `[T: header API_AVAILABLE]`
 - Control plane: `WEBAUTHN_RP_ID=ankayma.com`,
   `WEBAUTHN_FRONTEND_ORIGIN=https://ankayma.com`.
 
-## 5. Honest gaps `[A]` — unresolved at decision time
+## 5. Gaps — what closed on 2026-07-29 and what did not
 
-- **Windows / Linux are untested.** WebView2 may well support `navigator.credentials`
-  and WebKitGTK probably does not. Nobody has checked. Do not delete the webview
-  path on their behalf — keep it and branch per platform. Verify before assuming
-  either way. `[A?]`
-- **`clientDataJSON` origin.** The native API builds `clientDataJSON` itself, and
-  its `origin` will be whatever AuthenticationServices decides for an app
-  (expected `https://ankayma.com` via the associated domain, but **not verified**).
-  The server validates origin against `WEBAUTHN_FRONTEND_ORIGIN`. If they disagree
-  the ceremony fails at the server, not the client — check this first when the
-  first end-to-end attempt fails. `[A — verify on the first live ceremony]`
-- **Attestation format.** webauthn-rs's registration policy versus what a YubiKey
-  returns through this API has not been checked. `[A?]`
+Closed by the live ceremony:
+
+- **`clientDataJSON` origin — RESOLVED.** This was flagged as the most likely thing
+  to break, on the theory that AuthenticationServices might write an origin the
+  server would not recognise. It does not: the control plane accepted the
+  attestation against `WEBAUTHN_FRONTEND_ORIGIN=https://ankayma.com` unchanged. `[T]`
+- **Attestation format — RESOLVED.** webauthn-rs accepted what the YubiKey returned
+  through this API, with no policy change on the server. `[T]`
+
+Still open:
+
+- **Assertion untested.** Only registration has run. The assertion path shares almost
+  all of this code, but "almost" is not "verified" — do not call Phase 3 done on the
+  strength of registration alone. `[A?]`
+- **Windows / Linux.** Searched rather than guessed: WebView2 **does** support
+  WebAuthn — it defers to the native Windows WebAuthn API the same way Chrome does
+  — so the existing webview path is likely already working there and should not be
+  deleted on suspicion. WebKitGTK **does not** support WebAuthn at all
+  ([WebKit bug 205350](https://bugs.webkit.org/show_bug.cgi?id=205350) is still
+  open), so on Linux the button can only ever fail and should be an honest gap
+  rather than a dead control. Neither has been tested on real hardware here. `[A —
+  sourced, not measured]`
+- **Touch ID migration risk.** This release added `com.apple.application-identifier`
+  to the signature. For a user who enrolled the Touch ID platform-key factor on an
+  earlier build, that may move the app's keychain access group and make the existing
+  Secure Enclave key invisible — the UI would silently offer "Set up" again and they
+  would lose the factor without explanation. Not reproducible on the machine used
+  here (it had never enrolled). Test before shipping: enrol on 1.1.28, upgrade, check
+  the key still resolves. `[A? — plausible, unmeasured]`
 - **FFI shape — resolved.** `objc2` + `objc2-authentication-services 0.3.2` (the
   framework crate requires `objc2 >=0.6.2`, and `objc2 = "0.6"` was already a
   dependency on iOS). The delegate is built with `define_class!`, which was the
@@ -165,8 +184,9 @@ runtime — do not assume. `[T: header API_AVAILABLE]`
 
 ## 6. Definition of done
 
-- [ ] Register + assert both complete with a physical YubiKey on macOS
+- [x] **Register completes with a physical YubiKey on macOS** — 2026-07-29
+- [ ] Assert completes (step-up proof), same key
 - [ ] Same on a real iOS device
-- [ ] Server accepts the attestation (no origin/RP-ID mismatch) and stores the credential
+- [x] **Server accepts the attestation (no origin/RP-ID mismatch) and stores the credential** — 2026-07-29
 - [ ] An F2+ action is refused without the key and succeeds with it (A.1.10 no-soft-fallback)
 - [ ] `part-d-e7-stepup.md` §H.7 flipped from 🔴 to built, with the evidence
