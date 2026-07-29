@@ -3197,6 +3197,23 @@ async fn take_pending_join_team(state: State<'_, AppState>) -> Result<Option<Str
     Ok(state.take_pending_join_team())
 }
 
+/// Drain the held `ankayma://join?token=…` NODE-invite token (Cases C/D).
+///
+/// Without this the signed-out branch had no way to reach the token at all: it is only
+/// handed to the frontend from `check_auth_state`, and only once the session validates.
+/// A device that has never been signed in — which is every second device of an account
+/// whose identity root is email, not GitHub — therefore parked the token in the mutex and
+/// showed a GitHub sign-in button the user could not satisfy. The dead end was total, and
+/// it hit exactly the enrolment path the QR flow exists for ("scan and you're in").
+///
+/// Redeeming needs no session: `POST /api/v1/enrollment/join` is token-bearer, and the
+/// control plane mints the invite owner's session as part of the response, so the new
+/// device ends up signed in without a second login.
+#[tauri::command]
+async fn take_pending_join_node(state: State<'_, AppState>) -> Result<Option<String>, String> {
+    Ok(state.take_pending_join_node())
+}
+
 /// Member magic-link join (no session, no OTP): redeem the emailed invite token — which
 /// IS the credential — to mint + store an email-rooted session → signed in. ZERO confirm
 /// at redeem (Part D §A invite-flow §Cases, doc lines 28-30). [T:Part D §A]
@@ -3793,6 +3810,7 @@ pub fn run() {
             sign_in_github,
             poll_login,
             take_pending_join_team,
+            take_pending_join_node,
             join_team_link,
             resolve_deferred_invite,
             submit_session_token,

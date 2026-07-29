@@ -473,6 +473,13 @@ export async function joinTeamLink(token: string, method?: string): Promise<Auth
 export async function takePendingJoinTeam(): Promise<string | null> {
   return invoke<string | null>("take_pending_join_team");
 }
+// Same drain, for a NODE invite (`ankayma://join?token=…`) that arrives on a device which
+// is not signed in — a fresh install scanning the QR shown by an existing device.
+// Redeeming needs no session, and the control plane signs this device in as part of
+// enrolling it, so there is no second login to satisfy.
+export async function takePendingJoinNode(): Promise<string | null> {
+  return invoke<string | null>("take_pending_join_node");
+}
 /** First-run InviteResolver: Install Referrer / clipboard `ankayma-invite:`. */
 export async function resolveDeferredInvite(): Promise<{ token: string; method: string } | null> {
   return invoke<{ token: string; method: string } | null>("resolve_deferred_invite");

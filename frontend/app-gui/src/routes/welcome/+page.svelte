@@ -3,7 +3,7 @@
 	import { onMount, onDestroy } from 'svelte';
 	import { get } from 'svelte/store';
 	import { auth, pendingInvite } from '$lib/stores';
-	import { signInGithub, pollLogin, submitSessionToken, joinTeamLink, joinEnrollNode, takePendingJoinTeam, resolveDeferredInvite, getPlatform } from '$lib/tauri';
+	import { signInGithub, pollLogin, submitSessionToken, joinTeamLink, joinEnrollNode, takePendingJoinTeam, takePendingJoinNode, resolveDeferredInvite, getPlatform } from '$lib/tauri';
 	import { listen } from '@tauri-apps/api/event';
 
 	// idle   → initial screen with GitHub button
@@ -40,6 +40,38 @@
 		}
 	}
 
+	// Node invite (`ankayma://join?token=…`) landing on a device that is NOT signed in —
+	// a fresh install scanning the QR from an existing device. This needs no session: the
+	// join token IS the authorization, and the control plane signs this device into the
+	// invite owner's account as part of enrolling it.
+	//
+	// Without this branch the token was captured by Rust and then never read by anyone
+	// (it is only handed over once a session validates), so the user was shown a GitHub
+	// sign-in they may have no way to satisfy — an account whose identity root is email
+	// has no GitHub login at all. That made "add a second device" a dead end for exactly
+	// the accounts we provision by email.
+	async function redeemNodeInvite(joinToken: string) {
+		step = 'joining';
+		error = null;
+		try {
+			const state = await joinEnrollNode(joinToken, '');
+			if (state) {
+				auth.set(state);
+				goto('/services');
+			} else {
+				// Older control plane: enrolled, but no session came back with it.
+				error = 'This device joined the mesh. Sign in to finish setting it up.';
+				step = 'idle';
+			}
+		} catch (e) {
+			error =
+				e instanceof Error
+					? e.message
+					: 'Could not add this device — the invite may have expired. Ask for a fresh one from a device that is already signed in.';
+			step = 'idle';
+		}
+	}
+
 	async function redeemInviteManual() {
 		const raw = inviteInput.trim();
 		if (!raw) return;
@@ -49,7 +81,8 @@
 		await redeemInvite(tok, method);
 	}
 
-	// One-time handoff nonce + poll loop: bấm-là-vô without the ankayma:// deep link.
+	// One-time handoff nonce + poll loop: one tap and you're in, without needing the
+	// ankayma:// deep link to fire.
 	let nonce = '';
 	let pollTimer: ReturnType<typeof setInterval> | undefined;
 
@@ -243,13 +276,20 @@
 		if (inv?.type === 'join-team') {
 			pendingInvite.set(null);
 			redeemInvite(inv.token, 'deeplink');
+		} else if (inv?.type === 'join-node') {
+			pendingInvite.set(null);
+			redeemNodeInvite(inv.token);
 		} else {
-			// Cold-start path: the join-team-pending event fired before the JS listener
-			// registered (lost), but Rust holds the token in its mutex until we drain it.
+			// Cold-start path: the pending event fired before the JS listener registered
+			// (lost), but Rust holds the token in its mutex until we drain it. Try BOTH
+			// invite kinds — a signed-out device can legitimately receive either.
 			try {
-				const tok = await takePendingJoinTeam();
-				if (tok) {
-					redeemInvite(tok, 'deeplink');
+				const teamTok = await takePendingJoinTeam();
+				const nodeTok = teamTok ? null : await takePendingJoinNode();
+				if (teamTok) {
+					redeemInvite(teamTok, 'deeplink');
+				} else if (nodeTok) {
+					redeemNodeInvite(nodeTok);
 				} else {
 					// Deferred deep-link: Install Referrer / clipboard (no return-to-browser).
 					try {
@@ -268,7 +308,12 @@
 			if (step === 'joining') return;
 			try {
 				const tok = await takePendingJoinTeam();
-				if (tok) redeemInvite(tok, 'deeplink');
+				if (tok) {
+					redeemInvite(tok, 'deeplink');
+					return;
+				}
+				const nodeTok = await takePendingJoinNode();
+				if (nodeTok) redeemNodeInvite(nodeTok);
 			} catch { /* browser dev */ }
 		});
 		const unsubCancel = await listen('auth-cancelled', () => reset());
