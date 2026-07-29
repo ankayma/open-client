@@ -1,34 +1,56 @@
-# GitHub Actions — Android release APK for DIRECT website download (Path A — direct download),
-# published to get.ankayma.com/android/ (Cloudflare R2). Mirror of release-linux's
-# authenticity model: the APK is signed with our own release keystore (Android's
-# own on-device signature check + same-key update enforcement), and a Cosign
-# detached signature over SHA256SUMS gives host-independent authenticity for the
-# website download — verifiable with the committed cosign.pub.
+# GitHub Actions — Android release for BOTH distribution lanes:
 #
-# This is the sovereignty / self-host lane. It is INDEPENDENT of a future Google
-# Play listing (Play App Signing + Play Protect is the mainstream-trust lane and is
-# handled separately). Both ship the same source — a common WireGuard-client pattern.
+#   Lane A (self-host / sovereignty): APK signed with our own release keystore, plus a
+#     Cosign detached signature over SHA256SUMS → R2 → get.ankayma.com/android/.
+#     Authenticity is verifiable independently of Google, using the cosign.pub that is
+#     committed in git (not served from R2, so a swapped file on the download host is
+#     detectable).
 #
-# [A — UNVERIFIED ON FIRST RUN] Unlike the macOS/Linux/Windows workflows (validated
-# against real CI runs), this one has not executed yet. Toolchain pins mirror the
-# locally-verified Mac mini build (memory: android-build-verified-moto-g06 — NDK
-# 27.2.12479018, cargo-tauri 2.x, target aarch64). Bump pins if the first run fails.
+#   Lane B (mainstream trust): AAB signed with a SEPARATE upload key → Google Play.
+#     Play App Signing is enabled at first upload; Google holds the app signing key and
+#     re-signs what end users install. The two lanes therefore carry DIFFERENT
+#     signatures — this is deliberate, and follows the Tailscale/WireGuard pattern.
+#     Consequence: builds cannot cross-update, so a user switching lanes must reinstall.
+#
+# Both lanes build from the same source; they differ in artifact and in key. Lane A's
+# key NEVER touches Google infrastructure — that is the property the split exists to
+# protect, and it is why we let Google generate its own app signing key rather than
+# uploading ours.
+#
+# [A — UNVERIFIED ON FIRST RUN] Sections marked [A] have never executed for real.
+# Bump the pins if the first run fails.
 #
 # Required repo secrets (Settings → Secrets and variables → Actions):
-#   ANDROID_KEYSTORE_BASE64   base64 of the release keystore .jks:
+#   --- Lane A: release keystore (NEVER used for Play) ---
+#   ANDROID_KEYSTORE_BASE64   base64 of ankayma-release.jks:
 #                               keytool -genkey -v -keystore ankayma-release.jks \
 #                                 -keyalg RSA -keysize 4096 -validity 10000 -alias ankayma
-#                               openssl base64 -A -in ankayma-release.jks   # -> this secret
+#                               openssl base64 -A -in ankayma-release.jks
 #   ANDROID_KEYSTORE_PASSWORD store password
 #   ANDROID_KEY_ALIAS         key alias (e.g. ankayma)
-#   ANDROID_KEY_PASSWORD      key password (often same as the store password)
+#   ANDROID_KEY_PASSWORD      key password
+#
+#   --- Lane B: Play upload key (SEPARATE keystore) ---
+#   A distinct keystore, so that a compromised upload key can be reset with Google
+#   without touching Lane A. Google never receives a private key either way; it only
+#   compares the upload signature against the certificate we registered.
+#   ANDROID_UPLOAD_KEYSTORE_BASE64   base64 of ankayma-upload.jks:
+#                                      keytool -genkey -v -keystore ankayma-upload.jks \
+#                                        -keyalg RSA -keysize 4096 -validity 10000 \
+#                                        -alias ankayma-upload
+#                                      openssl base64 -A -in ankayma-upload.jks
+#   ANDROID_UPLOAD_KEYSTORE_PASSWORD store password
+#   ANDROID_UPLOAD_KEY_ALIAS         key alias (e.g. ankayma-upload)
+#   ANDROID_UPLOAD_KEY_PASSWORD      key password
+#
+#   --- Shared ---
 #   COSIGN_PRIVATE_KEY        base64 of cosign.key (SHARED with release-linux/windows)
 #   COSIGN_PASSWORD           password for cosign.key
-#   R2_ACCESS_KEY_ID / R2_SECRET_ACCESS_KEY / R2_ENDPOINT   R2 S3-compatible API token
-#   R2_BUCKET_MACOS           bucket behind get.ankayma.com (shared; writes android/ prefix)
+#   R2_ACCESS_KEY_ID / R2_SECRET_ACCESS_KEY / R2_ENDPOINT
+#   R2_BUCKET_MACOS           bucket behind get.ankayma.com (writes the android/ prefix)
 #
-# Keystore generation, the CI secrets above, and the cold-backup procedure are
-# covered in the internal release runbook (kept out of this public repo).
+# Keystore generation, the CI secrets above, and the cold-backup procedure are covered
+# in the internal release runbook (kept out of this public repo).
 name: release-android
 
 on:
@@ -39,17 +61,21 @@ on:
 jobs:
   build-android:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 60          # +15 over the APK-only build, which now also emits an AAB
     permissions:
       contents: read
       id-token: write        # OIDC token for GitHub Artifact Attestations (Sigstore)
       attestations: write
     env:
-      # arm64-v8a covers effectively every phone since ~2017. Multi-ABI (adding
-      # armeabi-v7a/x86_64) is a later follow-up; start with the verified target.
+      # arm64-v8a covers effectively every phone since ~2017. Multi-ABI (armeabi-v7a,
+      # x86_64) is a later follow-up; note that with an arm64-only bundle Play cannot
+      # serve x86_64 devices (emulators, some ChromeOS) at all.
       TAURI_ANDROID_TARGET: aarch64
-      NDK_VERSION: "27.2.12479018"      # matches the locally-verified build
-      BUILD_TOOLS_VERSION: "34.0.0"
+      NDK_VERSION: "27.2.12479018"      # matches the locally-verified Mac mini build
+      # Play requires new apps and updates to target API 36 from 2026-08-31.
+      BUILD_TOOLS_VERSION: "36.0.0"
+      ANDROID_COMPILE_SDK: "36"
+      ANDROID_TARGET_SDK: "36"
     steps:
       - uses: actions/checkout@v4
 
@@ -62,22 +88,28 @@ jobs:
         with:
           node-version: "22"
 
+      # JDK 17 is enough for AGP 8.x. If the Tauri template moves to AGP 9.x this has to
+      # become JDK 21 — see the [A] note in scripts/android-sdk36-patch.sh.
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: "17"
 
       # Puts cmdline-tools (sdkmanager) on PATH. GitHub's ubuntu-latest image stopped
-      # shipping sdkmanager on PATH by default → the manual step below was exit-127
-      # ("sdkmanager: command not found"). This action is drift-proof going forward.
+      # shipping sdkmanager on PATH by default → the manual step below was exit-127.
       - uses: android-actions/setup-android@v3
 
-      - name: Provision Android SDK bits (NDK + build-tools)
+      - name: Provision Android SDK bits (NDK + build-tools + platform)
         run: |
           set -euo pipefail
-          # sdkmanager is now on PATH (setup-android@v3 above).
           yes | sdkmanager --licenses >/dev/null 2>&1 || true
-          sdkmanager --install "ndk;${NDK_VERSION}" "build-tools;${BUILD_TOOLS_VERSION}" "platform-tools" >/dev/null
+          # The platform matching compileSdk must be installed, or Gradle fails before
+          # it ever reaches our code.
+          sdkmanager --install \
+            "ndk;${NDK_VERSION}" \
+            "build-tools;${BUILD_TOOLS_VERSION}" \
+            "platforms;android-${ANDROID_COMPILE_SDK}" \
+            "platform-tools" >/dev/null
           echo "ANDROID_NDK_HOME=${ANDROID_SDK_ROOT}/ndk/${NDK_VERSION}" >> "$GITHUB_ENV"
           echo "NDK_HOME=${ANDROID_SDK_ROOT}/ndk/${NDK_VERSION}" >> "$GITHUB_ENV"
 
@@ -95,23 +127,33 @@ jobs:
 
       # `android init` scales the full-bleed icon edge-to-edge into the adaptive-icon
       # foreground (0% safe-zone margin) — the launcher's own mask then crops straight
-      # into the logo, wrong/ugly corners on the home screen. Re-render with proper
-      # padding before the APK is built. Same class of fix as scripts/ios-postinit.sh.
+      # into the logo. Re-render with proper padding before building. Same class of fix
+      # as scripts/ios-postinit.sh.
       - name: Install Pillow (icon safe-zone fix)
         run: pip install --quiet pillow
 
       - name: Fix Android adaptive-icon safe zone
         run: bash scripts/android-postinit.sh
 
-      # No signingConfig in the generated Gradle → assembleRelease emits an UNSIGNED
-      # apk. We sign the artifact directly with apksigner afterwards (deterministic,
-      # independent of Tauri's Gradle internals) — the Android analogue of macOS
-      # codesign / the Windows signCommand.
-      - name: Build release APK (unsigned)
-        working-directory: gui
-        run: cargo tauri android build --apk --target "${TAURI_ANDROID_TARGET}"
+      # Raise compileSdk/targetSdk in the Gradle project Tauri generates. Must run AFTER
+      # android-postinit.sh and BEFORE the build.
+      - name: Patch compileSdk/targetSdk
+        run: bash scripts/android-sdk36-patch.sh
 
-      - name: Sign APK (apksigner, release keystore)
+      # The generated Gradle has no signingConfig, so both the APK and the AAB come out
+      # UNSIGNED. We sign each artifact ourselves afterwards — deterministic, and
+      # independent of Tauri's Gradle internals.
+      # [A] Not yet verified that the Tauri CLI accepts --apk and --aab in one
+      #     invocation. If it fails, split into two calls (slower — Rust is rebuilt —
+      #     but certain to work).
+      - name: Build release APK + AAB (unsigned)
+        working-directory: gui
+        run: cargo tauri android build --apk --aab --target "${TAURI_ANDROID_TARGET}"
+
+      # ---------------------------------------------------------------------------
+      # LANE A — APK for get.ankayma.com
+      # ---------------------------------------------------------------------------
+      - name: Sign APK (apksigner, release keystore — Lane A)
         env:
           ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
           ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
@@ -121,7 +163,7 @@ jobs:
           set -euo pipefail
           VERSION="$(sed -n 's/.*"version": *"\(.*\)".*/\1/p' gui/src-tauri/tauri.conf.json | head -1)"
           BT="${ANDROID_SDK_ROOT}/build-tools/${BUILD_TOOLS_VERSION}"
-          UNSIGNED="$(find gui/src-tauri/gen/android -path '*release*' -name '*-unsigned.apk' | head -1)"
+          UNSIGNED="$(find gui/src-tauri/gen/android -path '*release*' -name '*-unsigned.apk' ! -path '*debug*' | head -1)"
           [ -n "$UNSIGNED" ] || { echo "✗ unsigned release APK not found under gen/android" >&2; exit 1; }
 
           echo "$ANDROID_KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/ankayma-release.jks"
@@ -138,7 +180,66 @@ jobs:
           "$BT/apksigner" verify --print-certs "$OUT"
           rm -f "$RUNNER_TEMP/ankayma-release.jks"
           echo "APK_OUT=$OUT" >> "$GITHUB_ENV"
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
 
+      # ---------------------------------------------------------------------------
+      # LANE B — AAB for Google Play (separate upload key)
+      # ---------------------------------------------------------------------------
+      # Load-bearing details:
+      #   - An AAB is signed with `jarsigner`, NOT `apksigner`. apksigner only handles
+      #     APKs and will fail on a bundle.
+      #   - Do NOT zipalign an AAB — the step is meaningless for a bundle.
+      #   - Output goes to publish-play/ rather than publish/, so it stays out of
+      #     SHA256SUMS and is never picked up by the `aws s3 sync` below. Lane B does
+      #     not go through R2.
+      - name: Sign AAB (jarsigner, Play upload key — Lane B)
+        env:
+          ANDROID_UPLOAD_KEYSTORE_BASE64: ${{ secrets.ANDROID_UPLOAD_KEYSTORE_BASE64 }}
+          ANDROID_UPLOAD_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_UPLOAD_KEYSTORE_PASSWORD }}
+          ANDROID_UPLOAD_KEY_ALIAS: ${{ secrets.ANDROID_UPLOAD_KEY_ALIAS }}
+          ANDROID_UPLOAD_KEY_PASSWORD: ${{ secrets.ANDROID_UPLOAD_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          UNSIGNED_AAB="$(find gui/src-tauri/gen/android -path '*release*' -name '*.aab' ! -path '*debug*' | head -1)"
+          [ -n "$UNSIGNED_AAB" ] || { echo "✗ release AAB not found under gen/android" >&2; exit 1; }
+          echo "  → found: $UNSIGNED_AAB"
+
+          echo "$ANDROID_UPLOAD_KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/ankayma-upload.jks"
+          mkdir -p publish-play
+          AAB_OUT="publish-play/Ankayma_${VERSION}.aab"
+
+          jarsigner \
+            -keystore "$RUNNER_TEMP/ankayma-upload.jks" \
+            -storepass "$ANDROID_UPLOAD_KEYSTORE_PASSWORD" \
+            -keypass "$ANDROID_UPLOAD_KEY_PASSWORD" \
+            -sigalg SHA256withRSA \
+            -digestalg SHA-256 \
+            -signedjar "$AAB_OUT" \
+            "$UNSIGNED_AAB" \
+            "$ANDROID_UPLOAD_KEY_ALIAS"
+
+          # -verify deliberately omits -strict: a self-signed cert raises "chain not
+          # validated" (exit 4) even though the signature is valid. Play only needs the
+          # signature to match the certificate it has on file.
+          jarsigner -verify -verbose:summary "$AAB_OUT"
+          rm -f "$RUNNER_TEMP/ankayma-upload.jks"
+          echo "AAB_OUT=$AAB_OUT" >> "$GITHUB_ENV"
+          echo "  ✓ AAB signed with Play upload key"
+
+      # The AAB does not go to R2. Download it from here and upload it to Play Console.
+      # Once the app exists in Play Console (it must be created manually once), this can
+      # be replaced by r0adkll/upload-google-play with a service account.
+      - name: Upload AAB as workflow artifact (for Play Console)
+        uses: actions/upload-artifact@v4
+        with:
+          name: play-aab-${{ github.ref_name }}
+          path: publish-play/*.aab
+          retention-days: 30
+          if-no-files-found: error
+
+      # ---------------------------------------------------------------------------
+      # LANE A continued — Cosign + R2
+      # ---------------------------------------------------------------------------
       - name: Install cosign
         env:
           COSIGN_VERSION: v2.4.1   # [A — keep in step with release-linux.yml]
@@ -147,9 +248,8 @@ jobs:
           chmod +x /usr/local/bin/cosign
 
       # Cosign detached signature over SHA256SUMS — one signature authenticates the
-      # APK; verifiable with the committed cosign.pub (which lives in git, not on R2,
-      # so a swapped file on the download host is detectable).
-      - name: Checksums + Cosign signature (website verify — Path A)
+      # APK, verifiable with the committed cosign.pub.
+      - name: Checksums + Cosign signature (website verify — Lane A)
         env:
           COSIGN_PRIVATE_KEY: ${{ secrets.COSIGN_PRIVATE_KEY }}
           COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}
@@ -173,9 +273,11 @@ jobs:
         run: |
           aws s3 sync publish/ "s3://${{ secrets.R2_BUCKET_MACOS }}/android/" --endpoint-url "${{ secrets.R2_ENDPOINT }}"
 
-      # SLSA build provenance (Sigstore + Rekor). Last step — the APK is already on
-      # R2, so a hiccup here never blocks the release.
-      - name: Attest build provenance (.apk)
+      # SLSA build provenance (Sigstore + Rekor) for both artifacts. Last step — the APK
+      # is already on R2, so a hiccup here never blocks the release.
+      - name: Attest build provenance (.apk + .aab)
         uses: actions/attest-build-provenance@v2
         with:
-          subject-path: "publish/*.apk"
+          subject-path: |
+            publish/*.apk
+            publish-play/*.aab
