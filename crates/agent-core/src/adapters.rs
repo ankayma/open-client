@@ -1482,11 +1482,20 @@ pub async fn totp_disable(
 }
 
 // ── WebAuthn / YubiKey (E-7 StepUp Phase 3 — AAL3) ────────────────────────────
-// The actual register/assert ceremony runs in the frontend via the browser's
-// `navigator.credentials` API (Tauri's webview exposes it — no Rust crate
-// needed here). These adapters are opaque JSON pass-throughs between that
-// frontend code and the control plane; the shapes match webauthn-rs's own
-// wire format 1:1 (it's designed to mirror the browser API's camelCase JSON).
+// These adapters are opaque JSON pass-throughs between whoever runs the
+// ceremony and the control plane; the shapes match webauthn-rs's own wire
+// format 1:1 (it's designed to mirror the browser API's camelCase JSON). That
+// framing is deliberate and still holds — the transport does not care which
+// side of the FFI the ceremony happens on, so none of this changes below.
+//
+// What DID change: the claim that used to sit here — "the ceremony runs in the
+// frontend via `navigator.credentials`, Tauri's webview exposes it, no Rust
+// crate needed" — is false on Apple platforms. WKWebView does not support FIDO2
+// security keys for WebAuthn at all, confirmed by hardware test 2026-07-29.
+// [T:developers.yubico.com/WebAuthn/Supporting_FIDO2_Security_Keys_on_iOS_or_iPadOS/FAQ]
+// macOS/iOS therefore drive the ceremony through native AuthenticationServices
+// and feed the same JSON back through these functions. See
+// `client/docs/webauthn-security-key-decision.md`.
 
 /// `GET /api/v1/stepup/webauthn/status` — whether the caller has any
 /// registered security key.

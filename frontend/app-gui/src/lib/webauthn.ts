@@ -4,15 +4,30 @@
 // this is the only layer that touches `navigator.credentials`; the Tauri
 // commands in tauri.ts are opaque JSON pass-throughs either side of it.
 //
-// KNOWN RISK (flagged in the implementation plan, not yet hardware-verified
-// in this environment): Tauri's embedded webview (WKWebView on macOS) has had
-// inconsistent support for *roaming* USB/NFC FIDO2 keys — as opposed to
-// platform authenticators (Touch ID/Windows Hello), which work reliably. If
-// `navigator.credentials.create()` below never resolves or throws
-// `NotSupportedError`/`NotAllowedError` immediately when a YubiKey is
-// inserted, that's this platform gap, not a bug in the exchange logic — the
-// fallback is a native FIDO2/CTAP-HID crate behind a Tauri command instead of
-// the browser API (bigger change, needs its own dependency decision).
+// CONFIRMED BROKEN ON APPLE PLATFORMS — this file's `navigator.credentials`
+// calls cannot work inside Tauri's WKWebView, and no amount of configuration
+// changes that. The risk this comment used to describe as unverified was
+// hardware-tested on 2026-07-29 and is real:
+//
+//   "Apple does not support FIDO2 security keys for the WebAuthn flow using a
+//    WKWebView."
+//   [T:developers.yubico.com/WebAuthn/Supporting_FIDO2_Security_Keys_on_iOS_or_iPadOS/FAQ]
+//
+// Observed: `create()` rejects with `NotAllowedError` and the system log shows
+// no AuthenticationServices activity at all — WebKit refuses internally, before
+// the OS is ever asked. Apple's one exception is *passkeys* (platform
+// authenticator) in WKWebView on iOS 16.1+, which is what the Associated
+// Domains entitlement gates; roaming USB keys are outside it. Note that adding
+// that entitlement is what bricked v1.1.26/v1.1.28 — see
+// `docs/macos-associated-domains.md`.
+//
+// The replacement is the native AuthenticationServices path
+// (`ASAuthorizationSecurityKeyPublicKeyCredentialProvider`) behind a Tauri
+// command; the wire format below does not change, only who runs the ceremony.
+// Decision + rejected alternatives: `docs/webauthn-security-key-decision.md`.
+//
+// Windows/Linux are untested and may still work through the webview — do not
+// delete this path on their behalf without checking. `[A?]`
 
 import {
   webauthnRegisterStart,

@@ -77,8 +77,11 @@ export function purposeLabel(p: string): string {
 
 // Run `action`, transparently satisfying a server step-up demand. `action` is invoked
 // first with no proof; on STEP_UP_REQUIRED we branch on the demanded AAL:
-//   - requiredAal >= 3 (F2+, no-soft-fallback — A.1.10): the browser's own WebAuthn
+//   - requiredAal >= 3 (F2+, no-soft-fallback — A.1.10): the platform's own WebAuthn
 //     UI (Touch ID / "insert your key") handles the prompt, no modal of ours needed.
+//     On macOS/iOS that UI comes from native AuthenticationServices, NOT from the
+//     webview — WKWebView does not support security keys, so `navigator.credentials`
+//     never gets to show anything. See `docs/webauthn-security-key-decision.md`.
 //   - requiredAal 2: check whether the user has a confirmed TOTP credential (skip
 //     straight to code entry) or fall back to emailing an OTP, drive the modal.
 // Either way we exchange the proof for a proof_token and retry `action({proofToken})`
