@@ -1,9 +1,15 @@
 # WebAuthn security keys (E-7 StepUp Phase 3, AAL3) — decision record: drive the ceremony through native AuthenticationServices, not the webview
 
 > **Created**: 2026-07-29
-> **Status**: decision ratified by owner 2026-07-29. Implementation not started at
-> the time of writing. The prerequisite macOS/iOS entitlement plumbing **is** done
-> and committed (`fix(macos): embed the Developer ID provisioning profile…`,
+> **Status**: decision ratified by owner 2026-07-29. **macOS implementation written
+> and compiler-verified the same day** — `gui/src-tauri/src/webauthn_apple.rs` plus
+> the `webauthn_native_*` commands and the frontend branch. `cargo fmt --check`,
+> `cargo clippy -- -D warnings`, `cargo test -p ankayma-gui` (19 passed) and
+> `svelte-check` (0 errors) are all green. **NOT hardware-verified** — no YubiKey has
+> completed a ceremony through this path yet, so it is `[A]`, not `[T]`. iOS shares
+> the framework but is not wired (different presentation anchor: `UIWindow`).
+> The prerequisite entitlement plumbing is done and committed
+> (`fix(macos): embed the Developer ID provisioning profile…`,
 > `feat(ios): claim the Associated Domains entitlement…`).
 > **Scope**: client only — `gui/src-tauri` (new native module + Tauri command),
 > `frontend/app-gui/src/lib/webauthn.ts`, `crates/agent-core/src/adapters.rs`
@@ -142,11 +148,17 @@ runtime — do not assume. `[T: header API_AVAILABLE]`
   first end-to-end attempt fails. `[A — verify on the first live ceremony]`
 - **Attestation format.** webauthn-rs's registration policy versus what a YubiKey
   returns through this API has not been checked. `[A?]`
-- **FFI shape not chosen.** `objc2` is already a dependency on iOS (`objc2 = "0.6"`)
-  and is the smaller step; a Swift static lib is the alternative and matches the
-  existing `gui/src-tauri/ios/AppSupport` pattern. Decide at implementation time,
-  and note `ASAuthorizationController` needs a delegate plus a presentation-anchor
-  provider, i.e. real main-thread UI plumbing, not a pure function call.
+- **FFI shape — resolved.** `objc2` + `objc2-authentication-services 0.3.2` (the
+  framework crate requires `objc2 >=0.6.2`, and `objc2 = "0.6"` was already a
+  dependency on iOS). The delegate is built with `define_class!`, which was the
+  awkward part: `ASAuthorizationController` needs both a delegate and a
+  presentation-anchor provider, so it is real main-thread UI plumbing.
+  **Threading gotcha worth keeping:** `performRequests` returns immediately and the
+  callback is delivered on the main run loop, so the ceremony is *started* on the main
+  thread and *waited for* on a worker. Waiting on the main thread deadlocks — the run
+  loop that would deliver the result is the one being blocked.
+- **iOS not wired yet.** The framework is the same, but `ASPresentationAnchor` is
+  `UIWindow` there, and `webauthn_apple.rs` is `#[cfg(target_os = "macos")]`.
 - **No hardware test has passed yet.** Nothing here is `validated` until a real
   YubiKey completes register + assert against the live control plane. Given §1.1,
   do not mark this done on the strength of a compile.

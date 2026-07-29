@@ -27,6 +27,12 @@ mod vpn;
 // Deferred deep-link InviteResolver for email invitations (clipboard / Install Referrer).
 mod deferred_invite;
 
+// Native FIDO2 security-key ceremony (E-7 Phase 3 / AAL3). WKWebView cannot run
+// navigator.credentials against a roaming key at all, so macOS drives the ceremony
+// through AuthenticationServices instead. [T:docs/webauthn-security-key-decision.md]
+#[cfg(target_os = "macos")]
+mod webauthn_apple;
+
 // Android VPN bridge (frontend → AnkaymaVpnService via JNI). Owns the TUN fd, the
 // in-process WireGuard pump, and the control-plane bypass proxy. [T:A.1.9, F-3]
 #[cfg(target_os = "android")]
@@ -1549,9 +1555,97 @@ async fn totp_disable(
 }
 
 // ── WebAuthn / YubiKey (Settings → Security + step-up AAL3) ──────────────────
-// The register/assert ceremony itself runs in the frontend via
-// `navigator.credentials` (Tauri's webview exposes it); these commands are
-// opaque JSON pass-throughs to the control plane.
+// These commands are opaque JSON pass-throughs to the control plane. Where the
+// ceremony itself runs depends on the platform: on macOS it CANNOT run in the webview
+// (WKWebView does not support FIDO2 security keys — see
+// docs/webauthn-security-key-decision.md), so `webauthn_native_*` below drives it
+// through AuthenticationServices and hands back the same JSON the browser path would
+// have produced. Other platforms still use `navigator.credentials` in the frontend.
+
+/// Whether this platform can run the ceremony natively. The frontend calls this to
+/// decide which path to take, rather than sniffing the user agent.
+#[tauri::command]
+async fn webauthn_native_available() -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        webauthn_apple::is_supported()
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        false
+    }
+}
+
+#[cfg(target_os = "macos")]
+async fn webauthn_native_run(
+    app: tauri::AppHandle,
+    options: serde_json::Value,
+    which: webauthn_apple::Ceremony,
+) -> Result<serde_json::Value, String> {
+    use tauri::Manager;
+
+    // The ceremony needs a presentation anchor (NSWindow) and must be started on the
+    // main thread; the result arrives asynchronously on the run loop. So: hop to main,
+    // start it there, and wait on the channel from this worker. Blocking on the main
+    // thread instead would deadlock — the callback we are waiting for is delivered by
+    // the very run loop we would be holding.
+    let window = app
+        .get_webview_window("main")
+        .ok_or("no main window to anchor the security key prompt to")?;
+    let (tx, rx) = webauthn_apple::channel();
+
+    app.run_on_main_thread(move || {
+        let anchor = window
+            .ns_window()
+            .map(|w| w as *mut objc2::runtime::AnyObject)
+            .unwrap_or(std::ptr::null_mut());
+        webauthn_apple::start_on_main(anchor, &options, which, tx);
+    })
+    .map_err(|e| format!("could not start the security key prompt: {e}"))?;
+
+    // `recv` blocks this worker until the user touches the key or dismisses the sheet.
+    // There is no timeout here on purpose: the sheet is the OS's, it has its own
+    // dismissal affordances, and a client-side timer racing it would leave the delegate
+    // alive with nobody listening.
+    tauri::async_runtime::spawn_blocking(move || rx.recv())
+        .await
+        .map_err(|e| format!("security key task failed: {e}"))?
+        .map_err(|_| "the security key ceremony ended without a result".to_string())?
+}
+
+/// Run the registration ceremony natively and return browser-shaped credential JSON.
+#[tauri::command]
+async fn webauthn_native_register(
+    app: tauri::AppHandle,
+    options: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    #[cfg(target_os = "macos")]
+    {
+        webauthn_native_run(app, options, webauthn_apple::Ceremony::Register).await
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (app, options);
+        Err("native security key support is not available on this platform".to_string())
+    }
+}
+
+/// Run the assertion ceremony natively and return browser-shaped credential JSON.
+#[tauri::command]
+async fn webauthn_native_authenticate(
+    app: tauri::AppHandle,
+    options: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    #[cfg(target_os = "macos")]
+    {
+        webauthn_native_run(app, options, webauthn_apple::Ceremony::Authenticate).await
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (app, options);
+        Err("native security key support is not available on this platform".to_string())
+    }
+}
 
 #[tauri::command]
 async fn webauthn_status(state: State<'_, AppState>) -> Result<bool, String> {
@@ -3842,6 +3936,9 @@ pub fn run() {
             totp_confirm,
             totp_disable,
             webauthn_status,
+            webauthn_native_available,
+            webauthn_native_register,
+            webauthn_native_authenticate,
             webauthn_register_start,
             webauthn_register_finish,
             webauthn_authenticate_start,

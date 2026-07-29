@@ -34,7 +34,18 @@ import {
   webauthnRegisterFinish,
   webauthnAuthenticateStart,
   verifyStepUpWebauthn,
+  webauthnNativeAvailable,
+  webauthnNativeRegister,
+  webauthnNativeAuthenticate,
 } from "./tauri";
+
+// Cached because it cannot change while the app is running, and both the ceremony
+// and the "should we even show this button" check ask for it.
+let nativePath: Promise<boolean> | null = null;
+function useNative(): Promise<boolean> {
+  nativePath ??= webauthnNativeAvailable().catch(() => false);
+  return nativePath;
+}
 
 function b64urlToBuffer(b64url: string): ArrayBuffer {
   const pad = "=".repeat((4 - (b64url.length % 4)) % 4);
@@ -62,6 +73,15 @@ function decodeCredentialDescriptors(list: any[] | undefined): PublicKeyCredenti
 export async function registerSecurityKey(label?: string): Promise<void> {
   const { state_id, options } = await webauthnRegisterStart();
   const pk = options.publicKey;
+
+  // Native path takes the server's options verbatim — it decodes base64url itself —
+  // so branch before the ArrayBuffer conversion below rather than after.
+  if (await useNative()) {
+    const credentialJson = await webauthnNativeRegister(pk);
+    await webauthnRegisterFinish(state_id, credentialJson, label);
+    return;
+  }
+
   const publicKey: PublicKeyCredentialCreationOptions = {
     rp: pk.rp,
     user: {
@@ -96,6 +116,12 @@ export async function registerSecurityKey(label?: string): Promise<void> {
 export async function verifyWithSecurityKey(purpose: string): Promise<string> {
   const { state_id, options } = await webauthnAuthenticateStart();
   const pk = options.publicKey;
+
+  if (await useNative()) {
+    const credentialJson = await webauthnNativeAuthenticate(pk);
+    return verifyStepUpWebauthn(purpose, state_id, credentialJson);
+  }
+
   const publicKey: PublicKeyCredentialRequestOptions = {
     challenge: b64urlToBuffer(pk.challenge),
     rpId: pk.rpId,
@@ -120,9 +146,15 @@ export async function verifyWithSecurityKey(purpose: string): Promise<string> {
   return verifyStepUpWebauthn(purpose, state_id, credentialJson);
 }
 
-// Whether this webview exposes the WebAuthn API at all — checked before
-// offering the "register a security key" UI so we fail honestly (P.3)
-// instead of showing a button that throws.
-export function webauthnAvailable(): boolean {
+// Whether a security key can be used on this device at all — checked before offering
+// the "register a security key" UI so we fail honestly (P.3) instead of showing a
+// button that throws.
+//
+// Two ways to qualify. The native path is checked FIRST and wins: on macOS the webview
+// advertises `navigator.credentials` and `window.PublicKeyCredential` perfectly happily
+// and then rejects every roaming key with NotAllowedError, so the browser check is
+// actively misleading there and cannot be the one that decides.
+export async function webauthnAvailable(): Promise<boolean> {
+  if (await useNative()) return true;
   return typeof navigator !== "undefined" && !!navigator.credentials && !!window.PublicKeyCredential;
 }

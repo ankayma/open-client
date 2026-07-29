@@ -353,6 +353,24 @@ export async function webauthnRegisterFinish(stateId: string, credential: any, l
   return invoke("webauthn_register_finish", { stateId, credential, label });
 }
 
+// Native security-key ceremony (macOS). WKWebView cannot drive a roaming FIDO2 key
+// through navigator.credentials at all, so on platforms where this reports true the
+// ceremony runs in Rust via AuthenticationServices and returns the same credential
+// JSON the browser API would have. See docs/webauthn-security-key-decision.md.
+export async function webauthnNativeAvailable(): Promise<boolean> {
+  return invoke<boolean>("webauthn_native_available");
+}
+
+// `options` is the server's raw `options.publicKey` (base64url strings, NOT
+// ArrayBuffers) — the native side does its own decoding.
+export async function webauthnNativeRegister(options: any): Promise<any> {
+  return invoke("webauthn_native_register", { options });
+}
+
+export async function webauthnNativeAuthenticate(options: any): Promise<any> {
+  return invoke("webauthn_native_authenticate", { options });
+}
+
 // Touch ID / Face ID (E-7 StepUp — biometric-only factor, AAL2, owner-directed
 // 2026-07-28). Deliberately NOT WebAuthn/passkey — see stepup.rs
 // StepUpVerifyReq::PlatformKey doc for why. Everything (key creation, Touch ID

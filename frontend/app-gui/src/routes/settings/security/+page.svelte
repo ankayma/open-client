@@ -53,6 +53,14 @@
 		} catch {
 			webauthnRegistered = false;
 		}
+		// webauthnAvailable() is async now: on macOS the answer depends on whether the
+		// NATIVE ceremony is available, which only Rust can answer — the webview's own
+		// navigator.credentials check says yes and then fails every roaming key.
+		try {
+			securityKeySupported = await webauthnAvailable();
+		} catch {
+			securityKeySupported = false;
+		}
 		try {
 			isMacOS = (await getPlatform()) === 'macos';
 		} catch {
@@ -92,6 +100,7 @@
 
 	// Security key (YubiKey/FIDO2) — E-7 StepUp Phase 3, AAL3.
 	let webauthnRegistered = $state(false);
+	let securityKeySupported = $state(false);
 	let webauthnBusy = $state(false);
 	let webauthnError = $state('');
 
@@ -267,7 +276,7 @@
 		</section>
 	{/if}
 
-	{#if webauthnAvailable()}
+	{#if securityKeySupported}
 		<section class="card">
 			<div class="section-label">Security key</div>
 			{#if webauthnRegistered}
