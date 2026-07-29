@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- Required for WKWebView's navigator.credentials (WebAuthn — YubiKey / security
+	     keys, E-7 StepUp Phase 3) to be allowed at all for our RP ID (WEBAUTHN_RP_ID=
+	     ankayma.com). Needs a matching apple-app-site-association served at
+	     https://ankayma.com/.well-known/apple-app-site-association declaring this
+	     app's Team ID (8UF87JS6WW) + bundle ID (com.ankayma.app) under the
+	     "webcredentials" service — see part-d-e7-stepup.md for the full chain.
+	     [T:developer.apple.com/documentation/xcode/supporting-associated-domains] -->
+	<key>com.apple.developer.associated-domains</key>
+	<array>
+		<string>webcredentials:ankayma.com</string>
+	</array>
+</dict>
+</plist>

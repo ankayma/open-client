@@ -60,7 +60,8 @@
       "files": {
         "MacOS/ankayma-helper": "../../target/release/ankayma-helper",
         "Library/LaunchDaemons/com.ankayma.helper.plist": "macos/com.ankayma.helper.plist"
-      }
+      },
+      "entitlements": "macos/entitlements.plist"
     },
     "android": {
       "minSdkVersion": 24,
