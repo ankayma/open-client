@@ -151,9 +151,34 @@ Implementation commits (one concern per commit, per this repo's convention):
 4. `feat(gui): Windows install-once (create_service) + drive connect/disconnect/upgrade through the named pipe instead of Start-Process/taskkill`
 5. `fix(macos-helper): start_agent evicts a stale live agent process before spawning (reuses PID_PATH + is_agent_process)`
 
-## Open item not yet resolved
+## Installer interaction (updated 2026-07-29)
 
-Repo has **no real Windows installer** today (`packaging/windows/build-ankayma-windows.bat`
-only builds binaries; no `.nsi`/`.wxs` found) — service install is driven from the
-GUI's own first-run flow (`ServiceManager::create_service` called directly from
-Rust) until/unless a real installer exists. Revisit if that changes.
+The statement this section used to make — "repo has no real Windows installer" —
+is out of date: `.github/workflows/release-windows.yml` ships a Tauri **NSIS**
+installer (`Ankayma_<ver>_x64-setup.exe`) to get.ankayma.com. That installer knew
+nothing about the service, and it bit on a real host: running a freshly
+downloaded setup.exe over a live install aborts with
+`Error opening file for writing: C:\Program Files\Ankayma\wintun.dll`, because
+the running service holds `agent.exe` and the Wintun DLL open. The in-app
+updater was immune (it calls `stop_service_verified()` first); the
+download-and-run path had no equivalent. `[T: reproduced 2026-07-29]`
+
+Fixed at the packaging layer — `gui/src-tauri/windows/installer-hooks.nsh`,
+wired via `bundle.windows.nsis.installerHooks`:
+`NSIS_HOOK_PREINSTALL` stops the service (waiting for SCM to report `Stopped`,
+enum comparison so it is language-independent) plus a best-effort
+`taskkill agent.exe` for pre-migration installs; `NSIS_HOOK_POSTINSTALL`
+restarts it if registered; `NSIS_HOOK_PREUNINSTALL` stops it so the uninstaller
+can delete the files.
+
+Still open:
+
+- Service **registration** stays in the GUI's first-run flow
+  (`win_service_install::ensure_installed`), not the installer — moving it into
+  `NSIS_HOOK_POSTINSTALL` would also remove the one-time UAC prompt, but it is a
+  separate decision, not part of this fix.
+- `NSIS_HOOK_POSTUNINSTALL` deliberately does **not** `sc delete Ankayma`, so a
+  real uninstall leaves a registered service pointing at a deleted binary
+  (SCM then fails to auto-start it every boot). Deleting it is only safe once we
+  can tell a true uninstall from the uninstaller Tauri runs during an *update* —
+  needs a real Windows host to observe what Tauri passes in that path.

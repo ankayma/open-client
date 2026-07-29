@@ -11,7 +11,8 @@
     "resources": ["wintun.dll"],
     "windows": {
       "nsis": {
-        "installMode": "perMachine"
+        "installMode": "perMachine",
+        "installerHooks": "windows/installer-hooks.nsh"
       }
     }
   }
