@@ -88,6 +88,31 @@ if ! grep -q "CFBundleURLTypes" "$PROJ"; then
   echo "✓ CFBundleURLTypes (ankayma:// scheme) injected into project.yml — deep links open the app"
 fi
 
+# 3c. Associated Domains — WKWebView refuses navigator.credentials.create()/get()
+#     (WebAuthn security-key step-up, E-7 Phase 3) unless the app claims webcredentials:
+#     for our RP ID (WEBAUTHN_RP_ID=ankayma.com). Same xcodegen-regenerates-the-file
+#     reason as the NE/App Group keys above, so it MUST be an entitlements *property*
+#     here — editing the generated .entitlements gets wiped. Only the APP target needs
+#     it; the PacketTunnel extension does not. Idempotent, ungated.
+#     Depends on two things outside this repo, both required or the App Store profile
+#     will not carry the entitlement and Archive fails "profile doesn't include…":
+#       - Associated Domains enabled on App ID com.ankayma.app in the developer portal
+#       - AASA served at https://ankayma.com/.well-known/apple-app-site-association
+#         declaring 8UF87JS6WW.com.ankayma.app under "webcredentials" (live 2026-07-29)
+#     [T:developer.apple.com/documentation/xcode/supporting-associated-domains]
+if ! grep -q "associated-domains" "$PROJ"; then
+  awk '
+    { print }
+    /^      path: ankayma-gui_iOS\/ankayma-gui_iOS\.entitlements$/ { app_ent=1 }
+    app_ent && /^      properties:$/ && !done {
+      print "        com.apple.developer.associated-domains:"
+      print "          - webcredentials:ankayma.com"
+      done=1
+    }
+  ' "$PROJ" >"$PROJ.tmp" && mv "$PROJ.tmp" "$PROJ"
+  echo "✓ associated-domains (webcredentials:ankayma.com) injected into project.yml — WebAuthn in WKWebView"
+fi
+
 # 3d. Keep the app's own Rust static lib (libapp.a) OUT of the app bundle. The app
 #     target globs `- path: Externals` as sources and tauri writes libapp.a there, so
 #     xcodegen adds it to BOTH "Link Binary" (correct) AND "Copy Bundle Resources"
