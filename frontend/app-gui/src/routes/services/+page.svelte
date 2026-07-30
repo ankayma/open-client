@@ -27,6 +27,8 @@
   // across nodes and the iOS path-proof snapshot can carry a hostname that has since
   // drifted from the live roster. [T:A.1.1 overlay = identity]
   let reachMap = $state<Map<string, boolean>>(new Map());
+  // Probe-confirmed SSH availability, keyed by overlay IP. Absent = not probed yet.
+  let sshMap = $state<Map<string, boolean>>(new Map());
   // Guards the "Add device" nudge below the Connected card (A — session 2026-07-28): don't render
   // it — prominent or not — before the roster answers, or it flashes prominent
   // then shrinks once myDeviceCount resolves. [T:session 2026-07-28]
@@ -90,11 +92,19 @@
     try {
       const ips = pr.peers.map((p) => p.overlay_ip);
       const results = await probeReachable(ips);
-      const m = new Map<string, boolean>();
+      // Two maps from one probe. "up" answers is the host alive (open OR refused — a
+      // refusal is proof of life); "ssh" answers can we actually open a terminal there
+      // (open only). They differ exactly in the case that motivated this: a live node
+      // whose agent serves no SSH.
+      const up = new Map<string, boolean>();
+      const ssh = new Map<string, boolean>();
       pr.peers.forEach((p, i) => {
-        m.set(p.overlay_ip, (m.get(p.overlay_ip) ?? false) || !!results[i]);
+        const r = results[i];
+        up.set(p.overlay_ip, (up.get(p.overlay_ip) ?? false) || r === "open" || r === "refused");
+        ssh.set(p.overlay_ip, (ssh.get(p.overlay_ip) ?? false) || r === "open");
       });
-      reachMap = m;
+      reachMap = up;
+      sshMap = ssh;
     } catch {
       /* keep last */
     }
@@ -130,6 +140,15 @@
     const hs = best.last_handshake_secs;
     if (hs === null || hs === undefined) return "stale";
     return hs <= 180 ? "online" : "stale";
+  }
+  // Probe-CONFIRMED "the host answers but serves no SSH". Distinct from unreachable:
+  // the node is on the mesh and every liveness signal is green, yet opening a terminal
+  // there cannot work. Almost always an agent predating the embedded F-2 server, or one
+  // that declined to start it. Absent from the map = not probed yet, so the button stays
+  // enabled rather than deadlocking on a probe still in flight.
+  function noSshThere(node: string): boolean {
+    const ip = overlayOf(node);
+    return ip ? sshMap.get(ip) === false && reachMap.get(ip) === true : false;
   }
   // Probe-CONFIRMED unreachable — only true after a probe returned false (not merely
   // "no handshake yet"). Actions are disabled only on this, so a not-yet-probed node
@@ -532,8 +551,12 @@
         {#if !owned && sshPeer(svc.node)}
           <button
             class="btn-secondary ssh-btn"
-            disabled={!connected || probedDown(svc.node)}
-            title={probedDown(svc.node) ? "Unreachable — no response over the mesh" : "SSH into " + svc.node}
+            disabled={!connected || probedDown(svc.node) || noSshThere(svc.node)}
+            title={probedDown(svc.node)
+              ? "Unreachable — no response over the mesh"
+              : noSshThere(svc.node)
+                ? "This node is on the mesh but is not serving SSH — its agent is likely too old. Update Ankayma there."
+                : "SSH into " + svc.node}
             onclick={() => sshTo(sshPeer(svc.node)!)}
           >
             <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 17l6-6-6-6M12 19h8"/></svg>
@@ -583,8 +606,12 @@
         {#if !group.owned && sshPeer(group.node)}
           <button
             class="btn-secondary ssh-btn"
-            disabled={!connected || probedDown(group.node)}
-            title={probedDown(group.node) ? "Unreachable — no response over the mesh" : "SSH into " + group.node}
+            disabled={!connected || probedDown(group.node) || noSshThere(group.node)}
+            title={probedDown(group.node)
+              ? "Unreachable — no response over the mesh"
+              : noSshThere(group.node)
+                ? "This node is on the mesh but is not serving SSH — its agent is likely too old. Update Ankayma there."
+                : "SSH into " + group.node}
             onclick={() => sshTo(sshPeer(group.node)!)}
           >
             <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 17l6-6-6-6M12 19h8"/></svg>

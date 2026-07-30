@@ -426,12 +426,22 @@ impl SshSession {
                 Err(AttemptError::Transient(e)) => {
                     // Out of budget (no room for another attempt after backoff) → give up.
                     if start.elapsed() + backoff >= opts.connect_deadline {
+                        // Carry the root cause INTO the message, not just onto the chain.
+                        // Callers surface the outermost line only, so a bare "failed after
+                        // N attempts" hid the one detail that distinguishes the two very
+                        // different failures here: a refusal means the node answered and
+                        // simply serves no SSH, while a timeout means nothing came back at
+                        // all. The UI diagnosed the wrong layer for want of this word.
+                        // [T — ankayma-desktop 2026-07-30: refused in 0.7s, yet the app
+                        // told the user the node might not be on the mesh]
+                        let cause = format!("{e:#}");
                         return Err(e.context(format!(
-                            "SSH connect to {}:{} failed after {} attempt(s) in {}s",
+                            "SSH connect to {}:{} failed after {} attempt(s) in {}s: {}",
                             opts.host,
                             opts.port,
                             attempt,
-                            opts.connect_deadline.as_secs()
+                            opts.connect_deadline.as_secs(),
+                            cause
                         )));
                     }
                     tokio::time::sleep(backoff).await;

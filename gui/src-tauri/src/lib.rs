@@ -1200,15 +1200,16 @@ async fn get_node_info(state: State<'_, AppState>) -> Result<NodeInfo, String> {
 /// case. Honest per P.3 — a filtered port on a live node can still read unreachable,
 /// so this is "best-effort reachable", surfaced as a hint, not a guarantee. `[T:A.1.1]`
 #[tauri::command]
-async fn probe_reachable(targets: Vec<String>) -> Result<Vec<bool>, String> {
+async fn probe_reachable(targets: Vec<String>) -> Result<Vec<String>, String> {
     // Blocking connects on a blocking thread so the async runtime isn't stalled; each
     // target gets its own thread so the batch runs concurrently (~3s worst case).
     tauri::async_runtime::spawn_blocking(move || {
         use std::io::ErrorKind;
         use std::net::{TcpStream, ToSocketAddrs};
         use std::time::Duration;
-        // Embedded mesh-SSH port; only RST-vs-timeout matters, so the port need not be
-        // open — a closed port still returns a RST, which proves the host is reachable.
+        // Embedded mesh-SSH port. RST-vs-timeout tells us whether the HOST is up; open-vs-
+        // RST tells us whether SSH is actually being served there. Both matter, and
+        // conflating them is the bug this returns three states to avoid.
         const PROBE_PORT: u16 = 22022;
         const PROBE_TIMEOUT: Duration = Duration::from_secs(3);
         let threads: Vec<_> = targets
@@ -1223,19 +1224,29 @@ async fn probe_reachable(targets: Vec<String>) -> Result<Vec<bool>, String> {
                     };
                     let addr = match hostport.to_socket_addrs().ok().and_then(|mut a| a.next()) {
                         Some(a) => a,
-                        None => return false,
+                        // Unresolvable is indistinguishable from unreachable to the caller.
+                        None => return "timeout",
                     };
+                    // Three outcomes, not two. Collapsing the first two into "reachable"
+                    // is what let the UI offer SSH on a node that has none: a refusal
+                    // proves the host is alive AND that nothing is listening on the mesh
+                    // SSH port — an agent too old to embed the F-2 server, or one where it
+                    // declined to start. The node is genuinely on the mesh (fresh
+                    // handshake, ICMP fine), so every "is it up?" signal says yes while
+                    // SSH cannot possibly work. [T — ankayma-desktop, 2026-07-30: refused
+                    // in 0.7s on 22022 and on a port known closed; ping 0% loss]
                     match TcpStream::connect_timeout(&addr, PROBE_TIMEOUT) {
-                        Ok(_) => true,
-                        Err(e) => e.kind() == ErrorKind::ConnectionRefused,
+                        Ok(_) => "open",
+                        Err(e) if e.kind() == ErrorKind::ConnectionRefused => "refused",
+                        Err(_) => "timeout",
                     }
                 })
             })
             .collect();
         threads
             .into_iter()
-            .map(|t| t.join().unwrap_or(false))
-            .collect::<Vec<bool>>()
+            .map(|t| t.join().unwrap_or("timeout").to_string())
+            .collect::<Vec<String>>()
     })
     .await
     .map_err(|e| format!("probe task failed: {e}"))

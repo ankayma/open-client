@@ -237,10 +237,22 @@
 
 	{#if status === 'error'}
 		<div class="err">
-			{#if /failed after|attempt|timed out|timeout|connect|refused|no route/i.test(errorMsg)}
+			<!-- Do not assert a cause the message cannot know. A refusal and a timeout look
+			     alike in the flattened error string, but they mean opposite things: refused
+			     proves the node IS on the mesh and answered — there is simply no SSH server
+			     there. Blaming the mesh in that case sends people to check Connect, NAT and
+			     relays while the real answer is an agent too old to serve SSH.
+			     [T — ankayma-desktop, 2026-07-30: handshake 7s, ping 0% loss, and 22022
+			     refused in 0.7s, while this text claimed it might not be on the mesh] -->
+			{#if /refused|connection reset/i.test(errorMsg)}
+				<strong>{host} có trên mesh nhưng không chạy SSH.</strong>
+				Máy đó trả lời ngay (nên nó đang online), chỉ là không có gì lắng nghe ở cổng SSH —
+				gần như chắc chắn agent bên đó là bản cũ, chưa có SSH tích hợp. Cập nhật Ankayma
+				trên máy đó rồi thử lại.
+			{:else if /failed after|attempt|timed out|timeout|connect|no route/i.test(errorMsg)}
 				<strong>Không kết nối được tới {host}.</strong>
-				Node có thể chưa ở trên mesh — app bên đó chưa Connect / máy offline, hoặc sau NAT
-				mà relay chưa khả dụng. WireGuard chỉ bắt tay khi cả hai đầu cùng online.
+				Không có phản hồi nào từ máy đó — có thể app bên đó chưa Connect, máy offline,
+				hoặc sau NAT mà relay chưa khả dụng. WireGuard chỉ bắt tay khi cả hai đầu cùng online.
 			{:else}
 				SSH error: {errorMsg}
 			{/if}

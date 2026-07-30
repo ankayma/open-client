@@ -198,10 +198,18 @@ export async function getPathProof(): Promise<PathProof> {
   return invokeWithReauth<PathProof>("get_path_proof");
 }
 
-// Active reachability: TCP-probe overlay IPs (connect/refused → reachable, timeout →
-// unreachable). More accurate than the lagging handshake age for gating SSH/Open.
-export async function probeReachable(targets: string[]): Promise<boolean[]> {
-  return invoke<boolean[]>("probe_reachable", { targets });
+// Active probe of the mesh-SSH port on each overlay IP. Three outcomes, because two
+// different questions hide behind "reachable":
+//   "open"    — host is up AND serving SSH
+//   "refused" — host is up, nothing listening on the SSH port (agent too old to embed
+//               the F-2 server, or it declined to start there)
+//   "timeout" — host is not reachable at all
+// Collapsing the first two into one boolean is what made the app offer an SSH button on
+// a node that has no SSH: the node was genuinely on the mesh, so every liveness signal
+// said yes. More accurate than the lagging handshake age for gating actions.
+export type ProbeResult = "open" | "refused" | "timeout";
+export async function probeReachable(targets: string[]): Promise<ProbeResult[]> {
+  return invoke<ProbeResult[]>("probe_reachable", { targets });
 }
 
 // [A] stub — control-plane receives event via agent-core relay (milestone 1.2)
