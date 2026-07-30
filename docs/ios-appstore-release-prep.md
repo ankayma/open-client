@@ -114,9 +114,23 @@ App Group `group.com.ankayma.app`, both with Network Extensions + App Groups ena
    Set `DEVELOPMENT_TEAM=8UF87JS6WW` (already in project.yml).
 2. **Bridge + frontend** (the "remaining" part of §5) before the device build, otherwise the app
    is UI-only and the connect button does nothing.
-3. **Build:** `cd gui/src-tauri && cargo tauri ios init && bash ../../scripts/ios-postinit.sh`
-   then `cargo tauri ios build` (signs using cert/profile in keychain). Produces `.ipa`.
+3. **Build — this is the ONLY supported path.** `rm -rf gen/apple` first whenever
+   `ios/PacketTunnel.target.yml` or the version changed; `init` will not overwrite an existing
+   project, so skipping it silently ships the previous version.
+
+   ```bash
+   cd gui/src-tauri && rm -rf gen/apple
+   APPLE_DEVELOPMENT_TEAM=8UF87JS6WW cargo tauri ios init
+   bash ../../scripts/ios-postinit.sh
+   APPLE_DEVELOPMENT_TEAM=8UF87JS6WW cargo tauri ios build --export-method app-store-connect
+   ```
+
+   Produces `gen/apple/build/arm64/Ankayma.ipa`, already App Store signed. **Do not archive
+   from Xcode instead** — see §7.1 for why that cannot work here.
+   Then run every check in `docs/ios-build-verify-checklist.md` against the ipa.
 4. **Upload:** Transporter, or App Store Connect API key (`xcrun altool`/`scripts/release-ios.sh`).
+   To distribute from Xcode's Organizer instead, copy the archive where Organizer can see it
+   (§7.1) — Tauri leaves it under the project's `build/`, which Organizer does not scan.
 5. **App Store Connect:** create app record `com.ankayma.app`, fill in metadata + **privacy** (ankayma.com/privacy.html
    already exists), declare **Trader status (EU DSA)**, encryption export.
 6. **Guideline 5.4 (VPN):** submit using an **organizational account** (✅ VIET NAM ADVANCED SOFTWARE
@@ -133,35 +147,49 @@ App Group `group.com.ankayma.app`, both with Network Extensions + App Groups ena
 > Account Holder/Admin account** — cannot be automated by tooling. Follow the order (2 → 6 is a
 > dependency chain; 1/3/4/5 can be done in parallel while waiting).
 
-### 7.1 Distribution provisioning profile
+### 7.1 Signing — resolved, and do NOT archive from Xcode
 
-Currently only a **Development** profile exists (`get-task-allow: true`). Need an **App Store Distribution**
-profile for both App IDs. Fastest approach — let Xcode handle it:
+**The distribution profile exists and works.** Verified 2026-07-30 on 1.1.29: the exported
+ipa carries *iOS Team Store Provisioning Profile: com.ankayma.app*, `get-task-allow` false,
+`beta-reports-active` true — i.e. a proper App Store signature, produced without any manual
+portal step. Xcode's automatic signing creates and refreshes it. Nothing to do here unless
+that breaks.
 
-1. `open gui/src-tauri/gen/apple/ankayma-gui.xcodeproj` (run `scripts/ios-postinit.sh` first
-   if you just re-ran `cargo tauri ios init`).
-2. Select target **ankayma-gui_iOS** → **Signing & Capabilities** tab → Team =
-   **VIET NAM ADVANCED SOFTWARE** (`8UF87JS6WW`, NOT Personal Team) → tick
-   **Automatically manage signing**. Repeat for target **ankayma-gui_PacketTunnel**.
-3. In the device bar select **"Any iOS Device (arm64)"** (not simulator).
-4. **Product → Archive**. First archive with correct team + automatic signing, Xcode auto-creates
-   the **Apple Distribution** certificate + **App Store** provisioning profile for both App IDs if
-   they don't exist — no manual portal steps needed.
+> **Do not run Product → Archive, and do not run `xcodebuild archive` by hand.** Both fail:
+> the generated project has a `Build Rust Code` script phase that asks the running Tauri CLI
+> for its options over a local socket, so with no CLI driving the build it dies with
+> `failed to read CLI options … Connection refused` and `** ARCHIVE FAILED **`. This is not a
+> signing problem and no amount of Signing & Capabilities fiddling fixes it.
+> Tried and confirmed 2026-07-30.
+>
+> `cargo tauri ios build` (§6) is the only path. It runs the archive itself and leaves a real
+> `.xcarchive` behind — see below — so nothing is lost by not using Xcode's menu.
 
-If automatic signing reports an error (e.g. "no account with App Store Distribution capability"), do it manually:
-`developer.apple.com` → **Certificates, IDs & Profiles** (remember to switch the team selector to
-VIET NAM ADVANCED SOFTWARE first) → **Certificates → +** → *Apple Distribution* → create a CSR via
-**Keychain Access → Certificate Assistant → Request a Certificate from a CA** → upload → download
-cert → double-click to install in Keychain. Then **Profiles → +** → *App Store* (under Distribution) →
-select App ID `com.ankayma.app` → select the Distribution cert just created → name it → Generate → Download →
-double-click to install. Repeat for `com.ankayma.app.tunnel`.
+**Getting the build into Organizer** (only needed if you want to distribute from Xcode's UI
+rather than uploading the ipa directly — both end up in the same place):
 
-> ⚠️ Known risk in `gen/apple/project.yml` (a generated file, not our source):
-> `CODE_SIGN_IDENTITY: "iPhone Developer"` is hard-coded for **all** configurations (not split by Debug/
-> Release) — if Xcode does not override to `Apple Distribution` at Archive time (Automatic
-> signing usually overrides this), the Release build will be signed incorrectly with the Development cert.
-> If Archive reports "profile doesn't match the entitlements"/"wrong signing identity", this is the first
-> suspect — confirm by opening Signing & Capabilities during Archive to see what the actual identity is.
+```bash
+cp -R gui/src-tauri/gen/apple/build/ankayma-gui_iOS.xcarchive \
+      ~/Library/Developer/Xcode/Archives/$(date +%Y-%m-%d)/Ankayma-<version>.xcarchive
+```
+
+Tauri writes the archive under the project's `build/`, which Organizer does not scan; copying
+it into the dated Archives folder is all that is missing. The archive is Development-signed —
+that is expected and harmless, because *Distribute App* re-signs at export, exactly as the
+`--export-method app-store-connect` export already did for the ipa.
+
+If automatic signing ever does fail (e.g. "no account with App Store Distribution capability"),
+do it by hand: `developer.apple.com` → **Certificates, IDs & Profiles** (switch the team
+selector to VIET NAM ADVANCED SOFTWARE first) → **Certificates → +** → *Apple Distribution* →
+create a CSR via **Keychain Access → Certificate Assistant → Request a Certificate from a CA**
+→ upload → download → double-click to install. Then **Profiles → +** → *App Store* → App ID
+`com.ankayma.app` → select that cert → Generate → Download → install. Repeat for
+`com.ankayma.app.tunnel`.
+
+> The old warning about `CODE_SIGN_IDENTITY: "iPhone Developer"` being hard-coded in
+> `gen/apple/project.yml` is kept for the record: it is real, but it has not caused a bad
+> release, because the export step re-signs. Watch for it only if an uploaded build is ever
+> rejected for the wrong signing identity.
 
 ### 7.2 App Store Connect — app record + metadata + screenshots + age rating
 
