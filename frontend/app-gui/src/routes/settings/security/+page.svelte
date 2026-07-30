@@ -75,8 +75,8 @@
 			// biometrics is worse than none, so the section stays hidden here until key
 			// generation is done against SecKeyCreateRandomKey directly.
 			// [T — reproduced on an iPhone 11 / iOS 18.7.8 with 1.1.29, 2026-07-30]
-			biometricSupported = plat === 'macos';
-			biometricName = 'Touch ID';
+			biometricSupported = plat === 'macos' || plat === 'ios';
+			biometricName = plat === 'ios' ? 'Face ID' : 'Touch ID';
 		} catch {
 			isMacOS = false;
 			biometricSupported = false;

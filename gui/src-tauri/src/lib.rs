@@ -1735,10 +1735,10 @@ async fn verify_step_up_webauthn(
 // weaker secret. `[T:developer.apple.com/forums/thread/786171 — SE access needs
 // an App ID authorised by a profile; a real signed app bundle satisfies this
 // where a bare CLI binary can't]`
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "ios"))]
 const PLATFORM_KEY_LABEL: &str = "com.ankayma.app.stepup.touchid";
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "ios"))]
 fn platform_key_access_control(
 ) -> Result<security_framework::access_control::SecAccessControl, String> {
     use security_framework::access_control::SecAccessControl;
@@ -1766,7 +1766,7 @@ fn platform_key_access_control(
 /// Surfacing the raw `CFError` for that is a bad message for an ordinary situation, and
 /// it cost most of a debugging session to recognise. [T — reproduced 2026-07-29/30:
 /// unavailable with the lid closed, works with it open, no code change in between]
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "ios"))]
 fn biometrics_unavailable_reason() -> Option<String> {
     use objc2_local_authentication::{LAContext, LAPolicy};
     let ctx = unsafe { LAContext::new() };
@@ -1813,10 +1813,111 @@ fn biometrics_unavailable_reason() -> Option<String> {
     })
 }
 
+/// Create the Secure Enclave key with the biometric constraint ACTUALLY attached.
+///
+/// Hand-built rather than through `security-framework`'s `GenerateKeyOptions`, because
+/// that helper pushes `kSecPrivateKeyAttrs` — the sub-dictionary carrying
+/// `kSecAttrAccessControl` and `kSecAttrIsPermanent` — only inside a
+/// `cfg(target_os = "macos")` block (3.7.0 `src/key.rs:451`, the sole push site; there is
+/// no iOS branch anywhere in that file). On iOS the biometric constraint was therefore
+/// dropped in silence: the key was created unprotected, signed with no user presence, and
+/// the control plane accepted it as a valid AAL2 factor while the UI called it Face ID.
+/// Verified on an iPhone 11 / iOS 18.7.8 with 1.1.29 — enrolment never prompted once.
+///
+/// Building the parameters here puts both platforms on one path that demonstrably carries
+/// the ACL, so the divergence cannot come back through a crate upgrade either.
+/// macOS deliberately does NOT share this: its `GenerateKeyOptions` path does attach the
+/// ACL, and it is verified prompting and signing on hardware. Rewriting a working, proven
+/// security control to share code with a broken one trades a real guarantee for tidiness.
+/// [T:developer.apple.com/documentation/security/protecting-keys-with-the-secure-enclave]
+#[cfg(target_os = "ios")]
+fn create_platform_key() -> Result<security_framework::key::SecKey, String> {
+    use core_foundation::base::{CFTypeRef, TCFType, ToVoid};
+    use core_foundation::boolean::CFBoolean;
+    use core_foundation::dictionary::CFMutableDictionary;
+    use core_foundation::error::CFError;
+    use core_foundation::number::CFNumber;
+    use core_foundation::string::CFString;
+    use security_framework::key::SecKey;
+    use security_framework_sys::item::{
+        kSecAttrAccessControl, kSecAttrIsPermanent, kSecAttrKeySizeInBits, kSecAttrKeyType,
+        kSecAttrKeyTypeECSECPrimeRandom, kSecAttrLabel, kSecAttrTokenID,
+        kSecAttrTokenIDSecureEnclave, kSecPrivateKeyAttrs,
+    };
+    use security_framework_sys::key::SecKeyCreateRandomKey;
+
+    let access_control = platform_key_access_control()?;
+    let label = CFString::new(PLATFORM_KEY_LABEL);
+    let size = CFNumber::from(256i32);
+
+    // The ACL lives HERE, on the private key, not at the top level — that placement is
+    // the entire point of this function.
+    let private_attrs = CFMutableDictionary::from_CFType_pairs(&[
+        (
+            unsafe { kSecAttrIsPermanent }.to_void(),
+            CFBoolean::true_value().to_void(),
+        ),
+        (
+            unsafe { kSecAttrAccessControl }.to_void(),
+            access_control.to_void(),
+        ),
+    ]);
+
+    let pairs = vec![
+        (
+            unsafe { kSecAttrKeyType }.to_void(),
+            unsafe { kSecAttrKeyTypeECSECPrimeRandom }.to_void(),
+        ),
+        (unsafe { kSecAttrKeySizeInBits }.to_void(), size.to_void()),
+        (
+            unsafe { kSecAttrTokenID }.to_void(),
+            unsafe { kSecAttrTokenIDSecureEnclave }.to_void(),
+        ),
+        (unsafe { kSecAttrLabel }.to_void(), label.to_void()),
+        (
+            unsafe { kSecPrivateKeyAttrs }.to_void(),
+            private_attrs.to_void(),
+        ),
+    ];
+    // No kSecUseDataProtectionKeychain here: iOS has only that keychain, and naming it
+    // is not permitted on the platform.
+
+    let params = CFMutableDictionary::from_CFType_pairs(&pairs).to_immutable();
+    let mut error: core_foundation::error::CFErrorRef = std::ptr::null_mut();
+    let raw = unsafe { SecKeyCreateRandomKey(params.as_concrete_TypeRef(), &mut error) };
+    if raw.is_null() {
+        let e = unsafe { CFError::wrap_under_create_rule(error) };
+        return Err(format!("SecKeyCreateRandomKey failed: {e:?}"));
+    }
+    Ok(unsafe { SecKey::wrap_under_create_rule(raw as CFTypeRef as _) })
+}
+
+/// macOS key creation — unchanged from the version verified on hardware. Kept separate
+/// from the iOS implementation above on purpose: this one works, and sharing a body with
+/// the platform that needed rewriting would put a proven control at risk for no gain.
+#[cfg(target_os = "macos")]
+fn create_platform_key() -> Result<security_framework::key::SecKey, String> {
+    use security_framework::item::Location;
+    use security_framework::key::{GenerateKeyOptions, KeyType, SecKey, Token};
+
+    let access_control = platform_key_access_control()?;
+    let mut options = GenerateKeyOptions::default();
+    options
+        .set_key_type(KeyType::ec())
+        .set_token(Token::SecureEnclave)
+        .set_label(PLATFORM_KEY_LABEL.to_string())
+        // security-framework derives kSecAttrIsPermanent from `location`, so leaving it
+        // unset creates the key and drops the private half on the floor. It is also the
+        // only keychain Secure Enclave keys may live in.
+        .set_location(Location::DataProtectionKeychain)
+        .set_access_control(access_control);
+    SecKey::new(&options).map_err(|e| format!("SecKey::new failed: {e:?}"))
+}
+
 /// Find this app's previously-enrolled Secure Enclave key by its stable label,
 /// so `platform_key_sign_challenge` signs with the SAME key `platform_key_enroll`
 /// registered server-side (not a freshly-generated one).
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "ios"))]
 /// `auth_ctx` is a retained `LAContext` pointer, or null.
 ///
 /// Signing with a `biometryCurrentSet` Secure Enclave key needs an explicit
@@ -1889,7 +1990,7 @@ fn find_platform_key(
 /// key it found. Deleting is safe: the private half never leaves the Secure Enclave and
 /// cannot be backed up, so there is nothing to preserve, and the server keeps accepting
 /// the other keys on the account.
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "ios"))]
 fn delete_platform_key() -> Result<(), String> {
     use security_framework::item::{ItemClass, ItemSearchOptions, KeyClass};
     const ERR_SEC_ITEM_NOT_FOUND: i32 = -25300;
@@ -1912,11 +2013,9 @@ fn delete_platform_key() -> Result<(), String> {
 /// the control plane. Key creation itself does not prompt Touch ID (only a
 /// SIGN operation does, per `platform_key_sign_challenge`) — the OS defers the
 /// biometric check to first use.
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "ios"))]
 #[tauri::command]
 async fn platform_key_enroll(state: State<'_, AppState>) -> Result<(), String> {
-    use security_framework::item::Location;
-    use security_framework::key::{GenerateKeyOptions, KeyType, SecKey, Token};
     let tok = state.token().ok_or("not signed in")?;
     // Check before creating anything: enrolling a key this Mac cannot sign with would
     // leave the account advertising a factor it cannot produce.
@@ -1932,27 +2031,7 @@ async fn platform_key_enroll(state: State<'_, AppState>) -> Result<(), String> {
         delete_platform_key()?;
         let key = match find_platform_key(std::ptr::null_mut())? {
             Some(k) => k,
-            None => {
-                let access_control = platform_key_access_control()?;
-                let mut options = GenerateKeyOptions::default();
-                options
-                    .set_key_type(KeyType::ec())
-                    .set_token(Token::SecureEnclave)
-                    .set_label(PLATFORM_KEY_LABEL.to_string())
-                    // WITHOUT this the key is never stored. security-framework derives
-                    // kSecAttrIsPermanent from `location` (`is_permanent =
-                    // CFBoolean::from(self.location.is_some())`, src/key.rs), so leaving
-                    // it unset creates the Secure Enclave key, hands back its public half
-                    // — which we happily registered with the server — and then drops the
-                    // private half on the floor. Enrolment looked successful and every
-                    // later step-up silently fell back to an emailed code.
-                    // DataProtectionKeychain is also the only keychain Secure Enclave
-                    // keys may live in. [T:security-framework-3.7.0 src/key.rs:417 +
-                    // src/item.rs Location docs]
-                    .set_location(Location::DataProtectionKeychain)
-                    .set_access_control(access_control);
-                SecKey::new(&options).map_err(|e| format!("SecKey::new failed: {e:?}"))?
-            }
+            None => create_platform_key()?,
         };
         // Prove the key can actually SIGN before telling the user (and the server) that
         // Touch ID is set up. Key *generation* never prompts — the OS defers the
@@ -2013,7 +2092,7 @@ async fn platform_key_enroll(state: State<'_, AppState>) -> Result<(), String> {
 /// prompt), verify server-side, return the proof_token. Mirrors
 /// `verify_step_up_totp`'s shape (purpose in, proof_token out) but — unlike a
 /// typed code — there's nothing for the frontend to collect from the user.
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "ios"))]
 #[tauri::command]
 async fn platform_key_sign_challenge(
     state: State<'_, AppState>,
@@ -2117,7 +2196,7 @@ async fn platform_key_sign_challenge(
 /// additional key for the account — exactly what the schema is shaped for, and a
 /// plain INSERT server-side, so it overwrites nothing. [T: migration 035 has no
 /// unique constraint on user_id; platform_key_register INSERTs a fresh key_id]
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "ios"))]
 #[tauri::command]
 async fn platform_key_status(state: State<'_, AppState>) -> Result<bool, String> {
     let tok = state.token().ok_or("not signed in")?;
@@ -2127,13 +2206,13 @@ async fn platform_key_status(state: State<'_, AppState>) -> Result<bool, String>
     Ok(on_server && find_platform_key(std::ptr::null_mut())?.is_some())
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "ios")))]
 #[tauri::command]
 async fn platform_key_enroll(_state: State<'_, AppState>) -> Result<(), String> {
     Err("Face ID / Touch ID step-up is not available on this platform".into())
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "ios")))]
 #[tauri::command]
 async fn platform_key_sign_challenge(
     _state: State<'_, AppState>,
@@ -2142,7 +2221,7 @@ async fn platform_key_sign_challenge(
     Err("Face ID / Touch ID step-up is not available on this platform".into())
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "ios")))]
 #[tauri::command]
 async fn platform_key_status(_state: State<'_, AppState>) -> Result<bool, String> {
     Ok(false)
