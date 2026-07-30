@@ -16,6 +16,15 @@ pub struct EnrollRequest {
     /// [T:Part B §B.1.4] Canonical workload kind (e.g. "AppServer", "ClientDevice").
     #[serde(skip_serializing_if = "Option::is_none")]
     pub workload_kind: Option<String>,
+    /// `std::env::consts::OS` of the enrolling process ("linux", "macos", "windows",
+    /// "ios", "android"). Distinct from `workload_kind`, which is a deployment-role
+    /// taxonomy identical across desktop AND mobile GUI builds and therefore cannot
+    /// tell a phone apart from a server — this field is what F-2 SSH-target
+    /// eligibility gates on (`[T:f2 §H.6]`: SSH-target
+    /// = Linux/Windows/macOS only, never iOS/Android — privacy, not a technical
+    /// limit). `Option` for backward-compat with control planes that predate it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub platform: Option<String>,
     /// Proof of possession of this device's machine key (`machine_key::MachineKey`).
     /// The control plane matches a node to a DEVICE on this, so a rotated WireGuard
     /// key updates the node in place instead of enrolling a second one.
@@ -499,6 +508,7 @@ mod tests {
             hostname: "laptop".into(),
             endpoint: None,
             workload_kind: None,
+            platform: None,
             machine_proof: None,
         };
         let v: serde_json::Value = serde_json::to_value(&req).unwrap();

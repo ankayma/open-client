@@ -634,6 +634,7 @@ async fn connect_inner(state: &AppState) -> Result<(), String> {
         hostname: device_hostname(),
         endpoint: None,
         workload_kind: Some("ClientDevice".to_string()),
+        platform: Some(std::env::consts::OS.to_string()),
         machine_proof: Some(proof),
     };
     let resp = adapters::enroll(&state.http, &state.regional_base_url(), &tok, &req)
@@ -2270,6 +2271,7 @@ async fn join_enroll_node(
         endpoint: None,
         // An app device joining its own tenant is not a server node. [T:Part B §B.1.4]
         workload_kind: None,
+        platform: Some(std::env::consts::OS.to_string()),
         machine_proof: Some(proof),
     };
     let resp = adapters::enroll_via_join_token(&state.http, &state.regional_base_url(), &req)

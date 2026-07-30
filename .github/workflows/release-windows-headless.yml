@@ -1,0 +1,135 @@
+# GitHub Actions — Windows headless release: standalone `agent`+`mesh` binaries (no
+# Tauri/WebView2/GUI), for unattended Windows Server deployments. Published to
+# get.ankayma.com/windows-headless/ (Cloudflare R2), same bucket the GUI installer and
+# the Linux curl|sh channel already share.
+#
+# Separate workflow file from release-windows.yml on purpose — same precedent as Linux/macOS/Windows-GUI
+# already being 3 independent workflows on one tag trigger, so a failure/rerun on one
+# artifact class never touches another (this one doesn't build Tauri/Node/frontend at all).
+#
+# Distinct service from the GUI's `Ankayma` service (win_service.rs / release-windows.yml):
+# this registers `AnkaymaHeadless` (crates/agent-daemon/src/win_service_headless.rs), which
+# spawns `agent up` on its own at SERVICE_START — no GUI, no named-pipe Connect handshake.
+#
+# Authenticode: NOT wired (see scripts/release-windows-headless.ps1 header) — ships
+# unsigned + cosign-signed SHA256SUMS, matching today's GUI installer's posture.
+#
+# Required repo secrets (shared with release-linux.yml / release-windows.yml — no new ones):
+#   COSIGN_PRIVATE_KEY   base64 of cosign.key (`openssl base64 -A -in cosign.key`)
+#   COSIGN_PASSWORD      password for cosign.key
+#   R2_ACCESS_KEY_ID / R2_SECRET_ACCESS_KEY / R2_ENDPOINT   R2 S3-compatible API token
+#   R2_BUCKET_MACOS      bucket behind get.ankayma.com (shared — this job writes the
+#                        windows-headless/ prefix)
+name: release-windows-headless
+
+on:
+  push:
+    tags: ["v*.*.*"]
+  workflow_dispatch: {}
+
+jobs:
+  build-verify-publish:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust (pinned via rust-toolchain.toml)
+        run: rustup show
+
+      # Same cosign binary + secret-decode pattern as release-windows.yml's GUI signing
+      # step, factored out here so it runs before the build (the release script expects
+      # `cosign` on PATH and `cosign.key` at repo root when COSIGN_PASSWORD is set).
+      - name: Install cosign + decode signing key
+        shell: bash
+        env:
+          COSIGN_PRIVATE_KEY: ${{ secrets.COSIGN_PRIVATE_KEY }}
+          COSIGN_VERSION: v2.4.1 # [A — keep in step with release-linux.yml/release-windows.yml]
+        run: |
+          set -euo pipefail
+          curl -sSfL "https://github.com/sigstore/cosign/releases/download/${COSIGN_VERSION}/cosign-windows-amd64.exe" -o cosign.exe
+          echo "$PWD" >> "$GITHUB_PATH"
+          if [ -n "$COSIGN_PRIVATE_KEY" ]; then
+            echo "$COSIGN_PRIVATE_KEY" | base64 -d > cosign.key
+          fi
+
+      - name: Build, checksum, cosign-sign (scripts/release-windows-headless.ps1)
+        shell: pwsh
+        env:
+          COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}
+        run: pwsh scripts/release-windows-headless.ps1
+
+      - name: Remove signing key material
+        if: always()
+        shell: bash
+        run: rm -f cosign.key
+
+      # Real evidence for win_service_headless.rs — never built or run on a real Windows
+      # host before this workflow exists (see the file's own header + the decision doc's
+      # risks/gaps section). Proves SCM registration/start/stop under a real LocalSystem
+      # token. Does NOT prove the tunnel itself comes up — that needs a real control-plane
+      # + join token, out of CI's reach; left to the decision doc's manual-test step.
+      - name: Smoke-test AnkaymaHeadless service install/start/stop via SCM
+        shell: pwsh
+        run: |
+          $exe = (Resolve-Path "dist\*\agent-windows-amd64.exe").Path
+          Write-Host "Using $exe"
+
+          sc.exe create AnkaymaHeadless binPath= "`"$exe`" service-headless" start= demand obj= LocalSystem
+          if ($LASTEXITCODE -ne 0) { throw "sc.exe create failed" }
+
+          sc.exe start AnkaymaHeadless
+          if ($LASTEXITCODE -ne 0) { throw "sc.exe start failed" }
+
+          $deadline = (Get-Date).AddSeconds(15)
+          do {
+            Start-Sleep -Milliseconds 500
+            $status = (Get-Service AnkaymaHeadless).Status
+          } while ($status -ne "Running" -and (Get-Date) -lt $deadline)
+          if ($status -ne "Running") { throw "service did not reach Running (last status: $status)" }
+          Write-Host "OK service reached Running"
+
+          sc.exe stop AnkaymaHeadless
+          if ($LASTEXITCODE -ne 0) { throw "sc.exe stop failed" }
+
+          $deadline = (Get-Date).AddSeconds(15)
+          do {
+            Start-Sleep -Milliseconds 500
+            $status = (Get-Service AnkaymaHeadless).Status
+          } while ($status -ne "Stopped" -and (Get-Date) -lt $deadline)
+          if ($status -ne "Stopped") { throw "service did not reach Stopped (last status: $status)" }
+          Write-Host "OK service reached Stopped"
+
+          sc.exe delete AnkaymaHeadless
+
+      # Cheap, real verification that `mesh` — never built for Windows anywhere before
+      # this workflow — actually works, not just compiles.
+      - name: Smoke-test mesh genkey/pubkey round-trip
+        shell: pwsh
+        run: |
+          $mesh = (Resolve-Path "dist\*\mesh-windows-amd64.exe").Path
+          $priv = & $mesh genkey
+          if ($LASTEXITCODE -ne 0 -or -not $priv) { throw "mesh genkey failed" }
+          $pub = $priv | & $mesh pubkey
+          if ($LASTEXITCODE -ne 0 -or -not $pub) { throw "mesh pubkey failed" }
+          Write-Host "OK mesh genkey | mesh pubkey -> $pub"
+
+      - name: Publish to R2 (get.ankayma.com/windows-headless/)
+        shell: pwsh
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: auto
+        run: |
+          $dist = (Resolve-Path "dist\*").Path
+          $version = Split-Path $dist -Leaf
+          $ep = "${{ secrets.R2_ENDPOINT }}"
+          aws s3 sync "$dist/" "s3://${{ secrets.R2_BUCKET_MACOS }}/windows-headless/$version/" --endpoint-url "$ep"
+          aws s3 sync "$dist/" "s3://${{ secrets.R2_BUCKET_MACOS }}/windows-headless/latest/" --endpoint-url "$ep"
+          aws s3 cp "dist/$version/install-windows.ps1" "s3://${{ secrets.R2_BUCKET_MACOS }}/windows-headless/install.ps1" --endpoint-url "$ep"
+
+      - name: Attest build provenance
+        continue-on-error: true
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: "dist/*/agent-windows-amd64.exe"

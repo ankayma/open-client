@@ -455,6 +455,9 @@ pub struct JoinEnrollRequest {
     /// `None` for an ordinary app-device join. `[T:Part B §B.1.4]`
     #[serde(skip_serializing_if = "Option::is_none")]
     pub workload_kind: Option<String>,
+    /// See `domain::EnrollRequest::platform`. `[T:f2 §H.6]`
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub platform: Option<String>,
     /// See `domain::EnrollRequest::machine_proof`. Redeeming an invite also lifts an
     /// administrator's revocation of this device — the invite IS the re-admission.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1785,6 +1788,7 @@ mod tests {
             hostname: "h".into(),
             endpoint: None,
             workload_kind: None,
+            platform: None,
             machine_proof: None,
         };
         let err = enroll(&http, "https://cp.ankayma.com", "bogus-token", &req)
@@ -1817,6 +1821,7 @@ mod tests {
             hostname: "h".into(),
             endpoint: None,
             workload_kind: None,
+            platform: None,
             machine_proof: None,
         };
         let err = enroll_via_join_token(&http, "https://cp.ankayma.com", &req)
@@ -1872,6 +1877,7 @@ mod tests {
                 hostname: "layer2-regression-e3".into(),
                 endpoint: None,
                 workload_kind: None,
+                platform: None,
                 machine_proof: None,
             },
         )
