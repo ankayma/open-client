@@ -87,6 +87,55 @@ if [[ -z "$DMG" ]]; then
   exit 1
 fi
 
+# Re-sign the nested standalone executables WITHOUT the app's entitlements.
+#
+# Tauri applies bundle.macOS.entitlements to every binary it signs, sidecars included.
+# That is fatal here: `agent` and `ankayma-helper` are launched on their own — the helper
+# is a root daemon, and it spawns `agent` directly — not as part of the app bundle. A
+# restricted entitlement (application-identifier, keychain-access-groups,
+# associated-domains) on a standalone executable is only honoured when a provisioning
+# profile authorises it, and the embedded profile names 8UF87JS6WW.com.ankayma.app while
+# these binaries sign as `agent` / `ankayma-helper`. taskgated therefore SIGKILLs them the
+# instant they exec: no output, no crash report, nothing in any log. The tunnel simply
+# never comes up, and `codesign --verify` reports the bundle perfectly valid throughout.
+# Shipped broken in 1.1.29 through 1.1.32. [T — reproduced 2026-07-30: identical binary,
+# exit 137 with the entitlements, exit 2 and normal usage output without them]
+#
+# Apple's rule for nested code is to sign bottom-up and give each nested executable its
+# own entitlements — here, none at all: neither binary needs any.
+# [T:developer.apple.com/forums/thread/798947 + objc.io/issues/17-security/inside-code-signing]
+echo "→ Re-signing sidecars without the app's entitlements (bottom-up)…"
+APP_EARLY=$(find ../../target/universal-apple-darwin/release/bundle/macos -maxdepth 1 -iname "*.app" 2>/dev/null | head -1)
+if [[ -n "$APP_EARLY" ]]; then
+  for bin in agent ankayma-helper; do
+    [[ -f "$APP_EARLY/Contents/MacOS/$bin" ]] || continue
+    codesign --force --options runtime --timestamp \
+      --sign "$APPLE_SIGNING_IDENTITY" "$APP_EARLY/Contents/MacOS/$bin"
+  done
+  # Outer bundle last, and only it carries the entitlements. Re-signing nested code breaks
+  # the outer seal, so this is required, not optional.
+  codesign --force --options runtime --timestamp \
+    --entitlements macos/entitlements.plist \
+    --sign "$APPLE_SIGNING_IDENTITY" "$APP_EARLY"
+
+  # Sidecar gate. The app-launch gate below cannot see this failure: the app starts fine,
+  # it is only the tunnel that never appears. Run the sidecar and demand it survive.
+  # 137 is SIGKILL, which is exactly what a rejected entitlement looks like.
+  for bin in agent ankayma-helper; do
+    [[ -f "$APP_EARLY/Contents/MacOS/$bin" ]] || continue
+    set +e
+    "$APP_EARLY/Contents/MacOS/$bin" --help >/dev/null 2>&1
+    rc=$?
+    set -e
+    if [[ $rc -eq 137 ]]; then
+      echo "✗ $bin is SIGKILLed on exec — it still carries entitlements it cannot use."
+      echo "  This is the bug that shipped in 1.1.29-1.1.32. Refusing to ship."
+      exit 1
+    fi
+    echo "  ✓ $bin execs (exit $rc, not SIGKILL)"
+  done
+fi
+
 # Post-build gate: the app must actually LAUNCH.
 #
 # The only check that catches a restricted-entitlement/profile mismatch is a real launch —
