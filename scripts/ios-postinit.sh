@@ -215,4 +215,13 @@ export PATH="$HOME/.cargo/bin:$PATH"
 # source icons so a build never dirties the working tree. (To change the brand, run
 # `cargo tauri icon` manually and commit `icons/` — that's a deliberate act, not a build.)
 git -C "$ROOT" checkout -- gui/src-tauri/icons/ 2>/dev/null || true
+# It rewrites the ANDROID adaptive-icon foregrounds too, and those are tracked and are NOT
+# what `cargo tauri icon` produces: they carry the safe-zone padding added in 3c252d1
+# (content inset to 84..348 of 432, so the launcher's circular mask does not crop the mark).
+# A fresh generate fills the full 432 square and silently undoes that, which is easy to
+# commit by accident since it looks like five innocuous .png diffs. This is an iOS script;
+# it has no business touching Android output at all. [T — caught 2026-07-30, bbox went
+# (84,84,348,348) → (0,0,432,432) after a routine ios-postinit run]
+git -C "$ROOT" checkout -- gui/src-tauri/gen/android/app/src/main/res/ 2>/dev/null || true
 echo "✓ app icons regenerated from icons/icon_source.png (canonical 'An') — prevents swirl regression"
+echo "✓ tracked icon sets (icons/, Android mipmaps) restored — build leaves no icon diffs"
