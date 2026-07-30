@@ -121,7 +121,7 @@ jobs:
           if ($LASTEXITCODE -ne 0 -or -not $pub) { throw "mesh pubkey failed" }
           Write-Host "OK mesh genkey | mesh pubkey -> $pub"
 
-      - name: Publish to R2 (get.ankayma.com/windows-headless/)
+      - name: Publish to R2 beta channel (get.ankayma.com/windows-headless/beta/)
         shell: pwsh
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
@@ -131,9 +131,13 @@ jobs:
           $dist = (Resolve-Path "dist\*").Path
           $version = Split-Path $dist -Leaf
           $ep = "${{ secrets.R2_ENDPOINT }}"
-          aws s3 sync "$dist/" "s3://${{ secrets.R2_BUCKET_MACOS }}/windows-headless/$version/" --endpoint-url "$ep"
-          aws s3 sync "$dist/" "s3://${{ secrets.R2_BUCKET_MACOS }}/windows-headless/latest/" --endpoint-url "$ep"
-          aws s3 cp "dist/$version/install-windows.ps1" "s3://${{ secrets.R2_BUCKET_MACOS }}/windows-headless/install.ps1" --endpoint-url "$ep"
+          # BETA ONLY — see promote.yml. Same reasoning as the macOS headless channel.
+          aws s3 sync "$dist/" "s3://${{ secrets.R2_BUCKET_MACOS }}/windows-headless/beta/$version/" --endpoint-url "$ep"
+          aws s3 sync "$dist/" "s3://${{ secrets.R2_BUCKET_MACOS }}/windows-headless/beta/latest/" --endpoint-url "$ep"
+          # The installer script itself also stays on beta. Publishing it to the stable
+          # path would hand every new install a script pointing at binaries nobody has
+          # tested — the artifacts would be gated while the thing that fetches them was not.
+          aws s3 cp "dist/$version/install-windows.ps1" "s3://${{ secrets.R2_BUCKET_MACOS }}/windows-headless/beta/install.ps1" --endpoint-url "$ep"
 
       - name: Attest build provenance
         continue-on-error: true

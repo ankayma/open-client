@@ -103,18 +103,29 @@ jobs:
           [ -n "$PUB" ]
           echo "✓ mesh genkey | mesh pubkey -> $PUB"
 
-      - name: Publish to R2 (get.ankayma.com/macos-headless/)
+      - name: Publish to R2 beta channel (get.ankayma.com/macos-headless/beta/)
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
           AWS_DEFAULT_REGION: auto
         run: |
           set -euo pipefail
-          VERSION="$(sed -n 's/^version *= *"\(.*\)"/\1/p' Cargo.toml | head -1)"
+          # tauri.conf.json, not Cargo.toml — the workspace crate version is not the
+          # release version (it read 1.1.8 while the tag was v1.1.33), and this step
+          # derived it independently of the script, so fixing one left the other wrong.
+          VERSION="$(sed -n 's/.*"version": *"\(.*\)".*/\1/p' gui/src-tauri/tauri.conf.json | head -1)"
+          [ -n "$VERSION" ] || { echo "✗ could not read version"; exit 1; }
           EP="${{ secrets.R2_ENDPOINT }}"
-          aws s3 sync "dist/$VERSION/" "s3://${{ secrets.R2_BUCKET_MACOS }}/macos-headless/$VERSION/" --endpoint-url "$EP"
-          aws s3 sync "dist/$VERSION/" "s3://${{ secrets.R2_BUCKET_MACOS }}/macos-headless/latest/" --endpoint-url "$EP"
-          aws s3 cp "dist/$VERSION/install-macos-headless.sh" "s3://${{ secrets.R2_BUCKET_MACOS }}/macos-headless/install.sh" --endpoint-url "$EP"
+          # BETA ONLY — promote.yml copies this to the stable prefix once a real machine
+          # has installed from it. Headless has no self-update: upgrading means re-running
+          # install.sh, so "channel" here is simply which prefix that script downloads from,
+          # and the script already takes ANKAYMA_BASE_URL. Nothing in it needed changing.
+          aws s3 sync "dist/$VERSION/" "s3://${{ secrets.R2_BUCKET_MACOS }}/macos-headless/beta/$VERSION/" --endpoint-url "$EP"
+          aws s3 sync "dist/$VERSION/" "s3://${{ secrets.R2_BUCKET_MACOS }}/macos-headless/beta/latest/" --endpoint-url "$EP"
+          # The installer script stays on beta too. Publishing it to the stable path would
+          # hand every new install a script pointing at binaries nobody has tested — the
+          # artifacts would be gated while the thing that fetches them was not.
+          aws s3 cp "dist/$VERSION/install-macos-headless.sh" "s3://${{ secrets.R2_BUCKET_MACOS }}/macos-headless/beta/install.sh" --endpoint-url "$EP"
 
       - name: Attest build provenance
         continue-on-error: true

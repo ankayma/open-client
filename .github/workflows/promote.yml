@@ -19,15 +19,16 @@ on:
       tag:
         description: "Tag to promote, e.g. v1.1.34 (must already be on the beta channel)"
         required: true
-      platform:
+      channel:
         description: "Which channel to promote"
         required: true
-        default: macos
+        default: gui-macos
         type: choice
-        options: [macos]
+        options: [gui-macos, headless-macos, headless-windows]
 
 jobs:
-  promote:
+  promote-gui-macos:
+    if: inputs.channel == 'gui-macos'
     runs-on: macos-14
     timeout-minutes: 20
     permissions:
@@ -132,3 +133,81 @@ jobs:
           echo "sidecars exec'd, signature present, DMG stapled and Gatekeeper-accepted." >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
           echo "To roll back: re-run this workflow with the previous tag." >> "$GITHUB_STEP_SUMMARY"
+
+  # Headless has no self-update: upgrading is re-running install.sh, so the "channel" is
+  # simply which prefix that script downloads from — and it already takes
+  # ANKAYMA_BASE_URL, so nothing in the installer needed changing. What still has to be
+  # gated is the same thing: nobody should be pointed at binaries no machine has run.
+  promote-headless:
+    if: inputs.channel != 'gui-macos'
+    runs-on: macos-14
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve prefix
+        run: |
+          case "${{ inputs.channel }}" in
+            headless-macos)   echo "PREFIX=macos-headless"   >> "$GITHUB_ENV"; echo "INSTALLER=install.sh"     >> "$GITHUB_ENV" ;;
+            headless-windows) echo "PREFIX=windows-headless" >> "$GITHUB_ENV"; echo "INSTALLER=install.ps1"    >> "$GITHUB_ENV" ;;
+            *) echo "unknown channel"; exit 1 ;;
+          esac
+
+      - name: Fetch the beta build
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: auto
+        run: |
+          set -euo pipefail
+          V="${{ inputs.tag }}"; V="${V#v}"
+          echo "V=$V" >> "$GITHUB_ENV"
+          aws s3 sync "s3://${{ secrets.R2_BUCKET_MACOS }}/$PREFIX/beta/$V/" beta/ \
+            --endpoint-url "${{ secrets.R2_ENDPOINT }}"
+          ls -l beta/
+          test -s beta/SHA256SUMS || { echo "✗ no build for $V on the beta channel"; exit 1; }
+
+      # Checksums first: everything below is only meaningful if these are the bytes the
+      # build produced.
+      - name: Gate — checksums, signature, and the binaries actually run
+        run: |
+          set -euo pipefail
+          ( cd beta && shasum -a 256 -c SHA256SUMS )
+          if [ -f beta/SHA256SUMS.sig ] && [ -f beta/cosign.pub ]; then
+            command -v cosign >/dev/null || brew install cosign
+            cosign verify-blob --insecure-ignore-tlog --key beta/cosign.pub \
+              --signature beta/SHA256SUMS.sig beta/SHA256SUMS
+          else
+            echo "✗ SHA256SUMS is unsigned — refusing to promote"; exit 1
+          fi
+          # Only the macOS binaries can be executed on this runner. 137 is SIGKILL, which
+          # is what a binary carrying entitlements nothing authorises looks like from
+          # outside, and what no signature check can see.
+          if [ "${{ inputs.channel }}" = "headless-macos" ]; then
+            for b in agent-macos-universal mesh-macos-universal; do
+              chmod +x "beta/$b"
+              set +e; "beta/$b" --help >/dev/null 2>&1; rc=$?; set -e
+              [ "$rc" -eq 137 ] && { echo "✗ $b is SIGKILLed on exec"; exit 1; }
+              echo "  ✓ $b execs (exit $rc)"
+            done
+          else
+            echo "  · Windows binaries cannot be exec'd here — the release workflow's SCM"
+            echo "    and mesh smoke-tests on windows-latest are what cover that."
+          fi
+
+      - name: Publish to the stable channel
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: auto
+        run: |
+          set -euo pipefail
+          B="s3://${{ secrets.R2_BUCKET_MACOS }}/$PREFIX"
+          EP="${{ secrets.R2_ENDPOINT }}"
+          aws s3 sync beta/ "$B/$V/"      --endpoint-url "$EP"
+          aws s3 sync beta/ "$B/latest/"  --endpoint-url "$EP"
+          # The installer last: until it moves, `curl | sh` still fetches the previous
+          # build, so a failure midway leaves users on the old one rather than half-moved.
+          aws s3 cp "s3://${{ secrets.R2_BUCKET_MACOS }}/$PREFIX/beta/$INSTALLER" \
+            "$B/$INSTALLER" --endpoint-url "$EP"
+          echo "✓ $PREFIX $V promoted"
