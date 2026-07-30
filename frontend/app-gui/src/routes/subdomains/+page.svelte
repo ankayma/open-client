@@ -280,18 +280,36 @@
 						</svg>
 						Add subdomain
 					</button>
-					<button
-						class="add-demo-btn"
-						onclick={addSampleDemo}
-						disabled={publishingDemo}
-						aria-label="Publish a sample demo"
-					>
-						{#if publishingDemo}
-							<span class="spinner spinner-dim"></span>
-						{:else}
-							Add demo
-						{/if}
-					</button>
+					<!-- "Add demo" is withdrawn from the UI. It self-hosted a page on this
+					     machine's own overlay address, so opening it meant connecting to
+					     yourself over the overlay plus TLS/SNI — the hardest network path in
+					     the product, serving the smallest feature in it. Fixed three times
+					     (ephemeral port per GUI process → fixed port in the daemon → hairpin
+					     in the pump) and it still fails: the address is assigned to utun,
+					     routed via lo0, and the agent is listening on exactly that
+					     address:443, yet the SYN never arrives. The next layer down is
+					     kernel/socket behaviour, which differs per OS, so the remaining work
+					     is unbounded.
+					     Demoing from another node works and involves no hairpin at all —
+					     `ankayma-demo` handshakes continuously today. That is the route to
+					     revive this, not another patch here.
+					     Backend commands (publish_sample_demo / unpublish_sample_demo) are
+					     left in place so existing sample subdomains can still be removed from
+					     the list above. [T — diagnosed 2026-07-30] -->
+					{#if false}
+						<button
+							class="add-demo-btn"
+							onclick={addSampleDemo}
+							disabled={publishingDemo}
+							aria-label="Publish a sample demo"
+						>
+							{#if publishingDemo}
+								<span class="spinner spinner-dim"></span>
+							{:else}
+								Add demo
+							{/if}
+						</button>
+					{/if}
 				</div>
 			{/if}
 		</div>
