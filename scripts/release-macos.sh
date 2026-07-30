@@ -58,7 +58,7 @@ if grep -q '"entitlements"' tauri.conf.json; then
     | grep -F "$APPLE_SIGNING_IDENTITY" | head -1 | awk '{print $2}')
   if [[ -n "$SIGN_SHA" ]]; then
     if ! security cms -D -i "$PROFILE" 2>/dev/null \
-      | python3 -c 'import plistlib,sys,hashlib; print("\n".join(hashlib.sha1(c).hexdigest().upper() for c in plistlib.load(sys.stdin.buffer).get("DeveloperCertificates",[])))' \
+      | python3 -c 'import plistlib,sys,hashlib; d=plistlib.loads(sys.stdin.buffer.read()); print("\n".join(hashlib.sha1(c).hexdigest().upper() for c in d.get("DeveloperCertificates",[])))' \
       | grep -qi "$SIGN_SHA"; then
       echo "✗ $PROFILE does not list the signing certificate ($SIGN_SHA)."
       echo "  The app would be refused at launch. Regenerate the profile against this cert."
