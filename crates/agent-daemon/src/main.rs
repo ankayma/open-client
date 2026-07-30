@@ -30,6 +30,8 @@ mod up;
 mod win_ipc;
 #[cfg(target_os = "windows")]
 mod win_service;
+#[cfg(target_os = "windows")]
+mod win_service_headless;
 mod win_supervisor;
 
 use anyhow::Result;
@@ -44,8 +46,9 @@ async fn main() -> Result<()> {
     // `agent up …` brings the WireGuard overlay online (data plane);
     // `agent ci-deploy …` does a secretless CI deploy (Part C §H.3.3);
     // `agent ssh <node> …` opens a Sovereign SSH session (F-2, Part C §H.3.6.1);
-    // `agent enroll-identity …` redeems a non-human/agent identity (F-4). Anything
-    // else stays the existing Gate A.1.4 NATS encryption harness.
+    // `agent enroll-identity …` redeems a non-human/agent identity (F-4);
+    // `agent service-headless` is the unattended Windows Server entrypoint.
+    // Anything else stays the existing Gate A.1.4 NATS encryption harness.
     match args.first().map(String::as_str) {
         Some("up") => up::run(&args[1..]).await,
         Some("ci-deploy") => ci_deploy::run(&args[1..]).await,
@@ -69,6 +72,21 @@ async fn main() -> Result<()> {
             #[cfg(not(target_os = "windows"))]
             {
                 anyhow::bail!("`agent service` is Windows-only")
+            }
+        }
+        // SCM's registered binPath for the headless-server Windows Service.
+        // Unlike `service` above, this spawns `agent up` on its own at
+        // SERVICE_START — no GUI, no named-pipe Connect — for unattended
+        // Windows Server deployments. See win_service_headless.rs.
+        Some("service-headless") => {
+            #[cfg(target_os = "windows")]
+            {
+                win_service_headless::run()
+                    .map_err(|e| anyhow::anyhow!("agent service-headless: {e}"))
+            }
+            #[cfg(not(target_os = "windows"))]
+            {
+                anyhow::bail!("`agent service-headless` is Windows-only")
             }
         }
         _ => run_gate(args).await,
