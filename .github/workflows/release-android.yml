@@ -219,6 +219,20 @@ jobs:
           ANDROID_UPLOAD_KEY_PASSWORD: ${{ secrets.ANDROID_UPLOAD_KEY_PASSWORD }}
         run: |
           set -euo pipefail
+          # Lane B is the Play Store path and is OPTIONAL: the upload keystore is a
+          # separate key from the APK signing key and may simply not be configured yet.
+          # It must never take Lane A down with it — when these secrets were missing the
+          # step fed jarsigner an empty keystore ("Tag number over 30 is not supported"),
+          # failed the job, and every step after it was skipped, including Publish to R2.
+          # Net effect: no Android build reached get.ankayma.com at all because an
+          # unrelated store lane was unconfigured. [T — v1.1.29, 2026-07-30]
+          if [ -z "${ANDROID_UPLOAD_KEYSTORE_BASE64:-}" ]; then
+            echo "  ⊘ ANDROID_UPLOAD_KEYSTORE_BASE64 not set — skipping the Play AAB."
+            echo "    Lane A (APK → R2) is unaffected. Set the four ANDROID_UPLOAD_* secrets"
+            echo "    to enable Play Console uploads."
+            echo "AAB_SIGNED=0" >> "$GITHUB_ENV"
+            exit 0
+          fi
           UNSIGNED_AAB="$(find gui/src-tauri/gen/android -path '*release*' -name '*.aab' ! -path '*debug*' | head -1)"
           [ -n "$UNSIGNED_AAB" ] || { echo "✗ release AAB not found under gen/android" >&2; exit 1; }
           echo "  → found: $UNSIGNED_AAB"
@@ -243,12 +257,14 @@ jobs:
           jarsigner -verify -verbose:summary "$AAB_OUT"
           rm -f "$RUNNER_TEMP/ankayma-upload.jks"
           echo "AAB_OUT=$AAB_OUT" >> "$GITHUB_ENV"
+          echo "AAB_SIGNED=1" >> "$GITHUB_ENV"
           echo "  ✓ AAB signed with Play upload key"
 
       # The AAB does not go to R2. Download it from here and upload it to Play Console.
       # Once the app exists in Play Console (it must be created manually once), this can
       # be replaced by r0adkll/upload-google-play with a service account.
       - name: Upload AAB as workflow artifact (for Play Console)
+        if: env.AAB_SIGNED == '1'
         uses: actions/upload-artifact@v4
         with:
           name: play-aab-${{ github.ref_name }}
@@ -296,9 +312,16 @@ jobs:
 
       # SLSA build provenance (Sigstore + Rekor) for both artifacts. Last step — the APK
       # is already on R2, so a hiccup here never blocks the release.
-      - name: Attest build provenance (.apk + .aab)
+      # Split from the AAB attestation below: a glob that matches nothing fails the
+      # action, so keeping both in one step would let the optional Play lane break
+      # provenance for the APK that Lane A already shipped.
+      - name: Attest build provenance (.apk)
         uses: actions/attest-build-provenance@v2
         with:
-          subject-path: |
-            publish/*.apk
-            publish-play/*.aab
+          subject-path: publish/*.apk
+
+      - name: Attest build provenance (.aab)
+        if: env.AAB_SIGNED == '1'
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: publish-play/*.aab
