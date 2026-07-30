@@ -23,7 +23,12 @@ $ErrorActionPreference = "Stop"
 
 Set-Location (Join-Path $PSScriptRoot "..")
 
-$versionMatch = Select-String -Path "Cargo.toml" -Pattern '^version *= *"(.*)"' | Select-Object -First 1
+# Same version source as every other release artifact. The workspace Cargo.toml version is
+# a crate version and does not track releases - it read 1.1.8 while the tag being built was
+# v1.1.33, which would publish under a number matching nothing a user can see.
+# tauri.conf.json is what the DMG, the updater manifest and the tag all derive from.
+$versionMatch = Select-String -Path "gui/src-tauri/tauri.conf.json" -Pattern '"version" *: *"(.*)"' | Select-Object -First 1
+if (-not $versionMatch) { throw "could not read version from gui/src-tauri/tauri.conf.json" }
 $Version = $versionMatch.Matches[0].Groups[1].Value
 $Out = "dist/$Version"
 

@@ -48,7 +48,14 @@ jobs:
         run: |
           set -euo pipefail
           curl -sSfL "https://github.com/sigstore/cosign/releases/download/${COSIGN_VERSION}/cosign-windows-amd64.exe" -o cosign.exe
-          echo "$PWD" >> "$GITHUB_PATH"
+          # This step runs under Git Bash, where $PWD is a POSIX path (/d/a/repo/repo).
+          # PATH entries are consumed by the pwsh step that follows, which cannot resolve
+          # that form — so cosign.exe was downloaded and then never found, and the build
+          # died on "cosign not installed" with the binary sitting right there. Convert to
+          # the Windows form. [T — v1.1.33 release-windows-headless failed exactly here]
+          cygpath -w "$PWD" >> "$GITHUB_PATH"
+          # Prove it resolves now rather than discovering it two steps later.
+          "$PWD/cosign.exe" version >/dev/null || { echo "✗ cosign.exe is not runnable" >&2; exit 1; }
           if [ -n "$COSIGN_PRIVATE_KEY" ]; then
             echo "$COSIGN_PRIVATE_KEY" | base64 -d > cosign.key
           fi

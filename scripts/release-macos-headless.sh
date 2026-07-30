@@ -43,7 +43,12 @@ if [[ -z "${APPLE_API_KEY:-}" && -z "${APPLE_ID:-}" ]]; then
   exit 1
 fi
 
-VERSION="$(sed -n 's/^version *= *"\(.*\)"/\1/p' Cargo.toml | head -1)"
+# Same version source as every other release artifact. The workspace Cargo.toml version
+# is a crate version and does not track releases — it read 1.1.8 while the tag being
+# built was v1.1.33, so this published under a number that matched nothing a user could
+# see. tauri.conf.json is what the DMG, the updater manifest and the tag all derive from.
+VERSION="$(sed -n 's/.*"version": *"\(.*\)".*/\1/p' gui/src-tauri/tauri.conf.json | head -1)"
+[[ -n "$VERSION" ]] || { echo "✗ could not read version from gui/src-tauri/tauri.conf.json" >&2; exit 1; }
 OUT="dist/$VERSION"
 
 rustup target add x86_64-apple-darwin aarch64-apple-darwin >/dev/null 2>&1 || true
@@ -83,9 +88,35 @@ for f in "$NOTARIZE_ZIP.agent.zip" "$NOTARIZE_ZIP.mesh.zip"; do
 done
 rm -f "$NOTARIZE_ZIP.agent.zip" "$NOTARIZE_ZIP.mesh.zip"
 
-echo "→ Post-notarization gate: spctl must accept both binaries …"
-spctl -a -vv -t execute "$OUT/agent-macos-universal"
-spctl -a -vv -t execute "$OUT/mesh-macos-universal"
+# Post-notarization gate.
+#
+# NOT spctl. `spctl -a` assesses against Gatekeeper's *app* policy and rejects every
+# command-line binary with "the code is valid but does not seem to be an app", however
+# well signed and notarized it is — `-t execute` does not change that. It is a false
+# negative by construction: the same check rejects the `agent` inside the shipped,
+# notarized Ankayma.app while accepting the .app around it. This gate failed v1.1.33
+# after notarization had already returned Accepted. [T — reproduced 2026-07-30 against
+# the released 1.1.33 DMG]
+#
+# A bare Mach-O also cannot be stapled: the ticket attaches to the notarized archive,
+# not to the executable, so `stapler validate` on the binary is meaningless too. What is
+# checkable here is that the signature is intact and hardened, and that the notarization
+# submission was accepted (asserted above by notarytool --wait, which is non-zero on
+# rejection). Gatekeeper on the user's machine resolves the ticket online.
+echo "→ Post-notarization gate: signatures must verify strictly …"
+for b in agent-macos-universal mesh-macos-universal; do
+  codesign --verify --strict --verbose=1 "$OUT/$b"
+  # Hardened runtime is what notarization requires; a binary that lost it would have
+  # been rejected above, so this is a cheap assertion that we shipped what we signed.
+  codesign -d --verbose=2 "$OUT/$b" 2>&1 | grep -q "flags=.*runtime" \
+    || { echo "✗ $b is not hardened-runtime signed" >&2; exit 1; }
+  # And it has to actually run: 137 is SIGKILL, which is what a binary carrying
+  # entitlements nothing authorises looks like from outside — silent, and invisible to
+  # every signature check. That failure mode shipped four times in the GUI pipeline.
+  set +e; "$OUT/$b" --help >/dev/null 2>&1; rc=$?; set -e
+  [[ $rc -eq 137 ]] && { echo "✗ $b is SIGKILLed on exec" >&2; exit 1; }
+  echo "  ✓ $b verifies, hardened, execs (exit $rc)"
+done
 
 cp cosign.pub "$OUT/cosign.pub"
 cp scripts/install-macos-headless.sh "$OUT/install-macos-headless.sh"
