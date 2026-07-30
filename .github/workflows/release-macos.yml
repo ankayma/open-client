@@ -139,19 +139,23 @@ jobs:
             "platforms": {
               "darwin-universal": {
                 "signature": "$SIGNATURE",
-                "url": "https://get.ankayma.com/macos/$(basename "$UPDATER_ARCHIVE")"
+                "url": "https://get.ankayma.com/macos/beta/$(basename "$UPDATER_ARCHIVE")"
               }
             }
           }
           EOF
 
-      - name: Publish to R2 (get.ankayma.com)
+      # BETA CHANNEL ONLY. A tag build reaches nobody until `promote.yml` copies it to
+      # the stable path — see that workflow for why. Four macOS releases on 2026-07-30
+      # shipped a tunnel that could not start, and all four went to every user instantly,
+      # because publishing an artifact and delivering it were the same step.
+      - name: Publish to R2 beta channel (get.ankayma.com/macos/beta/)
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
           AWS_DEFAULT_REGION: auto
         run: |
-          aws s3 sync publish/ "s3://${{ secrets.R2_BUCKET_MACOS }}/macos/" --endpoint-url "${{ secrets.R2_ENDPOINT }}"
+          aws s3 sync publish/ "s3://${{ secrets.R2_BUCKET_MACOS }}/macos/beta/" --endpoint-url "${{ secrets.R2_ENDPOINT }}"
 
       # macOS user-facing download lives on the GitHub Release (the .dmg); the R2
       # copy above is the auto-updater channel (latest.json + .app.tar.gz). Tags only —
@@ -179,12 +183,16 @@ jobs:
           \`\`\`
 
           _Linux headless CLI: \`curl -sSfL https://get.ankayma.com/install.sh | sh\`. macOS auto-update is served from get.ankayma.com; this DMG is the first-install download._
+
+          **Not yet released to users.** This build sits on the beta channel until it has been tested on a real machine and promoted.
           EOF
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release upload "$TAG" "$DMG" --clobber
             gh release edit "$TAG" --title "Ankayma $TAG (macOS)" --notes-file "$RUNNER_TEMP/relnotes.md"
           else
-            gh release create "$TAG" "$DMG" --title "Ankayma $TAG (macOS)" --notes-file "$RUNNER_TEMP/relnotes.md"
+            # Prerelease: the DMG is downloadable for testers but GitHub does not offer
+            # it as "Latest". promote.yml flips it once the beta channel has been tested.
+            gh release create "$TAG" "$DMG" --title "Ankayma $TAG (macOS)" --notes-file "$RUNNER_TEMP/relnotes.md" --prerelease
           fi
 
       # SLSA build provenance on the DMG (Sigstore + Rekor). Best-effort ONLY:

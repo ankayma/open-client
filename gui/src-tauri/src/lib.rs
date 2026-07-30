@@ -4015,6 +4015,27 @@ fn handle_tray_menu(app: &AppHandle, event: tauri::menu::MenuEvent) {
 
 // --- Auto-update (desktop, release builds — see run()) ---
 
+/// Which update channel this machine follows: the contents of `~/.ankayma/update-channel`,
+/// or "stable" when that file is absent — which is every machine except the ones a tester
+/// deliberately opts in.
+///
+/// A file rather than a setting in the UI, on purpose. This is not a preference: a machine
+/// on `beta` receives builds that nobody has confirmed yet, so switching should take a
+/// deliberate act, not a stray tap. It also keeps the binary identical on both channels —
+/// baking the endpoint in at build time would mean the build under test is not the build
+/// that gets promoted, which defeats the point of testing it.
+#[cfg(all(desktop, not(debug_assertions)))]
+fn update_channel() -> String {
+    std::env::var("HOME")
+        .ok()
+        .map(std::path::PathBuf::from)
+        .map(|h| h.join(".ankayma/update-channel"))
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .map(|s| s.trim().to_lowercase())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "stable".to_string())
+}
+
 #[cfg(all(desktop, not(debug_assertions)))]
 async fn check_for_update(app: AppHandle) -> tauri_plugin_updater::Result<()> {
     // AppHandle::restart() is inherent to tauri core (2.11+) — no
@@ -4022,7 +4043,25 @@ async fn check_for_update(app: AppHandle) -> tauri_plugin_updater::Result<()> {
     // `init()`; verified via docs.rs, no ProcessExt at its crate root].
     use tauri_plugin_updater::UpdaterExt;
 
-    let Some(update) = app.updater()?.check().await? else {
+    // Endpoints can be overridden at runtime, which is what makes one binary able to
+    // follow either channel. [T:v2.tauri.app/plugin/updater — "setting the URLs … at
+    // runtime allows more dynamic updates such as separate release channels"]
+    let mut builder = app.updater_builder();
+    let channel = update_channel();
+    if channel != "stable" {
+        // Only the tarball path differs; the manifest and signature scheme are identical,
+        // so a beta machine exercises the exact delivery path a stable one will.
+        let url = format!("https://get.ankayma.com/macos/{channel}/latest.json");
+        log::info!("update channel: {channel} ({url})");
+        match url.parse() {
+            Ok(u) => builder = builder.endpoints(vec![u])?,
+            // A typo in the channel file must not strand the machine with no updates at
+            // all — fall back to stable and say so.
+            Err(e) => log::warn!("bad update-channel {channel:?} ({e}) — using stable"),
+        }
+    }
+
+    let Some(update) = builder.build()?.check().await? else {
         return Ok(());
     };
     log::info!("update available: {}", update.version);

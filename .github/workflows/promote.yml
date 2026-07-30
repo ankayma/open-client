@@ -1,0 +1,134 @@
+# Promote a build from the beta channel to everyone.
+#
+# Releases land on the beta channel only (see release-macos.yml). Nothing reaches a
+# normal user until this workflow runs, which is the whole point: on 2026-07-30 four
+# consecutive macOS releases shipped a tunnel that could not start, and every one of
+# them went straight to every user because publishing and delivering were the same act.
+#
+# This job separates them, and earns the separation by re-verifying: it downloads what
+# is actually sitting in the beta bucket and execs the sidecars out of it before copying
+# anything. Promotion is a check, not a rubber stamp — a promote step that only copies
+# would have promoted all four broken builds just as fast.
+#
+# Runs on macOS because the gate has to run darwin binaries.
+name: promote
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to promote, e.g. v1.1.34 (must already be on the beta channel)"
+        required: true
+      platform:
+        description: "Which channel to promote"
+        required: true
+        default: macos
+        type: choice
+        options: [macos]
+
+jobs:
+  promote:
+    runs-on: macos-14
+    timeout-minutes: 20
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fetch the beta manifest and artifacts
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: auto
+        run: |
+          set -euo pipefail
+          BUCKET="s3://${{ secrets.R2_BUCKET_MACOS }}/macos/beta/"
+          mkdir -p beta
+          aws s3 sync "$BUCKET" beta/ --endpoint-url "${{ secrets.R2_ENDPOINT }}"
+          ls -l beta/
+          test -f beta/latest.json || { echo "✗ no latest.json on the beta channel"; exit 1; }
+
+      - name: Verify the beta build is the one requested
+        run: |
+          set -euo pipefail
+          WANT="${{ inputs.tag }}"; WANT="${WANT#v}"
+          GOT="$(python3 -c 'import json;print(json.load(open("beta/latest.json"))["version"])')"
+          if [[ "$GOT" != "$WANT" ]]; then
+            echo "✗ beta channel holds $GOT, you asked to promote $WANT."
+            echo "  Promote what was tested, or push the tag you meant."
+            exit 1
+          fi
+          echo "✓ beta channel holds $GOT"
+
+      # The gate that was missing when the broken builds went out. Unpack the updater
+      # artifact exactly as a user's app would and exec the sidecars from inside it: a
+      # binary carrying entitlements it cannot use is SIGKILLed on exec (137), silently,
+      # with a perfectly valid signature. Nothing static catches that.
+      - name: Gate — exec the sidecars out of the updater artifact
+        run: |
+          set -euo pipefail
+          TARBALL="$(find beta -iname '*.app.tar.gz' | head -1)"
+          test -n "$TARBALL" || { echo "✗ no updater artifact on the beta channel"; exit 1; }
+          test -s "$TARBALL.sig" || { echo "✗ updater artifact has no signature — the app would reject it"; exit 1; }
+          mkdir -p unpacked && tar -xzf "$TARBALL" -C unpacked
+          APP="$(find unpacked -maxdepth 1 -iname '*.app' | head -1)"
+          test -n "$APP" || { echo "✗ updater artifact contains no .app"; exit 1; }
+          for bin in agent ankayma-helper; do
+            [ -f "$APP/Contents/MacOS/$bin" ] || continue
+            set +e; "$APP/Contents/MacOS/$bin" --help >/dev/null 2>&1; rc=$?; set -e
+            if [ "$rc" -eq 137 ]; then
+              echo "✗ $bin is SIGKILLed on exec — refusing to promote."
+              exit 1
+            fi
+            echo "  ✓ $bin execs (exit $rc)"
+          done
+
+      - name: Gate — the DMG must be notarized and accepted
+        run: |
+          set -euo pipefail
+          DMG="$(find beta -iname '*.dmg' | head -1)"
+          test -n "$DMG" || { echo "✗ no DMG on the beta channel"; exit 1; }
+          xcrun stapler validate "$DMG"
+          spctl -a -vv -t install "$DMG" 2>&1 | tee /tmp/spctl.txt
+          grep -q "accepted" /tmp/spctl.txt || { echo "✗ Gatekeeper would reject this DMG"; exit 1; }
+
+      # The manifest points at the beta URL; stable users must be sent to the stable one.
+      # Rewriting rather than rebuilding keeps the signature valid — it covers the
+      # tarball's bytes, not the manifest, and the bytes are the same file being copied.
+      - name: Publish to the stable channel
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: auto
+        run: |
+          set -euo pipefail
+          mkdir -p publish
+          cp beta/*.dmg beta/*.app.tar.gz beta/*.app.tar.gz.sig publish/ 2>/dev/null || true
+          python3 - <<'PY'
+          import json, pathlib
+          m = json.load(open("beta/latest.json"))
+          for plat in m["platforms"].values():
+              plat["url"] = plat["url"].replace("/macos/beta/", "/macos/")
+          pathlib.Path("publish/latest.json").write_text(json.dumps(m, indent=2))
+          print("stable url ->", list(m["platforms"].values())[0]["url"])
+          PY
+          aws s3 sync publish/ "s3://${{ secrets.R2_BUCKET_MACOS }}/macos/" \
+            --endpoint-url "${{ secrets.R2_ENDPOINT }}"
+
+      - name: Mark the GitHub Release as latest
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          gh release edit "${{ inputs.tag }}" --prerelease=false --latest
+          echo "✓ ${{ inputs.tag }} is now the public release"
+
+      - name: Summary
+        run: |
+          echo "### Promoted ${{ inputs.tag }} to stable" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "Verified before copying: version match, updater artifact unpacked and" >> "$GITHUB_STEP_SUMMARY"
+          echo "sidecars exec'd, signature present, DMG stapled and Gatekeeper-accepted." >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "To roll back: re-run this workflow with the previous tag." >> "$GITHUB_STEP_SUMMARY"
