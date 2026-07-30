@@ -1638,6 +1638,151 @@ pub async fn platform_key_status(
     Ok(r.registered)
 }
 
+/// One enrolled step-up factor as the settings screen needs to show it.
+/// `id` is the server's `key_id` (biometric) or `credential_id` (security key) —
+/// the handle the DELETE endpoint takes.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct StepUpFactor {
+    pub id: String,
+    pub label: Option<String>,
+    pub created_at: Option<String>,
+    pub last_used_at: Option<String>,
+}
+
+/// List the caller's enrolled Touch ID/Face ID keys.
+///
+/// Deliberately calls the OLD `platform-key/status` path, not the clearer
+/// `biometric/status` alias. Regional control planes update independently, and a
+/// region that has not pulled the rename yet would 404 the new path — whereas the
+/// old one answers on both, and on a pre-rename server simply returns no `keys`
+/// field, which `serde(default)` turns into an empty list. Degrading to "no keys
+/// to show" beats an error the user cannot act on. The DELETE below has no such
+/// choice: it only ever existed under the clear name.
+pub async fn platform_key_list(
+    http: &reqwest::Client,
+    base_url: &str,
+    session_token: &str,
+) -> Result<Vec<StepUpFactor>, ApiError> {
+    #[derive(serde::Deserialize)]
+    struct Key {
+        key_id: String,
+        label: Option<String>,
+        created_at: Option<String>,
+        last_used_at: Option<String>,
+    }
+    #[derive(serde::Deserialize)]
+    struct Resp {
+        #[serde(default)]
+        keys: Vec<Key>,
+    }
+    let r: Resp = get_json(
+        http,
+        base_url,
+        "/api/v1/stepup/platform-key/status",
+        session_token,
+    )
+    .await?;
+    Ok(r.keys
+        .into_iter()
+        .map(|k| StepUpFactor {
+            id: k.key_id,
+            label: k.label,
+            created_at: k.created_at,
+            last_used_at: k.last_used_at,
+        })
+        .collect())
+}
+
+/// List the caller's enrolled FIDO2 security keys. Same path reasoning as
+/// `platform_key_list`.
+pub async fn security_key_list(
+    http: &reqwest::Client,
+    base_url: &str,
+    session_token: &str,
+) -> Result<Vec<StepUpFactor>, ApiError> {
+    #[derive(serde::Deserialize)]
+    struct Cred {
+        credential_id: String,
+        label: Option<String>,
+        created_at: Option<String>,
+        last_used_at: Option<String>,
+    }
+    #[derive(serde::Deserialize)]
+    struct Resp {
+        #[serde(default)]
+        credentials: Vec<Cred>,
+    }
+    let r: Resp = get_json(
+        http,
+        base_url,
+        "/api/v1/stepup/webauthn/status",
+        session_token,
+    )
+    .await?;
+    Ok(r.credentials
+        .into_iter()
+        .map(|c| StepUpFactor {
+            id: c.credential_id,
+            label: c.label,
+            created_at: c.created_at,
+            last_used_at: c.last_used_at,
+        })
+        .collect())
+}
+
+async fn delete_factor(
+    http: &reqwest::Client,
+    base_url: &str,
+    session_token: &str,
+    path: String,
+    proof_token: Option<&str>,
+) -> Result<(), ApiError> {
+    let base = url(base_url, &path);
+    let endpoint = match proof_token {
+        Some(p) => format!("{base}?proof_token={p}"),
+        None => base,
+    };
+    let resp = http
+        .delete(endpoint)
+        .bearer_auth(session_token)
+        .timeout(CP_REST_TIMEOUT)
+        .send()
+        .await
+        .map_err(|e| ApiError::Transport(e.to_string()))?;
+    expect_ok(resp).await
+}
+
+/// Remove one Touch ID/Face ID key from the account.
+/// `DELETE /api/v1/stepup/biometric/{key_id}` — gated on a `manage_auth_factor`
+/// proof, which is single-use, so one ceremony removes exactly one key.
+pub async fn platform_key_delete(
+    http: &reqwest::Client,
+    base_url: &str,
+    session_token: &str,
+    key_id: &str,
+    proof_token: Option<&str>,
+) -> Result<(), ApiError> {
+    let path = format!("/api/v1/stepup/biometric/{}", key_id.trim_matches('/'));
+    delete_factor(http, base_url, session_token, path, proof_token).await
+}
+
+/// Remove one FIDO2 security key from the account. Same gate; the server refuses
+/// with 409 if this is the last key and the plan floors at AAL3, since nothing
+/// weaker could then authorize registering a replacement.
+pub async fn security_key_delete(
+    http: &reqwest::Client,
+    base_url: &str,
+    session_token: &str,
+    credential_id: &str,
+    proof_token: Option<&str>,
+) -> Result<(), ApiError> {
+    let path = format!(
+        "/api/v1/stepup/security-key/{}",
+        credential_id.trim_matches('/')
+    );
+    delete_factor(http, base_url, session_token, path, proof_token).await
+}
+
 /// `POST /api/v1/stepup/platform-key/register` — `public_key` is the
 /// base64-standard SEC1-uncompressed P-256 point the platform layer just
 /// created in the Secure Enclave (biometryCurrentSet, no passcode fallback).

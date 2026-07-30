@@ -13,7 +13,12 @@
 		webauthnStatus,
 		getPlatform,
 		platformKeyStatus,
-		platformKeyEnroll
+		platformKeyEnroll,
+		platformKeyList,
+		securityKeyList,
+		platformKeyRemove,
+		securityKeyRemove,
+		type StepUpFactor
 	} from '$lib/tauri';
 	import { runWithStepUp } from '$lib/stepup';
 	import { registerSecurityKey, webauthnAvailable } from '$lib/webauthn';
@@ -50,6 +55,7 @@
 		}
 		try {
 			webauthnRegistered = await webauthnStatus();
+			await loadFactors();
 		} catch {
 			webauthnRegistered = false;
 		}
@@ -113,6 +119,70 @@
 		} finally {
 			platformKeyBusy = false;
 		}
+	}
+
+	// Enrolled factors, listed so they can be removed one by one.
+	//
+	// This list exists because the account accumulated keys nobody could see. Every
+	// re-enrolment registers a NEW key on the account, and the enrol path deliberately
+	// destroys the local key first rather than reuse one it cannot verify is still
+	// usable — so a few rounds of debugging leave several keys behind, of which at most
+	// one per device can still sign. Status reported only a count, so none of them were
+	// reachable: you cannot revoke what you cannot name.
+	type FactorRow = StepUpFactor & { kind: 'biometric' | 'security' };
+	let factors = $state<FactorRow[]>([]);
+	let factorsLoaded = $state(false);
+	let factorError = $state('');
+	let removingId = $state('');
+	let confirmingId = $state('');
+
+	async function loadFactors() {
+		try {
+			const [bio, sec] = await Promise.all([
+				platformKeyList().catch(() => [] as StepUpFactor[]),
+				securityKeyList().catch(() => [] as StepUpFactor[])
+			]);
+			factors = [
+				...bio.map((f) => ({ ...f, kind: 'biometric' as const })),
+				...sec.map((f) => ({ ...f, kind: 'security' as const }))
+			];
+		} finally {
+			factorsLoaded = true;
+		}
+	}
+
+	async function removeFactor(f: FactorRow) {
+		removingId = f.id;
+		factorError = '';
+		try {
+			// `manage_auth_factor` is single-use server-side: one ceremony authorizes
+			// exactly one removal, so removing three keys means three ceremonies. That
+			// is the server's deliberate choice, not something to batch around here.
+			await runWithStepUp('manage_auth_factor', (proof) =>
+				f.kind === 'biometric'
+					? platformKeyRemove(f.id, proof?.proofToken)
+					: securityKeyRemove(f.id, proof?.proofToken)
+			);
+			await loadFactors();
+			// The enrol/registered rows above are now stale — re-read rather than
+			// guessing, since removing one of several keys may leave the factor set up.
+			platformKeyRegistered = await platformKeyStatus().catch(() => false);
+			webauthnRegistered = await webauthnStatus().catch(() => false);
+		} catch (e) {
+			factorError = errMsg(e, 'Could not remove this key');
+		} finally {
+			removingId = '';
+			confirmingId = '';
+		}
+	}
+
+	function shortDate(iso: string | null): string {
+		if (!iso) return '';
+		// Postgres `timestamptz::text` is "2026-07-30 12:22:51.05+08", which Safari's
+		// Date parser rejects outright — it wants a `T` and no fractional-second slop.
+		// Slicing beats parsing: the user needs to tell four keys apart, not know the
+		// millisecond. [T: WebKit rejects space-separated datetimes that V8 accepts]
+		return iso.slice(0, 16).replace(' ', ' · ');
 	}
 
 	// Security key (YubiKey/FIDO2) — E-7 StepUp Phase 3, AAL3.
@@ -308,6 +378,52 @@
 		</section>
 	{/if}
 
+	<!-- Rendered on every platform and regardless of what this device supports: the
+	     keys most urgently needing removal are the ones whose hardware is gone. -->
+	{#if factorsLoaded && factors.length > 0}
+		<section class="card">
+			<div class="section-label">Enrolled keys</div>
+			{#each factors as f (f.id)}
+				<div class="row factor">
+					<div class="factor-id">
+						<span class="label">{f.label || (f.kind === 'security' ? 'Security key' : 'Biometric key')}</span>
+						<span class="value dim small">
+							Added {shortDate(f.created_at)}{f.last_used_at
+								? ` · last used ${shortDate(f.last_used_at)}`
+								: ' · never used'}
+						</span>
+					</div>
+					{#if confirmingId === f.id}
+						<div class="confirm">
+							<button
+								class="su-danger"
+								onclick={() => removeFactor(f)}
+								disabled={removingId === f.id}
+							>
+								{removingId === f.id ? 'Removing…' : 'Confirm'}
+							</button>
+							<button class="su-plain" onclick={() => (confirmingId = '')}>Cancel</button>
+						</div>
+					{:else}
+						<button class="su-plain" onclick={() => (confirmingId = f.id)} disabled={!!removingId}>
+							Remove
+						</button>
+					{/if}
+				</div>
+			{/each}
+			<!-- Said once, here, rather than per row: a key can only be removed by
+			     proving a factor, and each removal needs its own proof. -->
+			<div class="row">
+				<span class="value dim small">
+					Removing a key asks you to confirm with another factor, once per key. A key you
+					remove here stops working immediately and cannot be restored — set it up again if
+					you need it.
+				</span>
+			</div>
+			{#if factorError}<p class="err">{factorError}</p>{/if}
+		</section>
+	{/if}
+
 	{#if securityKeySupported}
 		<section class="card">
 			<div class="section-label">Security key</div>
@@ -369,6 +485,68 @@
 		letter-spacing: 0.08em;
 		color: var(--c-text-dim);
 		padding: 10px 16px 6px;
+	}
+
+	.factor {
+		gap: 12px;
+		align-items: flex-start;
+	}
+
+	.factor-id {
+		display: flex;
+		flex-direction: column;
+		gap: 2px;
+		min-width: 0;
+		flex: 1;
+	}
+
+	/* The label carries the device name now, and a phone name can be long. Wrap it
+	   instead of letting it push the Remove button off the row. */
+	.factor-id .label {
+		white-space: normal;
+		overflow-wrap: anywhere;
+	}
+
+	.small {
+		font-size: 11px;
+	}
+
+	.confirm {
+		display: flex;
+		gap: 8px;
+		flex-shrink: 0;
+	}
+
+	.su-danger {
+		background: var(--c-danger, #c0392b);
+		color: #fff;
+		border: none;
+		border-radius: 8px;
+		padding: 6px 12px;
+		font-size: 13px;
+		font-weight: 600;
+		cursor: pointer;
+	}
+
+	.su-danger:disabled {
+		opacity: 0.6;
+		cursor: default;
+	}
+
+	.su-plain {
+		background: transparent;
+		color: var(--c-text-dim);
+		border: 1px solid var(--c-border);
+		border-radius: 8px;
+		padding: 6px 12px;
+		font-size: 13px;
+		cursor: pointer;
+		flex-shrink: 0;
+	}
+
+	.su-plain:disabled {
+		opacity: 0.5;
+		cursor: default;
 	}
 
 	.row {

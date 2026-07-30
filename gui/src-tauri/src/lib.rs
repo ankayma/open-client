@@ -2025,6 +2025,40 @@ fn delete_platform_key() -> Result<(), String> {
 /// the control plane. Key creation itself does not prompt Touch ID (only a
 /// SIGN operation does, per `platform_key_sign_challenge`) — the OS defers the
 /// biometric check to first use.
+/// Label stored alongside a newly enrolled biometric key — e.g. "Face ID · Bao's
+/// iPhone", "Touch ID · MacBook Air".
+///
+/// Every key from every device used to register as the literal string "Touch ID".
+/// That was harmless only for as long as a key could never be taken back: the moment
+/// the settings screen lists keys so one can be removed, four identical rows named
+/// "Touch ID" pose a question nobody can answer. The user cannot tell which device
+/// they are revoking, and the server cannot help: it stores no device identity of its
+/// own, so this label is the only thing that ever distinguished one key from another.
+///
+/// The biometry name comes from `LAContext`, not from the build target. An iPad or an
+/// older iPhone authenticates with Touch ID and a Mac never has Face ID, so deciding
+/// from `target_os` would print a confident lie on hardware the user owns.
+/// [T:LAContext.biometryType — documented as populated once canEvaluatePolicy has run
+///  for a biometric policy; LABiometryType::{TouchID = 1, FaceID = 2}]
+#[cfg(any(target_os = "macos", target_os = "ios"))]
+fn biometric_key_label() -> String {
+    use objc2_local_authentication::{LABiometryType, LAContext, LAPolicy};
+    let ctx = unsafe { LAContext::new() };
+    // biometryType reads .none until a policy evaluation has been attempted; this
+    // asks whether biometry COULD be used and never prompts the user.
+    let _ = unsafe {
+        ctx.canEvaluatePolicy_error(LAPolicy::DeviceOwnerAuthenticationWithBiometrics)
+    };
+    let biometry = match unsafe { ctx.biometryType() } {
+        LABiometryType::FaceID => "Face ID",
+        LABiometryType::TouchID => "Touch ID",
+        // Optic ID and whatever Apple adds next: name the device, don't invent a
+        // biometry that may not be what the user is actually presenting.
+        _ => "Biometrics",
+    };
+    format!("{biometry} · {}", device_hostname())
+}
+
 #[cfg(any(target_os = "macos", target_os = "ios"))]
 #[tauri::command]
 async fn platform_key_enroll(state: State<'_, AppState>) -> Result<(), String> {
@@ -2093,7 +2127,7 @@ async fn platform_key_enroll(state: State<'_, AppState>) -> Result<(), String> {
         &state.regional_base_url(),
         &tok,
         &public_key_b64,
-        Some("Touch ID"),
+        Some(&biometric_key_label()),
     )
     .await
     .map_err(|e| e.to_string())
@@ -2216,6 +2250,83 @@ async fn platform_key_status(state: State<'_, AppState>) -> Result<bool, String>
         .await
         .map_err(|e| e.to_string())?;
     Ok(on_server && find_platform_key(std::ptr::null_mut())?.is_some())
+}
+
+/// List and remove enrolled step-up factors.
+///
+/// Deliberately NOT gated behind `cfg(macos/ios)` like enrolment and signing are.
+/// Those need a Secure Enclave on this machine; these are pure account operations.
+/// A key enrolled on a phone that was lost has to be removable from whatever device
+/// the user still has, and gating removal on owning the hardware would mean the keys
+/// most urgently needing removal are exactly the ones nothing can reach.
+#[tauri::command]
+async fn platform_key_list(
+    state: State<'_, AppState>,
+) -> Result<Vec<adapters::StepUpFactor>, String> {
+    let tok = state.token().ok_or("not signed in")?;
+    adapters::platform_key_list(&state.http, &state.regional_base_url(), &tok)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn security_key_list(
+    state: State<'_, AppState>,
+) -> Result<Vec<adapters::StepUpFactor>, String> {
+    let tok = state.token().ok_or("not signed in")?;
+    adapters::security_key_list(&state.http, &state.regional_base_url(), &tok)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Remove one Touch ID/Face ID key. `proof_token` comes from the step-up ceremony
+/// the frontend runs after the first call comes back STEP_UP_REQUIRED.
+#[tauri::command]
+async fn platform_key_remove(
+    state: State<'_, AppState>,
+    key_id: String,
+    proof_token: Option<String>,
+) -> Result<(), String> {
+    let tok = state.token().ok_or("not signed in")?;
+    adapters::platform_key_delete(
+        &state.http,
+        &state.regional_base_url(),
+        &tok,
+        &key_id,
+        proof_token.as_deref(),
+    )
+    .await
+    .map_err(|e| e.to_string())?;
+    // The local Secure Enclave key is now an orphan in the other direction: the
+    // server no longer knows it, so it can never satisfy a step-up again. Clearing
+    // it keeps `platform_key_status` (server AND local) honest, and means the enrol
+    // button reappears instead of the UI insisting a dead factor is set up.
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
+    {
+        let _ = delete_platform_key();
+    }
+    Ok(())
+}
+
+/// Remove one FIDO2 security key. The server answers 409 if this is the last one
+/// and the plan floors at AAL3 — nothing weaker could authorize enrolling a
+/// replacement, so it refuses rather than stranding the account.
+#[tauri::command]
+async fn security_key_remove(
+    state: State<'_, AppState>,
+    credential_id: String,
+    proof_token: Option<String>,
+) -> Result<(), String> {
+    let tok = state.token().ok_or("not signed in")?;
+    adapters::security_key_delete(
+        &state.http,
+        &state.regional_base_url(),
+        &tok,
+        &credential_id,
+        proof_token.as_deref(),
+    )
+    .await
+    .map_err(|e| e.to_string())
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "ios")))]
@@ -4328,6 +4439,10 @@ pub fn run() {
             webauthn_authenticate_start,
             verify_step_up_webauthn,
             platform_key_enroll,
+            platform_key_list,
+            platform_key_remove,
+            security_key_list,
+            security_key_remove,
             platform_key_sign_challenge,
             platform_key_status,
             join_enroll_node,

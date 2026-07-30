@@ -393,6 +393,35 @@ export async function platformKeyEnroll(): Promise<void> {
   return invoke("platform_key_enroll");
 }
 
+// One enrolled step-up factor as the settings screen lists it. `id` is whatever
+// handle the removal endpoint takes — a biometric key_id or a security-key
+// credential_id.
+export type StepUpFactor = {
+  id: string;
+  label: string | null;
+  created_at: string | null;
+  last_used_at: string | null;
+};
+
+// Listing and removal work on EVERY platform, unlike enrolment and signing above:
+// they are account operations, not Secure Enclave ones. A key enrolled on a phone
+// that is now gone has to be removable from whatever device the user still has.
+export async function platformKeyList(): Promise<StepUpFactor[]> {
+  return invoke<StepUpFactor[]>("platform_key_list");
+}
+
+export async function securityKeyList(): Promise<StepUpFactor[]> {
+  return invoke<StepUpFactor[]>("security_key_list");
+}
+
+export async function platformKeyRemove(keyId: string, proofToken?: string): Promise<void> {
+  return invoke("platform_key_remove", { keyId, proofToken });
+}
+
+export async function securityKeyRemove(credentialId: string, proofToken?: string): Promise<void> {
+  return invoke("security_key_remove", { credentialId, proofToken });
+}
+
 // Full ceremony in one call: mint challenge, sign with Touch ID, verify —
 // returns the proof_token directly (unlike TOTP/OTP, there's no code for the
 // frontend to collect first).
