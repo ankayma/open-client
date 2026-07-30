@@ -67,8 +67,16 @@
 			// the name the user knows it by differs, and on iPad/older iPhones it is Touch ID
 			// rather than Face ID, so keep the wording covering both there.
 			isMacOS = plat === 'macos';
-			biometricSupported = plat === 'macos' || plat === 'ios';
-			biometricName = plat === 'ios' ? 'Face ID' : 'Touch ID';
+			// iOS is deliberately excluded. security-framework never attaches
+			// kSecAttrAccessControl on iOS (the kSecPrivateKeyAttrs push is inside a
+			// cfg(target_os = "macos") block), so the Secure Enclave key came out with NO
+			// biometric constraint: it signed without ever showing Face ID, and the server
+			// accepted it as a valid AAL2 factor. A biometric control that does not check
+			// biometrics is worse than none, so the section stays hidden here until key
+			// generation is done against SecKeyCreateRandomKey directly.
+			// [T — reproduced on an iPhone 11 / iOS 18.7.8 with 1.1.29, 2026-07-30]
+			biometricSupported = plat === 'macos';
+			biometricName = 'Touch ID';
 		} catch {
 			isMacOS = false;
 			biometricSupported = false;

@@ -1735,10 +1735,10 @@ async fn verify_step_up_webauthn(
 // weaker secret. `[T:developer.apple.com/forums/thread/786171 — SE access needs
 // an App ID authorised by a profile; a real signed app bundle satisfies this
 // where a bare CLI binary can't]`
-#[cfg(any(target_os = "macos", target_os = "ios"))]
+#[cfg(target_os = "macos")]
 const PLATFORM_KEY_LABEL: &str = "com.ankayma.app.stepup.touchid";
 
-#[cfg(any(target_os = "macos", target_os = "ios"))]
+#[cfg(target_os = "macos")]
 fn platform_key_access_control(
 ) -> Result<security_framework::access_control::SecAccessControl, String> {
     use security_framework::access_control::SecAccessControl;
@@ -1766,7 +1766,7 @@ fn platform_key_access_control(
 /// Surfacing the raw `CFError` for that is a bad message for an ordinary situation, and
 /// it cost most of a debugging session to recognise. [T — reproduced 2026-07-29/30:
 /// unavailable with the lid closed, works with it open, no code change in between]
-#[cfg(any(target_os = "macos", target_os = "ios"))]
+#[cfg(target_os = "macos")]
 fn biometrics_unavailable_reason() -> Option<String> {
     use objc2_local_authentication::{LAContext, LAPolicy};
     let ctx = unsafe { LAContext::new() };
@@ -1816,7 +1816,7 @@ fn biometrics_unavailable_reason() -> Option<String> {
 /// Find this app's previously-enrolled Secure Enclave key by its stable label,
 /// so `platform_key_sign_challenge` signs with the SAME key `platform_key_enroll`
 /// registered server-side (not a freshly-generated one).
-#[cfg(any(target_os = "macos", target_os = "ios"))]
+#[cfg(target_os = "macos")]
 /// `auth_ctx` is a retained `LAContext` pointer, or null.
 ///
 /// Signing with a `biometryCurrentSet` Secure Enclave key needs an explicit
@@ -1889,7 +1889,7 @@ fn find_platform_key(
 /// key it found. Deleting is safe: the private half never leaves the Secure Enclave and
 /// cannot be backed up, so there is nothing to preserve, and the server keeps accepting
 /// the other keys on the account.
-#[cfg(any(target_os = "macos", target_os = "ios"))]
+#[cfg(target_os = "macos")]
 fn delete_platform_key() -> Result<(), String> {
     use security_framework::item::{ItemClass, ItemSearchOptions, KeyClass};
     const ERR_SEC_ITEM_NOT_FOUND: i32 = -25300;
@@ -1912,7 +1912,7 @@ fn delete_platform_key() -> Result<(), String> {
 /// the control plane. Key creation itself does not prompt Touch ID (only a
 /// SIGN operation does, per `platform_key_sign_challenge`) — the OS defers the
 /// biometric check to first use.
-#[cfg(any(target_os = "macos", target_os = "ios"))]
+#[cfg(target_os = "macos")]
 #[tauri::command]
 async fn platform_key_enroll(state: State<'_, AppState>) -> Result<(), String> {
     use security_framework::item::Location;
@@ -2013,7 +2013,7 @@ async fn platform_key_enroll(state: State<'_, AppState>) -> Result<(), String> {
 /// prompt), verify server-side, return the proof_token. Mirrors
 /// `verify_step_up_totp`'s shape (purpose in, proof_token out) but — unlike a
 /// typed code — there's nothing for the frontend to collect from the user.
-#[cfg(any(target_os = "macos", target_os = "ios"))]
+#[cfg(target_os = "macos")]
 #[tauri::command]
 async fn platform_key_sign_challenge(
     state: State<'_, AppState>,
@@ -2117,7 +2117,7 @@ async fn platform_key_sign_challenge(
 /// additional key for the account — exactly what the schema is shaped for, and a
 /// plain INSERT server-side, so it overwrites nothing. [T: migration 035 has no
 /// unique constraint on user_id; platform_key_register INSERTs a fresh key_id]
-#[cfg(any(target_os = "macos", target_os = "ios"))]
+#[cfg(target_os = "macos")]
 #[tauri::command]
 async fn platform_key_status(state: State<'_, AppState>) -> Result<bool, String> {
     let tok = state.token().ok_or("not signed in")?;
@@ -2127,13 +2127,13 @@ async fn platform_key_status(state: State<'_, AppState>) -> Result<bool, String>
     Ok(on_server && find_platform_key(std::ptr::null_mut())?.is_some())
 }
 
-#[cfg(not(any(target_os = "macos", target_os = "ios")))]
+#[cfg(not(target_os = "macos"))]
 #[tauri::command]
 async fn platform_key_enroll(_state: State<'_, AppState>) -> Result<(), String> {
     Err("Face ID / Touch ID step-up is not available on this platform".into())
 }
 
-#[cfg(not(any(target_os = "macos", target_os = "ios")))]
+#[cfg(not(target_os = "macos"))]
 #[tauri::command]
 async fn platform_key_sign_challenge(
     _state: State<'_, AppState>,
@@ -2142,7 +2142,7 @@ async fn platform_key_sign_challenge(
     Err("Face ID / Touch ID step-up is not available on this platform".into())
 }
 
-#[cfg(not(any(target_os = "macos", target_os = "ios")))]
+#[cfg(not(target_os = "macos"))]
 #[tauri::command]
 async fn platform_key_status(_state: State<'_, AppState>) -> Result<bool, String> {
     Ok(false)
