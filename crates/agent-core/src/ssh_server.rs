@@ -180,6 +180,54 @@ pub fn decide_elevation(
     }
 }
 
+/// Windows-only preflight: probe whether ConPTY (`CreatePseudoConsole`) actually
+/// works on this host before claiming the embedded SSH server is up. `portable-pty`'s
+/// Windows backend requires it — Windows 10 1809 (build 17763) / Windows Server
+/// 2019+, per `[T:f2 §H.6.1]`. Without this, an older
+/// host's failure only surfaces deep inside the first incoming connection's
+/// `openpty()` call as a cryptic error; this turns it into one clear line at
+/// startup. Feature-probing the real API is deliberately preferred over reading a
+/// build number: `GetVersionEx`-family calls lie to processes without an OS-support
+/// manifest entry, so a version check can be wrong in exactly the cases that matter.
+/// `[A — inferred from ConPTY's documented minimum OS version; no Windows host was
+/// available in this session to verify the exact old-OS failure mode]`
+#[cfg(windows)]
+pub fn windows_conpty_available() -> Result<()> {
+    native_pty_system()
+        .openpty(PtySize::default())
+        .map(|_| ())
+        .map_err(|e| {
+            anyhow!(
+                "ConPTY unavailable ({e}) — the embedded SSH server needs Windows 10 1809+ \
+                 or Windows Server 2019+; this host is likely older"
+            )
+        })
+}
+
+/// `true` if this process's `USERNAME` environment variable is `SYSTEM` — what
+/// Windows sets for a process running under the `LocalSystem` account (e.g. a
+/// Windows Service registered `obj= LocalSystem`, as the headless-server service in
+/// `win_service_headless.rs` is). The embedded server currently lands an SSH client
+/// in the shell of whoever is RUNNING the agent (§H.5 — no per-user `su`-equivalent
+/// on Windows yet), so a LocalSystem agent means SSH lands `NT AUTHORITY\SYSTEM`'s
+/// shell — more powerful than a normal admin. `[T:f2 §H.6.1]`
+///
+/// A heuristic, not a hard security boundary: an operator could unset/override
+/// `USERNAME`. Its job is catching the DEFAULT, unintentional case — a headless
+/// service silently exposing a SYSTEM shell over SSH — not resisting an adversary
+/// who already has SYSTEM (who has no need to go through SSH to get there). The
+/// hard-boundary version (`OpenProcessToken`/`GetTokenInformation(TokenUser)`/
+/// `EqualSid` against the well-known LocalSystem SID) was deliberately not written:
+/// it could not be compiled or run against a real Windows host in this session, and
+/// subtly-wrong raw SID FFI failing silently would be worse than this simpler,
+/// by-inspection-correct check. `[A]`
+#[cfg(windows)]
+pub fn windows_running_as_system() -> bool {
+    std::env::var("USERNAME")
+        .map(|u| u.eq_ignore_ascii_case("SYSTEM"))
+        .unwrap_or(false)
+}
+
 /// Bind + serve the embedded SSH server on the configured overlay address. Runs
 /// until the listener errors or the task is aborted.
 pub async fn serve(cfg: SshServerConfig, host_key: SshHostKey) -> Result<()> {

@@ -859,6 +859,26 @@ async fn start_embedded_ssh(
     use agent_core::ssh_grant::GrantVerifier;
     use agent_core::ssh_server::{serve, SshHostKey, SshServerConfig};
 
+    // Windows-only preflight (f2 §H.6.1). Neither check applies off Windows.
+    #[cfg(windows)]
+    {
+        if let Err(e) = agent_core::ssh_server::windows_conpty_available() {
+            eprintln!("[F-2] embedded ssh server not started: {e}");
+            return;
+        }
+        if agent_core::ssh_server::windows_running_as_system()
+            && std::env::var("ANKAYMA_ALLOW_SYSTEM_SSH").as_deref() != Ok("1")
+        {
+            eprintln!(
+                "[F-2] embedded ssh server not started: running as NT AUTHORITY\\SYSTEM \
+                 (a LocalSystem service) would land every SSH client in a SYSTEM shell — \
+                 more powerful than a normal admin. Set ANKAYMA_ALLOW_SYSTEM_SSH=1 to \
+                 opt in anyway."
+            );
+            return;
+        }
+    }
+
     let host_key_path = std::path::Path::new(&state_dir()).join("ssh-host-ed25519");
     let host_key = match SshHostKey::load_or_generate(&host_key_path) {
         Ok(k) => k,
@@ -1282,6 +1302,7 @@ async fn enroll_and_persist(
         endpoint: Some(endpoint),
         // [T:Part B §B.1.4] server nodes default to AppServer.
         workload_kind: Some("AppServer".to_string()),
+        platform: Some(std::env::consts::OS.to_string()),
         machine_proof: Some(proof),
     };
     let resp = adapters::enroll(http, &cfg.control_plane, token, &req)
@@ -1313,6 +1334,7 @@ async fn enroll_via_join_and_persist(
         endpoint: Some(endpoint),
         // [T:Part B §B.1.4] a headless node enrolled by `agent up` is a server.
         workload_kind: Some("AppServer".to_string()),
+        platform: Some(std::env::consts::OS.to_string()),
         machine_proof: Some(proof),
     };
     let resp = adapters::enroll_via_join_token(http, &cfg.control_plane, &req)
