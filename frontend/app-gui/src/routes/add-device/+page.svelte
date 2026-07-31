@@ -6,12 +6,17 @@
 	import { pendingInvite, auth } from '$lib/stores';
 	import { encodeQR } from '$lib/qr';
 	import { runWithStepUp, isStepUpRequired } from '$lib/stepup';
+	import type { ServerEnrollCommands } from '$lib/tauri';
 
 	// Device vs server: two node kinds (Part B §B.1.1 — a Node without an owner is a
 	// service/server). Device = scan QR with the app. Server = no app to run, so a
 	// copy-paste CLI command carrying a SCOPED, single-use enrollment token minted
 	// behind a step-up — never the session token, and never shown before verifying.
-	let serverCmd = $state<string | null>(null);
+	let serverCmds = $state<ServerEnrollCommands | null>(null);
+	// Linux first: it is what most servers run, and picking a default beats making
+	// someone choose before they can see anything.
+	let serverOs = $state<'linux' | 'macos' | 'windows' | 'already_installed'>('linux');
+	let serverCmd = $derived(serverCmds ? serverCmds[serverOs] : null);
 	let serverBusy = $state(false);
 	let serverCmdError = $state<string | null>(null);
 	let serverCmdRevealed = $state(false);
@@ -25,7 +30,7 @@
 		try {
 			const url = await runWithStepUp('enroll_node', (proof) => createJoinLink(nodeTtl, proof));
 			const m = url.match(/token=([^&\s]+)/);
-			serverCmd = await getServerEnrollCommand(m ? m[1] : url);
+			serverCmds = await getServerEnrollCommand(m ? m[1] : url);
 		} catch (e) {
 			serverCmdError = e instanceof Error ? e.message : 'Failed to generate the command';
 		} finally {
@@ -272,9 +277,23 @@
 		{#if serverBusy}
 			<div class="qr-wrap loading"><span class="spinner-lg"></span></div>
 		{:else if serverCmd}
+			<div class="os-tabs" role="group" aria-label="Server platform">
+				{#each [['linux', 'Linux'], ['macos', 'macOS'], ['windows', 'Windows'], ['already_installed', 'Already installed']] as [k, label] (k)}
+					<button
+						class="os-tab"
+						class:active={serverOs === k}
+						aria-pressed={serverOs === k}
+						onclick={() => (serverOs = k as typeof serverOs)}
+					>{label}</button>
+				{/each}
+			</div>
 			<div class="link-box server-cmd">
 				<code class="link-text">
-					{serverCmdRevealed ? serverCmd : serverCmd.replace(/--join-token \S+/, '--join-token ••••••••••••')}
+					{serverCmdRevealed
+						? serverCmd
+						: serverCmd
+								.replace(/--join-token \S+/, '--join-token ••••••••••••')
+								.replace(/ANKAYMA_JOIN_TOKEN=("?)[^\s"]+\1/, 'ANKAYMA_JOIN_TOKEN=••••••••••••')}
 				</code>
 				<button class="copy-btn" onclick={() => (serverCmdRevealed = !serverCmdRevealed)} aria-label={serverCmdRevealed ? 'Hide token' : 'Show token'}>
 					{#if serverCmdRevealed}
@@ -296,8 +315,8 @@
 				</button>
 			</div>
 			<p class="qr-note">
-				SSH into the server and run this command — it enrolls and brings the tunnel up
-				directly, no QR or app needed. The token is single-use.
+				SSH into the server and run this — it installs the agent, enrolls, and starts a
+				service that survives reboot. The token is single-use.
 			</p>
 		{:else}
 			<button class="join-btn" onclick={generateServerCmd}>Verify &amp; reveal command</button>
@@ -328,6 +347,24 @@
 	}
 
 	h2 { font-size: 18px; font-weight: 700; }
+
+	/* Platform picker for the server command. Four short labels, wrapping rather
+	   than scrolling — a hidden option is an option nobody picks. */
+	.os-tabs { display: flex; flex-wrap: wrap; gap: 6px; margin: 10px 0 8px; }
+	.os-tab {
+		padding: 5px 11px;
+		font-size: 12px;
+		border-radius: 7px;
+		border: 1px solid var(--c-border);
+		background: transparent;
+		color: var(--c-text-dim);
+		cursor: pointer;
+	}
+	.os-tab.active {
+		border-color: var(--c-accent);
+		color: var(--c-text);
+		background: color-mix(in srgb, var(--c-accent) 14%, transparent);
+	}
 
 	.back-btn {
 		display: flex;

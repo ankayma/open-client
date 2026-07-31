@@ -14,6 +14,16 @@
 #   ANKAYMA_VERSION    version dir to fetch    (default "latest")
 #   ANKAYMA_PREFIX     install dir for binaries(default /usr/local/bin)
 #   ANKAYMA_NO_COSIGN  set =1 to skip the Cosign step when cosign is unavailable
+#   ANKAYMA_JOIN_TOKEN node join-token (E-3) — first run only; enrolls + installs a
+#                      systemd unit. Without it this stays a plain binary installer.
+#   ANKAYMA_CONTROL_PLANE  control-plane URL  (default https://cp.ankayma.com)
+#
+# Enrollment and the systemd unit are OPT-IN, unlike the macOS/Windows headless
+# installers where they are the whole point. This script has been the Linux download
+# since before those existed and is what `curl | sh` on the website runs, so making a
+# service mandatory would start a daemon on machines whose owners asked for two
+# binaries. Pass a join token and it behaves like its siblings; pass nothing and it
+# behaves exactly as it always has.
 #
 # POSIX sh on purpose — runs on Ubuntu/Debian/Alpine/RHEL without bash.
 set -eu
@@ -21,6 +31,9 @@ set -eu
 BASE_URL="${ANKAYMA_BASE_URL:-https://get.ankayma.com}"
 VERSION="${ANKAYMA_VERSION:-latest}"
 PREFIX="${ANKAYMA_PREFIX:-/usr/local/bin}"
+CONTROL_PLANE="${ANKAYMA_CONTROL_PLANE:-https://cp.ankayma.com}"
+STATE_DIR="/var/lib/ankayma"
+UNIT="/etc/systemd/system/ankayma-agent.service"
 
 say()  { printf '%s\n' "$*"; }
 err()  { printf '✗ %s\n' "$*" >&2; }
@@ -114,9 +127,77 @@ say ""
 say "✓ Installed:"
 say "    $PREFIX/mesh   — CLI (key tools, mirrors wg(8))"
 say "    $PREFIX/agent  — mesh data-plane daemon"
-say ""
-say "Next steps:"
-say "    mesh genkey | tee priv.key | mesh pubkey   # generate a WireGuard keypair"
-say "    sudo agent up                              # bring the overlay up (needs /dev/net/tun)"
+
+# ── 6. Enrollment + service (only when a join token was given) ──────────────
+# Mirrors install-macos-headless.sh: `agent up --join-token` is the headless server
+# path, but it is a long-running foreground process with no enroll-then-exit mode, so
+# run it just long enough for the identity to land on disk and then stop it. The unit
+# below starts the real, persistent run. The token is never written into the unit file
+# — unit files are world-readable and process args show up in `ps`, so it lives only on
+# this short-lived command line. [T: same reasoning as the macOS installer]
+if [ -n "${ANKAYMA_JOIN_TOKEN:-}" ]; then
+  # Root, not $SUDO, for this half. The unit file and $STATE_DIR need it anyway, but
+  # the deciding reason is the backgrounded enroll below: under `sudo` the PID $! is
+  # sudo's, and killing sudo is not reliably killing the agent underneath it. Running
+  # as root keeps $! the process we actually mean to stop.
+  [ "$(id -u)" -eq 0 ] || die "Enrolling needs root — re-run as: ANKAYMA_JOIN_TOKEN=<token> curl -fsSL $BASE_URL/install.sh | sudo sh"
+  have systemctl || die "ANKAYMA_JOIN_TOKEN was given but systemd is not present — enroll manually with: agent up --join-token <TOKEN> --state-dir $STATE_DIR"
+  install -d -m 0700 "$STATE_DIR"
+
+  say ""
+  say "→ Enrolling this node (join-token given) …"
+  ENROLL_LOG="$TMP/enroll.log"
+  "$PREFIX/agent" up --join-token "$ANKAYMA_JOIN_TOKEN" \
+    --control-plane "$CONTROL_PLANE" --state-dir "$STATE_DIR" >"$ENROLL_LOG" 2>&1 &
+  ENROLL_PID=$!
+  i=0
+  while [ ! -f "$STATE_DIR/agent.json" ] && [ $i -lt 30 ]; do
+    sleep 1; i=$((i + 1))
+  done
+  kill "$ENROLL_PID" >/dev/null 2>&1 || true
+  wait "$ENROLL_PID" 2>/dev/null || true
+  if [ ! -f "$STATE_DIR/agent.json" ]; then
+    err "Enrollment did not complete within 30s:"
+    cat "$ENROLL_LOG" >&2
+    die "Refusing to install the service without a persisted identity."
+  fi
+  say "  ✓ enrolled, identity persisted to $STATE_DIR/agent.json"
+
+  say "→ Installing systemd unit ($UNIT) …"
+  tee "$UNIT" >/dev/null <<UNITEOF
+[Unit]
+Description=Ankayma overlay mesh agent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=$PREFIX/agent up --state-dir $STATE_DIR --control-plane $CONTROL_PLANE
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+UNITEOF
+  chmod 0644 "$UNIT"
+  systemctl daemon-reload
+  systemctl enable --now ankayma-agent
+
+  say ""
+  say "✓ Service ankayma-agent is running (Restart=always — survives reboot)"
+  say ""
+  say "Check status:"
+  say "    sudo systemctl status ankayma-agent"
+  say "    sudo journalctl -u ankayma-agent -f"
+else
+  say ""
+  say "Next steps:"
+  say "    mesh genkey | tee priv.key | mesh pubkey   # generate a WireGuard keypair"
+  say "    sudo agent up                              # bring the overlay up (needs /dev/net/tun)"
+  say ""
+  say "Joining a mesh? Re-run with a node token and this installs a service instead:"
+  say "    ANKAYMA_JOIN_TOKEN=<token> curl -fsSL $BASE_URL/install.sh | sudo sh"
+fi
+
 say ""
 say "The agent is open source — audit it: https://github.com/ankayma/open-client"

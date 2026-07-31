@@ -1466,7 +1466,7 @@ async fn create_join_link(
 async fn get_server_enroll_command(
     state: State<'_, AppState>,
     join_token: String,
-) -> Result<String, String> {
+) -> Result<ServerEnrollCommands, String> {
     // Build the server-enroll command from a SCOPED, single-use join token (E-3) —
     // NOT the session token. The caller mints it behind a step-up, exactly like the
     // device invite link, so this command never carries the user's full credential.
@@ -1474,10 +1474,47 @@ async fn get_server_enroll_command(
     if join_token.is_empty() {
         return Err("missing enrollment token".into());
     }
-    Ok(format!(
-        "agent up --join-token {join_token} --control-plane {}",
-        state.regional_base_url()
-    ))
+    let cp = state.regional_base_url();
+    Ok(ServerEnrollCommands {
+        // Install-and-enroll, one line, per platform. The previous single
+        // `agent up --join-token …` assumed the binary was already on the server —
+        // true for a machine being re-enrolled, useless on a fresh one, where it is
+        // just `command not found`. It predates the headless installers; those now
+        // exist for all three platforms and each reads these two variables.
+        // [T:scripts/install.sh, install-macos-headless.sh, install-windows.ps1 —
+        //  all accept ANKAYMA_JOIN_TOKEN + ANKAYMA_CONTROL_PLANE]
+        //
+        // The control plane is spelled out rather than left to each installer's
+        // default of https://cp.ankayma.com: a tenant in another region would
+        // otherwise enroll its server against the wrong one, and the failure would
+        // land at first connect rather than here where it is obvious.
+        linux: format!(
+            "ANKAYMA_JOIN_TOKEN={join_token} ANKAYMA_CONTROL_PLANE={cp} \
+             curl -fsSL https://get.ankayma.com/install.sh | sudo sh"
+        ),
+        macos: format!(
+            "ANKAYMA_JOIN_TOKEN={join_token} ANKAYMA_CONTROL_PLANE={cp} \
+             curl -fsSL https://get.ankayma.com/macos-headless/install.sh | sudo sh"
+        ),
+        windows: format!(
+            "$env:ANKAYMA_JOIN_TOKEN=\"{join_token}\"; $env:ANKAYMA_CONTROL_PLANE=\"{cp}\"; \
+             irm https://get.ankayma.com/windows-headless/install.ps1 | iex"
+        ),
+        // Kept for a machine that already has the agent — re-enrolling after a wipe,
+        // or a host provisioned by something else.
+        already_installed: format!("agent up --join-token {join_token} --control-plane {cp}"),
+    })
+}
+
+/// One install line per platform, all carrying the same single-use join token.
+/// The app cannot know what the server runs — it is minting this on the user's
+/// laptop — so it hands over all of them rather than guessing and being wrong.
+#[derive(serde::Serialize)]
+struct ServerEnrollCommands {
+    linux: String,
+    macos: String,
+    windows: String,
+    already_installed: String,
 }
 
 #[tauri::command]
