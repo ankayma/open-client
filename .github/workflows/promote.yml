@@ -71,7 +71,21 @@ jobs:
           set -euo pipefail
           TARBALL="$(find beta -iname '*.app.tar.gz' | head -1)"
           test -n "$TARBALL" || { echo "✗ no updater artifact on the beta channel"; exit 1; }
-          test -s "$TARBALL.sig" || { echo "✗ updater artifact has no signature — the app would reject it"; exit 1; }
+          # The signature lives INSIDE latest.json, which is where the app reads it
+          # from — release-macos.yml cats the .sig into the manifest and never uploads
+          # the file itself. Testing for a sidecar .sig was testing for something this
+          # pipeline has never produced, so this gate could not pass no matter how well
+          # signed the build was. Check the thing the updater actually verifies against.
+          # [T — v1.1.35 promote failed here while macos/beta/latest.json carried a
+          #  404-char signature and Ankayma.app.tar.gz.sig 404'd]
+          python3 - <<'PYSIG'
+          import json, sys
+          sig = json.load(open("beta/latest.json"))["platforms"]["darwin-universal"]["signature"]
+          if not sig.strip():
+              print("✗ updater manifest carries no signature — the app would reject it")
+              sys.exit(1)
+          print(f"  ✓ manifest signature present ({len(sig)} chars)")
+          PYSIG
           mkdir -p unpacked && tar -xzf "$TARBALL" -C unpacked
           APP="$(find unpacked -maxdepth 1 -iname '*.app' | head -1)"
           test -n "$APP" || { echo "✗ updater artifact contains no .app"; exit 1; }
@@ -172,7 +186,13 @@ jobs:
       - name: Gate — checksums, signature, and the binaries actually run
         run: |
           set -euo pipefail
-          ( cd beta && shasum -a 256 -c SHA256SUMS )
+          # SHA256SUMS from the Windows runner has CRLF line endings (PowerShell
+          # Set-Content), and this gate runs on macOS, where `shasum -c` then looks for
+          # a file whose name ends in a carriage return and reports "No such file or
+          # directory". The digests are fine; only the line terminator is not. Normalise
+          # before verifying rather than let a line-ending decide whether a release ships.
+          # [T — v1.1.35 headless-windows promote failed exactly here]
+          ( cd beta && tr -d '\r' < SHA256SUMS > SHA256SUMS.lf && shasum -a 256 -c SHA256SUMS.lf && rm -f SHA256SUMS.lf )
           if [ -f beta/SHA256SUMS.sig ] && [ -f beta/cosign.pub ]; then
             command -v cosign >/dev/null || brew install cosign
             cosign verify-blob --insecure-ignore-tlog --key beta/cosign.pub \

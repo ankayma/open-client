@@ -47,7 +47,16 @@ Push-Location $Out
 try {
     $hashes = Get-FileHash -Algorithm SHA256 "agent-windows-amd64.exe", "mesh-windows-amd64.exe"
     $lines = $hashes | ForEach-Object { "{0}  {1}" -f $_.Hash.ToLower(), (Split-Path $_.Path -Leaf) }
-    Set-Content -Path "SHA256SUMS" -Value $lines -Encoding ascii -NoNewline:$false
+    # LF, not CRLF. Set-Content writes \r\n on Windows, and a checksum manifest is
+    # read cross-platform — `shasum -c` on macOS/Linux then looks for a filename ending
+    # in a carriage return and fails with "No such file or directory" while the digests
+    # themselves are perfectly correct. WriteAllText with explicit "`n" keeps the file
+    # verifiable everywhere it is consumed.
+    # [T — v1.1.35 promote gate on macos-14 failed on exactly this]
+    [System.IO.File]::WriteAllText(
+        (Join-Path (Get-Location) "SHA256SUMS"),
+        (($lines -join "`n") + "`n"),
+        [System.Text.UTF8Encoding]::new($false))
 }
 finally {
     Pop-Location
