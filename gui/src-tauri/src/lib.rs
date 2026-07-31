@@ -2046,9 +2046,8 @@ fn biometric_key_label() -> String {
     let ctx = unsafe { LAContext::new() };
     // biometryType reads .none until a policy evaluation has been attempted; this
     // asks whether biometry COULD be used and never prompts the user.
-    let _ = unsafe {
-        ctx.canEvaluatePolicy_error(LAPolicy::DeviceOwnerAuthenticationWithBiometrics)
-    };
+    let _ =
+        unsafe { ctx.canEvaluatePolicy_error(LAPolicy::DeviceOwnerAuthenticationWithBiometrics) };
     let biometry = match unsafe { ctx.biometryType() } {
         LABiometryType::FaceID => "Face ID",
         LABiometryType::TouchID => "Touch ID",
