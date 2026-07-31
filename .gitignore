@@ -34,3 +34,6 @@ cosign.key
 # Required whenever bundle.macOS.entitlements is wired — see scripts/release-macos.sh
 # preflight and docs/macos-associated-domains.md. [T:A.1.21]
 /gui/src-tauri/macos/*.provisionprofile
+
+# Local release output (scripts/release-*.sh); CI writes the same path.
+dist/
