@@ -80,7 +80,7 @@ jobs:
           GPG_KEY_ID: ${{ secrets.GPG_KEY_ID }}
         run: |
           set -euo pipefail
-          VERSION="$(sed -n 's/^version *= *"\(.*\)"/\1/p' Cargo.toml | head -1)"
+          VERSION="$(sed -n 's/.*"version": *"\(.*\)".*/\1/p' gui/src-tauri/tauri.conf.json | head -1)"
 
           # GNUPGHOME set ONCE, before import, so every gpg/aptly/rpm call below
           # (import, aptly publish, rpm --addsign, detached-sign) sees the same
@@ -129,7 +129,7 @@ jobs:
           AWS_DEFAULT_REGION: auto
         run: |
           set -euo pipefail
-          VERSION="$(sed -n 's/^version *= *"\(.*\)"/\1/p' Cargo.toml | head -1)"
+          VERSION="$(sed -n 's/.*"version": *"\(.*\)".*/\1/p' gui/src-tauri/tauri.conf.json | head -1)"
           EP="${{ secrets.R2_ENDPOINT }}"
 
           # curl|sh channel (install.sh + versioned binaries), same bucket as macOS.

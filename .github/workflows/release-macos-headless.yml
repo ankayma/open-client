@@ -95,7 +95,12 @@ jobs:
       - name: Smoke-test mesh genkey/pubkey round-trip
         run: |
           set -euo pipefail
-          VERSION="$(sed -n 's/^version *= *"\(.*\)"/\1/p' Cargo.toml | head -1)"
+          # tauri.conf.json, NOT Cargo.toml. The publish step below was fixed to read
+          # this; this smoke-test was not, so it looked for dist/1.1.8/ while the
+          # script had written dist/1.1.34/ and the job died at "No such file" AFTER
+          # Apple had already accepted both notarization submissions.
+          # [T — v1.1.34 run 30601103859 failed exactly here]
+          VERSION="$(sed -n 's/.*"version": *"\(.*\)".*/\1/p' gui/src-tauri/tauri.conf.json | head -1)"
           MESH="dist/$VERSION/mesh-macos-universal"
           PRIV="$("$MESH" genkey)"
           [ -n "$PRIV" ]

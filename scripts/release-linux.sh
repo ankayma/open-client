@@ -24,7 +24,15 @@ set -euo pipefail
 cd "$(dirname "$0")/.."   # repo root
 TARGET="x86_64-unknown-linux-musl"
 PLAT="linux-amd64"
-VERSION="$(sed -n 's/^version *= *"\(.*\)"/\1/p' Cargo.toml | head -1)"
+# Same version source as every other release artifact. The workspace Cargo.toml
+# version is a crate version and does not track releases — it reads 1.1.8, so every
+# Linux release since has published into `1.1.8/` and overwritten the one before it.
+# `latest/` hid the damage (install.sh defaults there), but pinning a version 404'd
+# and no release had a directory of its own. tauri.conf.json is what the tag, the
+# DMG and the updater manifest all derive from.
+# [T — get.ankayma.com/1.1.34/ 404 while /1.1.8/ served v1.1.34's bytes, 2026-07-31]
+VERSION="$(sed -n 's/.*"version": *"\(.*\)".*/\1/p' gui/src-tauri/tauri.conf.json | head -1)"
+[ -n "$VERSION" ] || { echo "✗ could not read version from gui/src-tauri/tauri.conf.json" >&2; exit 1; }
 OUT="dist/$VERSION"
 
 have() { command -v "$1" >/dev/null 2>&1; }
