@@ -1202,7 +1202,8 @@ async fn get_node_info(state: State<'_, AppState>) -> Result<NodeInfo, String> {
 #[tauri::command]
 async fn probe_reachable(targets: Vec<String>) -> Result<Vec<String>, String> {
     // Blocking connects on a blocking thread so the async runtime isn't stalled; each
-    // target gets its own thread so the batch runs concurrently (~3s worst case).
+    // target gets its own thread so the batch runs concurrently (~12s worst case,
+    // paid only by targets that never answer — see PROBE_TIMEOUT).
     tauri::async_runtime::spawn_blocking(move || {
         use std::io::ErrorKind;
         use std::net::{TcpStream, ToSocketAddrs};
@@ -1211,7 +1212,18 @@ async fn probe_reachable(targets: Vec<String>) -> Result<Vec<String>, String> {
         // RST tells us whether SSH is actually being served there. Both matter, and
         // conflating them is the bug this returns three states to avoid.
         const PROBE_PORT: u16 = 22022;
-        const PROBE_TIMEOUT: Duration = Duration::from_secs(3);
+        // 3s was a guess, and it was wrong. A peer with no live tunnel has to do
+        // discovery plus a WireGuard handshake before the first byte moves, and that
+        // was measured at 5.67s against a freshly enrolled node — so a perfectly
+        // healthy node that simply had not been talked to yet timed out, went
+        // un-dotted, and had its SSH button disabled. That is the same class of lie
+        // this function was rewritten to stop telling, arrived at from the opposite
+        // direction. The second connection to the same node took 0.01s, so this
+        // ceiling is only ever paid once per cold peer, and the probes already run
+        // one thread per target, so a genuinely dead node delays nothing but itself.
+        // [T — measured 2026-07-31: cold 5.67s, warm 0.01s; ping6 100% loss before
+        //  the handshake, 0% and ~5ms after]
+        const PROBE_TIMEOUT: Duration = Duration::from_secs(12);
         let threads: Vec<_> = targets
             .into_iter()
             .map(|ip| {
