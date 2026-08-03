@@ -1,7 +1,7 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
 	import { goto } from '$app/navigation';
-	import { listSubdomains, createSubdomain, deleteSubdomain, openSubdomain, listNodes, publishSampleDemo, unpublishSampleDemo } from '$lib/tauri';
+	import { listSubdomains, createSubdomain, deleteSubdomain, openSubdomain, listNodes, listMembers, getNodeInfo, publishSampleDemo, unpublishSampleDemo } from '$lib/tauri';
 	import { runWithStepUp } from '$lib/stepup';
 	import type { Subdomain, PeerBrief } from '$lib/types';
 	import { connection } from '$lib/stores';
@@ -16,6 +16,10 @@
 	let nodes = $state<PeerBrief[]>([]);
 	let loading = $state(true);
 	let loadError = $state('');
+	// user_id → email / @login — same join as My Devices. Admin gets the roster;
+	// a member's 403 leaves the map empty (they only see names on their own nodes).
+	let memberLabels = $state(new Map<string, string>());
+	let myUserId = $state<string | null>(null);
 
 	let showAddForm = $state(false);
 	let newLabel = $state('');
@@ -30,7 +34,22 @@
 		loading = true;
 		loadError = '';
 		try {
-			[entries, nodes] = await Promise.all([listSubdomains(), listNodes()]);
+			const [subs, peers, self, roster] = await Promise.all([
+				listSubdomains(),
+				listNodes(),
+				getNodeInfo().catch(() => null),
+				// Best-effort: only an admin may list the roster; never fail the page.
+				listMembers().catch(() => null),
+			]);
+			entries = subs;
+			nodes = peers;
+			memberLabels = new Map(
+				(roster?.members ?? []).map((m) => [
+					m.user_id,
+					m.email ?? (m.github_login ? `@${m.github_login}` : m.user_id.slice(0, 12)),
+				]),
+			);
+			myUserId = peers.find((n) => n.node_id === self?.node_id)?.owner_user_id ?? null;
 			if (!newTarget && nodes.length > 0) newTarget = nodes[0].node_id;
 		} catch (e: unknown) {
 			loadError = e instanceof Error ? e.message : 'Failed to load subdomains';
@@ -102,6 +121,17 @@
 
 	function nodeName(id: string) {
 		return nodes.find(n => n.node_id === id)?.hostname ?? id;
+	}
+
+	// Whose node this subdomain targets — join target_node_id → owner_user_id →
+	// roster email, same pattern as My Devices. Null when we can't name an owner
+	// (solo tenant / no roster / legacy node without owner_user_id).
+	function ownerLabel(entry: Subdomain): string | null {
+		const uid = nodes.find((n) => n.node_id === entry.target_node_id)?.owner_user_id;
+		if (!uid) return null;
+		const who = memberLabels.get(uid);
+		if (uid === myUserId) return who ? `you · ${who}` : 'you';
+		return who ?? null;
 	}
 
 	// RFC 1035 LDH label, lowercase, 1–63, no leading/trailing hyphen (mirrors the
@@ -177,6 +207,9 @@
 								</div>
 								<div class="entry-meta">
 									<span class="badge cert-{entry.cert_status ?? 'none'}">{certLabel(entry.cert_status)}</span>
+									{#if ownerLabel(entry)}
+										<span class="owner" title="Node owner">{ownerLabel(entry)}</span>
+									{/if}
 								</div>
 								{#if isSampleDemo(entry)}
 									<button class="invite-link" onclick={() => goto('/add-device')}>Invite someone to view &rarr;</button>
@@ -405,9 +438,22 @@
 	.entry-meta {
 		display: flex;
 		align-items: center;
+		flex-wrap: wrap;
 		gap: 6px;
 		font-size: 12px;
 		color: var(--c-text-dim);
+	}
+
+	/* Owner tag — same quiet pill as My Devices; admin tells whose node a name hits. */
+	.owner {
+		font-size: 11px;
+		font-weight: 500;
+		color: var(--c-text-dim);
+		background: color-mix(in srgb, var(--c-text-dim) 12%, transparent);
+		padding: 2px 8px;
+		border-radius: 999px;
+		flex-shrink: 0;
+		overflow-wrap: anywhere;
 	}
 
 	.badge {
