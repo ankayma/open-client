@@ -88,18 +88,42 @@ if ! grep -q "CFBundleURLTypes" "$PROJ"; then
   echo "✓ CFBundleURLTypes (ankayma:// scheme) injected into project.yml — deep links open the app"
 fi
 
-# 3c. Associated Domains — WKWebView refuses navigator.credentials.create()/get()
-#     (WebAuthn security-key step-up, E-7 Phase 3) unless the app claims webcredentials:
-#     for our RP ID (WEBAUTHN_RP_ID=ankayma.com). Same xcodegen-regenerates-the-file
-#     reason as the NE/App Group keys above, so it MUST be an entitlements *property*
-#     here — editing the generated .entitlements gets wiped. Only the APP target needs
-#     it; the PacketTunnel extension does not. Idempotent, ungated.
-#     Depends on two things outside this repo, both required or the App Store profile
-#     will not carry the entitlement and Archive fails "profile doesn't include…":
-#       - Associated Domains enabled on App ID com.ankayma.app in the developer portal
-#       - AASA served at https://ankayma.com/.well-known/apple-app-site-association
-#         declaring 8UF87JS6WW.com.ankayma.app under "webcredentials" (live 2026-07-29)
-#     [T:developer.apple.com/documentation/xcode/supporting-associated-domains]
+# 3c. Associated Domains — TWO services on one entitlement key, and one landmine.
+#
+#     webcredentials:ankayma.com — lets the OS accept ankayma.com as the WebAuthn RP ID for
+#       the NATIVE security-key ceremony (webauthn_apple.rs). Checked against
+#       https://ankayma.com/.well-known/apple-app-site-association (live 2026-07-29).
+#     applinks:cp.ankayma.com — makes an invite link open THIS app instead of a browser.
+#       Checked against https://cp.ankayma.com/.well-known/apple-app-site-association,
+#       which the control plane serves from a compiled default.
+#
+#     THE LANDMINE (measured 2026-08-04, not inferred): `tauri-plugin-deep-link` 2.4.9
+#     rewrites this exact key in the GENERATED entitlements file from its own build script —
+#     `build.rs` calls `update_entitlements`, which INSERTS an array built only from
+#     `plugins.deep-link.mobile`, and REMOVES the key outright when that config declares no
+#     app link. That build script runs from the "Build Rust Code" phase, i.e. inside every
+#     iOS build, after xcodegen has written this file. So whatever we put here was being
+#     erased on the way to the signature. Verified by running the plugin's real build.rs
+#     against a copy of our entitlements:
+#       config without an app link → key REMOVED entirely
+#       config with an app link    → key REPLACED by ["applinks:…"], webcredentials gone
+#     Neither outcome is announced. The build stays green and the ceremony fails much later
+#     with "not associated with domain".
+#
+#     THE FIX, taken from the plugin's own code: it writes to a path derived from the app
+#     name — `$TAURI_IOS_PROJECT_PATH/<name>_iOS/<name>_iOS.entitlements` — and its
+#     `update_plist_file` is a NO-OP when that path does not exist (`if path.exists()`).
+#     Pointing the target at a differently-named file therefore takes this key back under
+#     our control with no fork, no patch and no post-build fixup: the plugin keeps managing
+#     the Android manifest and simply finds nothing to rewrite here. A third experiment
+#     confirmed both services survive and no file appears at the conventional path.
+#
+#     Consequence to remember: the plugin no longer generates `applinks:` for us, so every
+#     domain we want claimed must be listed BELOW. `scripts/release-ios.sh` re-reads the
+#     entitlements out of the signed .ipa and fails the release if either service is missing
+#     — this class of failure is invisible to every static check, the same lesson as the
+#     macOS launch gate (docs/macos-associated-domains.md §1).
+#     [T:tauri-plugin-deep-link-2.4.9/build.rs + tauri-plugin-2.6.2/src/build/mobile.rs:148]
 if ! grep -q "associated-domains" "$PROJ"; then
   awk '
     { print }
@@ -107,10 +131,31 @@ if ! grep -q "associated-domains" "$PROJ"; then
     app_ent && /^      properties:$/ && !done {
       print "        com.apple.developer.associated-domains:"
       print "          - webcredentials:ankayma.com"
+      print "          - applinks:cp.ankayma.com"
       done=1
     }
   ' "$PROJ" >"$PROJ.tmp" && mv "$PROJ.tmp" "$PROJ"
-  echo "✓ associated-domains (webcredentials:ankayma.com) injected into project.yml — WebAuthn in WKWebView"
+  echo "✓ associated-domains (webcredentials + applinks) injected into project.yml"
+elif ! grep -q "applinks:cp\.ankayma\.com" "$PROJ"; then
+  # Upgrade path: a project.yml generated before applinks existed already carries the key,
+  # so the block above skips it and the app would ship claiming only webcredentials. Add
+  # the second service in place rather than making the caller wipe gen/apple.
+  sed -i '' \
+    's|^\( *\)- webcredentials:ankayma\.com$|\1- webcredentials:ankayma.com\
+\1- applinks:cp.ankayma.com|' \
+    "$PROJ"
+  echo "✓ applinks:cp.ankayma.com added to existing associated-domains in project.yml"
+fi
+
+# 3c-bis. Move the app target's entitlements OFF the filename the deep-link plugin targets.
+#     Second half of the fix above; must run AFTER 3c, which matches the original path.
+#     App target only — the PacketTunnel extension has its own file under its own name,
+#     which the plugin never looks for.
+if grep -q "path: ankayma-gui_iOS/ankayma-gui_iOS\.entitlements" "$PROJ"; then
+  sed -i '' \
+    's|path: ankayma-gui_iOS/ankayma-gui_iOS\.entitlements|path: ankayma-gui_iOS/ankayma-app.entitlements|' \
+    "$PROJ"
+  echo "✓ app entitlements renamed → ankayma-app.entitlements (out of the deep-link plugin's reach)"
 fi
 
 # 3f. Link AuthenticationServices + LocalAuthentication into the APP target.

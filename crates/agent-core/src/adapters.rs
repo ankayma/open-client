@@ -3,8 +3,8 @@
 use crate::domain::{
     AgentEnrollRequest, AgentEnrollResponse, CiDeployRequest, CiDeployResponse, CiPolicy,
     CiPolicyReq, CiRun, EnrollRequest, EnrollResponse, MembersView, MyAccess, NodeBrief, PeerInfo,
-    PolicyView, Quota, ResolveTable, SessionInfo, SshSession, SshSessionRequest,
-    SshSessionResponse, Subdomain, SubdomainCert, SubdomainCsrReq, SubdomainReq,
+    PendingInvitesView, PolicyView, Quota, ResolveTable, SessionInfo, SshSession,
+    SshSessionRequest, SshSessionResponse, Subdomain, SubdomainCert, SubdomainCsrReq, SubdomainReq,
 };
 
 /// The D.11 scoped NODE service token (opaque `nst_…`). Authenticates node-scoped
@@ -708,6 +708,40 @@ pub async fn list_members(
     session_token: &str,
 ) -> Result<MembersView, ApiError> {
     get_json(http, base_url, "/api/v1/members", session_token).await
+}
+
+/// List the pending admissions — invited, not yet redeemed (admin only).
+/// `GET /api/v1/members/invites`. The response carries no invite token by design:
+/// re-sending goes back through `invite_member`, which mails the link, so the admin
+/// never holds a credential that would let them sign in as the invitee. `[T:A.1.6]`
+pub async fn list_member_invites(
+    http: &reqwest::Client,
+    base_url: &str,
+    session_token: &str,
+) -> Result<PendingInvitesView, ApiError> {
+    get_json(http, base_url, "/api/v1/members/invites", session_token).await
+}
+
+/// Withdraw a pending invite (admin). `DELETE /api/v1/members/invites?email=…`.
+/// Access-reducing, so no step-up proof — see the server handler's rationale.
+pub async fn revoke_member_invite(
+    http: &reqwest::Client,
+    base_url: &str,
+    session_token: &str,
+    email: &str,
+) -> Result<(), ApiError> {
+    let resp = http
+        .delete(url(base_url, "/api/v1/members/invites"))
+        .query(&[("email", email)])
+        .bearer_auth(session_token)
+        .timeout(CP_REST_TIMEOUT)
+        .send()
+        .await
+        .map_err(|e| ApiError::Transport(e.to_string()))?;
+    if !resp.status().is_success() {
+        return Err(status_error(resp).await);
+    }
+    Ok(())
 }
 
 /// Mint a member invite (admin). `ttl_seconds` optionally overrides the server's

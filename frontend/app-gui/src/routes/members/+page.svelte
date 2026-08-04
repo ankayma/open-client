@@ -1,15 +1,27 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { listMembers, inviteMember, removeMember, resetMemberTotp } from "$lib/tauri";
+  import {
+    listMembers,
+    inviteMember,
+    removeMember,
+    resetMemberTotp,
+    listPendingInvites,
+    revokeInvite,
+  } from "$lib/tauri";
   import { auth } from "$lib/stores";
   import { runWithStepUp } from "$lib/stepup";
-  import type { MembersView } from "$lib/types";
+  import type { MembersView, PendingInvite } from "$lib/types";
 
   // F1 team membership (Slice C). Admin invites/removes; anyone sees the roster;
   // a removed member loses access on their next call (instant offboard).
   let data = $state<MembersView | null>(null);
   let loading = $state(true);
   let error = $state("");
+
+  // Pending admissions — invited, not yet redeemed. The roster above reads memberships,
+  // which only exist AFTER redeem, so an invited teammate used to be invisible: "I invited
+  // them and they haven't opened it" was indistinguishable from "I never invited them".
+  let pending = $state<PendingInvite[]>([]);
 
   let inviteUrl = $state("");
   let busy = $state(false);
@@ -48,6 +60,48 @@
     } finally {
       loading = false;
     }
+    await loadPending();
+  }
+
+  // Admin-only endpoint: a plain member gets 403, which is not an error worth showing them
+  // — the roster they CAN see loaded fine. Swallow it and leave the section absent.
+  async function loadPending() {
+    if (data?.your_role !== "admin") {
+      pending = [];
+      return;
+    }
+    try {
+      pending = (await listPendingInvites()).invites;
+    } catch {
+      pending = [];
+    }
+  }
+
+  // "Sent 3 days ago" beats a raw timestamp for the one question this list answers:
+  // has it been long enough that they are probably not going to open it?
+  function ago(iso?: string): string {
+    if (!iso) return "";
+    const then = Date.parse(iso);
+    if (Number.isNaN(then)) return "";
+    const mins = Math.max(0, Math.round((Date.now() - then) / 60000));
+    if (mins < 1) return "just now";
+    if (mins < 60) return `${mins}m ago`;
+    const hours = Math.round(mins / 60);
+    if (hours < 24) return `${hours}h ago`;
+    return `${Math.round(hours / 24)}d ago`;
+  }
+
+  // Time LEFT on the invite — the other half of the same question.
+  function expiresIn(iso?: string): string {
+    if (!iso) return "";
+    const at = Date.parse(iso);
+    if (Number.isNaN(at)) return "";
+    const mins = Math.round((at - Date.now()) / 60000);
+    if (mins <= 0) return "expired";
+    if (mins < 60) return `expires in ${mins}m`;
+    const hours = Math.round(mins / 60);
+    if (hours < 48) return `expires in ${hours}h`;
+    return `expires in ${Math.round(hours / 24)}d`;
   }
 
   let inviteEmail = $state("");
@@ -69,10 +123,43 @@
       inviteUrl = await runWithStepUp("invite_member", (proof) =>
         inviteMember(inviteEmail.trim(), inviteSeatType, memberTtl, proof),
       );
+      await loadPending();
     } catch (e: unknown) {
       error = e instanceof Error ? e.message : "Invite failed";
     } finally {
       busy = false;
+    }
+  }
+
+  // Re-send. Same endpoint as the first invite and deliberately so: the server keeps the
+  // EXISTING token, refreshes its expiry and mails the same link again — so a link already
+  // sitting in the invitee's inbox stays valid instead of being silently replaced by a
+  // second one. The seat/role travel with it, which is also how a mis-set seat gets fixed.
+  // Server enforces a per-address cooldown; the button reflects it rather than guessing.
+  let resending = $state("");
+  async function resend(inv: PendingInvite) {
+    resending = inv.email;
+    error = "";
+    try {
+      await runWithStepUp("invite_member", (proof) =>
+        inviteMember(inv.email, inv.seat_type ?? "user", memberTtl, proof),
+      );
+      await loadPending();
+    } catch (e: unknown) {
+      if (e instanceof Error && e.message === "Step-up cancelled") return;
+      error = e instanceof Error ? e.message : "Re-send failed";
+    } finally {
+      resending = "";
+    }
+  }
+
+  async function revoke(email: string) {
+    if (!confirm(`Revoke the invite for ${email}? Their link stops working immediately.`)) return;
+    try {
+      await revokeInvite(email);
+      await loadPending();
+    } catch (e: unknown) {
+      error = e instanceof Error ? e.message : "Revoke failed";
     }
   }
 
@@ -148,6 +235,41 @@
         </li>
       {/each}
     </ul>
+
+    {#if isAdmin && pending.length > 0}
+      <section class="pending">
+        <h3>Pending invites <span class="count">{pending.length}</span></h3>
+        <p class="hint">
+          Invited, not joined yet. Re-send mails the same link again and refreshes its expiry.
+        </p>
+        <ul class="list">
+          {#each pending as p (p.email)}
+            <li class="row">
+              <div class="who">
+                <span class="login">{p.email}</span>
+                {#if p.seat_type}<span class="role" style="text-transform:capitalize;">{p.seat_type}</span>{/if}
+                {#if p.expired}<span class="role expired">expired</span>{/if}
+                <span style="color:var(--c-text-dim);font-size:11px;flex-basis:100%;margin-top:2px;">
+                  sent {ago(p.last_sent_at ?? p.created_at)}{#if p.send_count > 1} · {p.send_count} times{/if}
+                  {#if !p.expired && p.expires_at} · {expiresIn(p.expires_at)}{/if}
+                </span>
+              </div>
+              <div class="actions">
+                <button
+                  class="reset"
+                  onclick={() => resend(p)}
+                  disabled={resending === p.email}
+                  aria-label="Re-send invite">{resending === p.email ? "Sending…" : "Resend"}</button
+                >
+                <button class="remove" onclick={() => revoke(p.email)} aria-label="Revoke invite"
+                  >Revoke</button
+                >
+              </div>
+            </li>
+          {/each}
+        </ul>
+      </section>
+    {/if}
 
     {#if isAdmin && tier === "F0"}
       <section class="panel upgrade-notice">
@@ -330,6 +452,30 @@
   .reset:hover {
     background: var(--c-surface);
     color: var(--c-text);
+  }
+  .pending {
+    margin-top: 8px;
+  }
+  .pending h3 {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .pending .hint {
+    margin-bottom: 0;
+  }
+  /* Dimmer than the roster: these people are not in the team yet. */
+  .pending .list {
+    background: transparent;
+    border-style: dashed;
+  }
+  .role.expired {
+    background: color-mix(in srgb, var(--c-danger) 14%, transparent);
+    color: var(--c-danger);
+    border: 1px solid color-mix(in srgb, var(--c-danger) 35%, transparent);
+  }
+  .reset:disabled {
+    opacity: 0.5;
   }
   .panel {
     background: var(--c-surface);

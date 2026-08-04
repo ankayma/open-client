@@ -157,6 +157,24 @@ export interface MembersView {
   your_role: string;
 }
 
+// An admission still in flight: invited, not yet redeemed. GET /api/v1/members/invites.
+// No token / short code field — and none should ever be added: either would let whoever
+// reads this list sign in AS the invitee. Re-send goes through the invite endpoint, which
+// mails the link. [T:A.1.6]
+export interface PendingInvite {
+  email: string;
+  role: string;
+  seat_type?: SeatType;
+  created_at?: string;
+  expires_at?: string;
+  last_sent_at?: string;
+  send_count: number;
+  expired: boolean;
+}
+export interface PendingInvitesView {
+  invites: PendingInvite[];
+}
+
 // [F-1 viewer] One CI deploy run from GET /api/v1/ci/history — read-only
 // projection of a CiDeployAccess ledger event (connection-level facts only).
 export interface CiRun {

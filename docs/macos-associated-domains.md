@@ -180,6 +180,38 @@ signing does this on the next Archive.
 For local testing, `webcredentials:ankayma.com?mode=developer` bypasses Apple's CDN cache of
 the AASA file, and `xcrun swcutil dl -d ankayma.com` shows what the system actually resolved.
 
+## 5.1 iOS only: the deep-link plugin owns this key, and was erasing it
+
+Measured 2026-08-04 by running `tauri-plugin-deep-link` 2.4.9's real `build.rs` against a copy
+of our generated entitlements — not inferred from reading it. The script calls
+`update_entitlements`, which builds a fresh array from `plugins.deep-link.mobile` in
+`tauri.conf.json` and **replaces** the key, or **removes it outright** when that config
+declares no app link:
+
+| `plugins.deep-link.mobile` | resulting `com.apple.developer.associated-domains` |
+|---|---|
+| no https entry (what we shipped) | **key removed** |
+| an https entry | `["applinks:…"]` — `webcredentials` gone |
+
+That build script runs from the *Build Rust Code* phase, i.e. inside every iOS build, after
+xcodegen has written the file from `project.yml`. So the shipped iOS app carried no
+associated-domains entitlement and the native security-key ceremony on iPhone could not have
+worked — silently, because nothing in the build reports it. macOS was never affected:
+`update_entitlements` acts only when `TAURI_IOS_PROJECT_PATH` is set
+(`tauri-plugin-2.6.2/src/build/mobile.rs:17`), so `macos/entitlements.plist` is out of reach.
+2.4.9 is the newest release (May 2026) and the Tauri docs do not mention this behaviour. `[T]`
+
+**Fix** (`scripts/ios-postinit.sh` §3c-bis): the plugin writes to a path derived from the app
+name, and its `update_plist_file` is a no-op when that path does not exist (`if path.exists()`,
+same file line 148). Renaming the app target's entitlements to `ankayma-app.entitlements`
+takes the key back — no fork, no patch, no post-build fixup — while the plugin keeps
+generating the Android intent-filter and finds nothing to rewrite here.
+
+The cost of that fix: the plugin no longer generates `applinks:` for us, so **every claimed
+domain must be listed by hand** in `project.yml`. `scripts/release-ios.sh` re-reads the
+entitlements out of the signed `.ipa` and fails the release if either service is missing —
+same class of invisible failure as §1, and the artifact is the only witness.
+
 ## 6. Checklist before shipping this entitlement again
 
 - [ ] Associated Domains enabled on App ID `com.ankayma.app` in the portal

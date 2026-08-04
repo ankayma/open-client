@@ -16,6 +16,7 @@ import type {
   Subdomain,
   SubdomainCert,
   MembersView,
+  PendingInvitesView,
   PolicyView,
   MyAccess,
 } from "./types";
@@ -512,6 +513,18 @@ export async function inviteMember(
     proofToken: proof?.proofToken,
   });
 }
+// Pending admissions: invited, not yet redeemed (admin only). The roster endpoint reads
+// memberships, which only exist after redeem — so this is the other half of the picture.
+// Carries no invite token: re-sending goes back through inviteMember, which mails the link.
+export async function listPendingInvites(): Promise<PendingInvitesView> {
+  return invokeWithReauth<PendingInvitesView>("list_member_invites");
+}
+
+// Withdraw a pending invite (admin). Access-reducing, so no step-up.
+export async function revokeInvite(email: string): Promise<void> {
+  return invoke("revoke_member_invite", { email });
+}
+
 // Session-authed redeem. NOT used by the invite deep-link flow, and should not be wired
 // back into it: it binds the invite to whoever is currently signed in rather than to the
 // address the invite was issued to, so opening someone else's invite on a signed-in device

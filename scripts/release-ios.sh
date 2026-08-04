@@ -40,6 +40,17 @@ echo "→ Building signed iOS .ipa for App Store Connect…"
 cargo tauri ios build --export-method app-store-connect
 
 IPA=$(find gen/apple/build -iname "*.ipa" 2>/dev/null | head -1)
+
+# ── Entitlement gate ──────────────────────────────────────────────────────────────
+# Two build steps rewrite the associated-domains key behind us (xcodegen, then
+# tauri-plugin-deep-link's build script), and neither announces it. The signed artifact is
+# the only witness. Kept in its own script so it can also be run against an .ipa that
+# already shipped, without a rebuild. [T:docs/macos-associated-domains.md §5.1]
+if [[ -n "${IPA:-}" ]]; then
+  echo "→ Verifying associated-domains survived into the signed app…"
+  "$(dirname "$0")/verify-ios-entitlements.sh" "$IPA"
+fi
+
 echo
 echo "✓ Signed .ipa: ${IPA:-<not found — check the build output>}"
 echo "  Upload with Transporter, or:"

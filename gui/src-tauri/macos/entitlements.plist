@@ -38,10 +38,27 @@
 	     navigator.credentials in the webview: WKWebView does not support FIDO2 security
 	     keys at all, entitlement or not, which is the whole reason the native path
 	     exists. See docs/webauthn-security-key-decision.md.
-	     [T:developer.apple.com/documentation/xcode/supporting-associated-domains] -->
+	     [T:developer.apple.com/documentation/xcode/supporting-associated-domains]
+
+	     The second entry is a DIFFERENT service on the same entitlement: `applinks` makes
+	     the OS open THIS app for https://cp.ankayma.com/join?token=… instead of a browser,
+	     so an invitee who already has the app skips the landing page entirely. It is
+	     checked against https://cp.ankayma.com/.well-known/apple-app-site-association,
+	     which the control plane serves from a compiled default (no env needed).
+
+	     Both services must be listed together: the OS reads this array as the complete set,
+	     so dropping `webcredentials` here would silently break the security-key ceremony
+	     while the app still launched and links still opened. Adding a domain needs no new
+	     provisioning profile — the embedded Developer ID profile authorizes this entitlement
+	     with a wildcard (`com.apple.developer.associated-domains = *`, verified by decoding
+	     macos/ankayma-devid.provisionprofile 2026-08-04). What it does NOT survive is the
+	     profile going missing; see docs/macos-associated-domains.md §2, and keep the launch
+	     gate in scripts/release-macos.sh — every static signature check passed on the two
+	     builds this entitlement bricked. -->
 	<key>com.apple.developer.associated-domains</key>
 	<array>
 		<string>webcredentials:ankayma.com</string>
+		<string>applinks:cp.ankayma.com</string>
 	</array>
 </dict>
 </plist>

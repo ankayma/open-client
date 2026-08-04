@@ -401,6 +401,38 @@ pub struct MembersView {
     pub your_role: String,
 }
 
+/// An admission still in flight: invited, not yet redeemed. `GET /api/v1/members/invites`.
+///
+/// Carries NO token and NO short code — both redeem into a session as the invitee, so the
+/// control plane withholds them from the list and re-send goes out by email instead. Nothing
+/// here should ever grow a credential field. `[T:Part C §H.3.4 + A.1.6]`
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PendingInvite {
+    pub email: String,
+    pub role: String,
+    #[serde(default)]
+    pub seat_type: Option<String>,
+    #[serde(default)]
+    pub created_at: Option<String>,
+    #[serde(default)]
+    pub expires_at: Option<String>,
+    #[serde(default)]
+    pub last_sent_at: Option<String>,
+    /// How many mails this one invite has already cost (1 = mint only).
+    #[serde(default)]
+    pub send_count: i32,
+    /// Lapsed but unredeemed — still holds the one-invite-per-address slot, so the admin
+    /// sees it and either re-sends (refreshing the TTL) or revokes it.
+    #[serde(default)]
+    pub expired: bool,
+}
+
+/// `GET /api/v1/members/invites` envelope.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PendingInvitesView {
+    pub invites: Vec<PendingInvite>,
+}
+
 // ── PolicyBlock authz (Slice B/D) ─────────────────────────────────────────────
 
 /// The active PolicyBlock as `GET /api/v1/policies` returns it. `rules` is the raw

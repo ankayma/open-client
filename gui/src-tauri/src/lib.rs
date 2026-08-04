@@ -948,25 +948,59 @@ enum DeepLinkKind {
     JoinNode,
 }
 
-/// Parse a `ankayma://<host>?token=…` deep link into its kind + token. Returns None
-/// for a foreign scheme, an unknown host, or a missing/empty token — so a stray URL
-/// can't be mistaken for any of the three flows.
+/// Hosts whose `https://` links this app may act on. A Universal Link (iOS/macOS) or an
+/// Android App Link arrives as the ORIGINAL https URL, not as `ankayma://…` — the OS hands
+/// us the very address the user tapped. So the same URL that renders a web page for someone
+/// without the app must also be understood here.
+///
+/// An allow-list, not a pattern: the token in these links is a bearer credential, and the
+/// only thing that makes it safe to act on is that it came from a host we operate. The OS
+/// will not deliver a foreign domain's link to us (the association is per-domain), but this
+/// function is also reachable from paste + `single-instance` argv, which have no such
+/// guarantee. `ankayma.com` is included because the marketing site is where a shortened or
+/// re-hosted invite may land.
+const WEB_LINK_HOSTS: &[&str] = &["cp.ankayma.com", "ankayma.com"];
+
+/// Parse an invite/auth deep link into its kind + token. Two shapes reach us:
+///
+/// - `ankayma://<host>?token=…` — the custom scheme, keyed on host.
+/// - `https://<our host>/<path>?token=…` — a Universal / App Link, keyed on path.
+///
+/// Returns None for a foreign scheme or host, an unknown host/path, or a missing token —
+/// so a stray URL can't be mistaken for any of the flows.
 fn parse_deep_link(url: &url::Url) -> Option<(DeepLinkKind, String)> {
-    if url.scheme() != "ankayma" {
-        return None;
-    }
     let token = url
         .query_pairs()
         .find(|(k, _)| k == "token")
         .map(|(_, v)| v.into_owned())
         .filter(|t| !t.is_empty())?;
-    let kind = match url.host_str().unwrap_or("") {
-        "auth" => DeepLinkKind::Auth,
-        "join-team" => DeepLinkKind::JoinTeam,
-        "join" => DeepLinkKind::JoinNode,
-        _ => return None,
-    };
-    Some((kind, token))
+    match url.scheme() {
+        "ankayma" => {
+            let kind = match url.host_str().unwrap_or("") {
+                "auth" => DeepLinkKind::Auth,
+                "join-team" => DeepLinkKind::JoinTeam,
+                "join" => DeepLinkKind::JoinNode,
+                _ => return None,
+            };
+            Some((kind, token))
+        }
+        "https" => {
+            let host = url.host_str()?.to_ascii_lowercase();
+            if !WEB_LINK_HOSTS.contains(&host.as_str()) {
+                return None;
+            }
+            // Path, not host, carries the meaning here. `/join` is the member-invite
+            // landing the invite email links to; it is the only path the association file
+            // claims, so it is the only one worth routing. A trailing slash is tolerated
+            // because link shorteners and mail rewriters add one.
+            let kind = match url.path().trim_end_matches('/') {
+                "/join" => DeepLinkKind::JoinTeam,
+                _ => return None,
+            };
+            Some((kind, token))
+        }
+        _ => None,
+    }
 }
 
 /// Handle a batch of deep-link URLs (cold OR warm start): hold the token by kind and
@@ -3789,6 +3823,28 @@ async fn invite_member(
     .map_err(|e| e.to_string())
 }
 
+/// The admissions still in flight (admin). `list_members` shows only people who have
+/// already redeemed, so without this an invited-but-not-yet-joined teammate is invisible
+/// and the only way to re-send is retyping their address into the invite form.
+#[tauri::command]
+async fn list_member_invites(
+    state: State<'_, AppState>,
+) -> Result<domain::PendingInvitesView, String> {
+    let tok = state.token().ok_or("not signed in")?;
+    adapters::list_member_invites(&state.http, &state.regional_base_url(), &tok)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Withdraw a pending invite before it is redeemed (admin).
+#[tauri::command]
+async fn revoke_member_invite(state: State<'_, AppState>, email: String) -> Result<(), String> {
+    let tok = state.token().ok_or("not signed in")?;
+    adapters::revoke_member_invite(&state.http, &state.regional_base_url(), &tok, email.trim())
+        .await
+        .map_err(|e| e.to_string())
+}
+
 /// Drain the held `ankayma://join-team?token=…` invite token. The welcome page calls
 /// this on cold start: the `join-team-pending` event fired before the JS listener
 /// registered (and was lost), but the token is safely held in the Rust mutex until
@@ -4515,6 +4571,8 @@ pub fn run() {
             unpublish_sample_demo,
             list_members,
             invite_member,
+            list_member_invites,
+            revoke_member_invite,
             join_team,
             remove_member,
             reset_member_totp,
@@ -4726,6 +4784,57 @@ mod tests {
 
     #[test]
     fn foreign_scheme_is_rejected() {
-        assert!(kind_token("https://auth?token=x").is_none());
+        assert!(kind_token("mailto:someone@example.com?token=x").is_none());
+        assert!(kind_token("ftp://cp.ankayma.com/join?token=x").is_none());
+    }
+
+    // ── Universal / App Links ────────────────────────────────────────────────────
+    // The OS hands us the ORIGINAL https URL the user tapped, not a rewritten
+    // `ankayma://` one. Without these branches the app opens to a blank screen while the
+    // link looks like it worked — the failure reads as "Universal Links are broken" when
+    // the association is fine and it is the app that dropped the URL.
+
+    #[test]
+    fn https_invite_link_routes_to_join_team() {
+        let (kind, tok) =
+            kind_token("https://cp.ankayma.com/join?token=inv456").expect("https invite parses");
+        assert!(matches!(kind, DeepLinkKind::JoinTeam));
+        assert_eq!(tok, "inv456");
+    }
+
+    #[test]
+    fn https_invite_link_tolerates_trailing_slash_and_host_case() {
+        assert!(kind_token("https://CP.Ankayma.com/join/?token=inv456").is_some());
+    }
+
+    // The token in these links is a bearer credential. The OS only delivers links for
+    // domains we are associated with, but paste and single-instance argv reach the same
+    // parser with no such guarantee — so the host allow-list is load-bearing, not defence
+    // in depth. A look-alike domain must never get its token adopted.
+    #[test]
+    fn https_link_from_a_foreign_host_is_rejected() {
+        for hostile in [
+            "https://evil.com/join?token=x",
+            "https://cp.ankayma.com.evil.com/join?token=x",
+            "https://notankayma.com/join?token=x",
+        ] {
+            assert!(
+                kind_token(hostile).is_none(),
+                "must not adopt a token from {hostile}"
+            );
+        }
+    }
+
+    // Only the path the association file claims is routed. Everything else on this host —
+    // OAuth callbacks, the API, the F0 landing — must keep belonging to the browser.
+    #[test]
+    fn https_link_on_an_unclaimed_path_is_rejected() {
+        for other in [
+            "https://cp.ankayma.com/auth/github/callback?token=x",
+            "https://cp.ankayma.com/invite/f0?token=x",
+            "https://cp.ankayma.com/?token=x",
+        ] {
+            assert!(kind_token(other).is_none(), "must not route {other}");
+        }
     }
 }

@@ -55,15 +55,19 @@
 	let loading  = $state(true);
 	let copied   = $state(false);
 
-	// Configurable node-invite TTL (server clamps to [1m, 7d]). [A] invite-flow §TTL.
+	// Configurable node-invite TTL (server clamps to [1m, 4h]). [T:invite-flow §TTL]
+	// Hours, not days: redeeming this link signs the new device into THIS account (the
+	// control plane mints the issuer's session as part of enrolment), so the link is
+	// account access, not just a device coupon — and the window it stays live is the
+	// window it can be used by whoever else sees it. Enrolling a device you have in hand
+	// takes minutes; if the link lapses, minting another is one tap.
 	const NODE_TTL_OPTIONS = [
 		{ label: '1 hour',  secs: 3600 },
-		{ label: '6 hours', secs: 21600 },
-		{ label: '24 hours', secs: 86400 },
-		{ label: '7 days',  secs: 604800 },
+		{ label: '2 hours', secs: 7200 },
+		{ label: '4 hours', secs: 14400 },
 	];
-	let nodeTtl = $state(86400);
-	let ttlLabel = $derived(NODE_TTL_OPTIONS.find((o) => o.secs === nodeTtl)?.label ?? '24 hours');
+	let nodeTtl = $state(3600);
+	let ttlLabel = $derived(NODE_TTL_OPTIONS.find((o) => o.secs === nodeTtl)?.label ?? '1 hour');
 
 	// QR is rendered dependency-free onto a canvas (so it also exports to PNG).
 	let qrCanvas = $state<HTMLCanvasElement | null>(null);
