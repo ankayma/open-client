@@ -308,7 +308,9 @@ jobs:
           AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
           AWS_DEFAULT_REGION: auto
         run: |
-          aws s3 sync publish/ "s3://${{ secrets.R2_BUCKET_MACOS }}/android/" --endpoint-url "${{ secrets.R2_ENDPOINT }}"
+          # BETA ONLY — see promote.yml. This prefix used to be the stable one, so every
+          # tag went to users on green while other platforms waited for a human.
+          aws s3 sync publish/ "s3://${{ secrets.R2_BUCKET_MACOS }}/android/beta/" --endpoint-url "${{ secrets.R2_ENDPOINT }}"
 
       # SLSA build provenance (Sigstore + Rekor) for both artifacts. Last step — the APK
       # is already on R2, so a hiccup here never blocks the release.

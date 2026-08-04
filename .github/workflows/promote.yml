@@ -24,7 +24,7 @@ on:
         required: true
         default: gui-macos
         type: choice
-        options: [gui-macos, headless-macos, headless-windows]
+        options: [gui-macos, headless-macos, headless-windows, linux, gui-windows, android]
 
 jobs:
   promote-gui-macos:
@@ -153,7 +153,7 @@ jobs:
   # ANKAYMA_BASE_URL, so nothing in the installer needed changing. What still has to be
   # gated is the same thing: nobody should be pointed at binaries no machine has run.
   promote-headless:
-    if: inputs.channel != 'gui-macos'
+    if: inputs.channel == 'headless-macos' || inputs.channel == 'headless-windows'
     runs-on: macos-14
     timeout-minutes: 20
     steps:
@@ -231,3 +231,86 @@ jobs:
           aws s3 cp "s3://${{ secrets.R2_BUCKET_MACOS }}/$PREFIX/beta/$INSTALLER" \
             "$B/$INSTALLER" --endpoint-url "$EP"
           echo "✓ $PREFIX $V promoted"
+
+  # Linux, Windows GUI and Android. Same act as promote-headless — verify what is
+  # actually sitting on the beta prefix, then copy it — but these three publish a flat
+  # prefix rather than a versioned tree, so the copy differs enough to keep separate
+  # rather than bend one job around three shapes.
+  #
+  # Linux is the one with teeth: `curl … /install.sh | sh` reads the root prefix, so
+  # until this runs, nobody new gets the build. Windows GUI and Android are downloads
+  # people fetch deliberately, but the same rule applies — no artifact reaches a stable
+  # path without someone having run it first.
+  promote-flat:
+    if: inputs.channel == 'linux' || inputs.channel == 'gui-windows' || inputs.channel == 'android'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve prefix
+        run: |
+          case "${{ inputs.channel }}" in
+            linux)       echo "SRC=beta"         >> "$GITHUB_ENV"; echo "DST="        >> "$GITHUB_ENV" ;;
+            gui-windows) echo "SRC=windows/beta" >> "$GITHUB_ENV"; echo "DST=windows" >> "$GITHUB_ENV" ;;
+            android)     echo "SRC=android/beta" >> "$GITHUB_ENV"; echo "DST=android" >> "$GITHUB_ENV" ;;
+            *) echo "unknown channel"; exit 1 ;;
+          esac
+          V="${{ inputs.tag }}"; echo "V=${V#v}" >> "$GITHUB_ENV"
+
+      - name: Fetch the beta build
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: auto
+        run: |
+          set -euo pipefail
+          B="s3://${{ secrets.R2_BUCKET_MACOS }}"
+          EP="${{ secrets.R2_ENDPOINT }}"
+          if [ "${{ inputs.channel }}" = "linux" ]; then
+            aws s3 sync "$B/beta/$V/" beta/ --endpoint-url "$EP"
+            aws s3 cp   "$B/beta/install.sh" beta/install.sh --endpoint-url "$EP"
+          else
+            aws s3 sync "$B/$SRC/" beta/ --endpoint-url "$EP"
+          fi
+          ls -l beta/
+          test -s beta/SHA256SUMS || { echo "✗ no build for $V on the beta channel"; exit 1; }
+
+      # Checksums first — everything below only means something if these are the bytes
+      # the build produced. CRLF-tolerant: manifests written on a Windows runner list
+      # filenames ending in a carriage return, which no filesystem has.
+      - name: Gate — checksums and publisher signature
+        run: |
+          set -euo pipefail
+          ( cd beta && tr -d '\r' < SHA256SUMS > SHA256SUMS.lf && shasum -a 256 -c SHA256SUMS.lf && rm -f SHA256SUMS.lf )
+          if [ -f beta/SHA256SUMS.sig ] && [ -f beta/cosign.pub ]; then
+            command -v cosign >/dev/null || {
+              curl -sSfL "https://github.com/sigstore/cosign/releases/download/v2.4.1/cosign-linux-amd64" -o /usr/local/bin/cosign
+              chmod +x /usr/local/bin/cosign
+            }
+            cosign verify-blob --insecure-ignore-tlog --key beta/cosign.pub \
+              --signature beta/SHA256SUMS.sig beta/SHA256SUMS
+            echo "  ✓ signature valid"
+          else
+            echo "✗ SHA256SUMS is unsigned — refusing to promote"; exit 1
+          fi
+
+      - name: Publish to the stable channel
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: auto
+        run: |
+          set -euo pipefail
+          B="s3://${{ secrets.R2_BUCKET_MACOS }}"
+          EP="${{ secrets.R2_ENDPOINT }}"
+          if [ "${{ inputs.channel }}" = "linux" ]; then
+            aws s3 sync beta/ "$B/$V/"     --exclude install.sh --endpoint-url "$EP"
+            aws s3 sync beta/ "$B/latest/" --exclude install.sh --endpoint-url "$EP"
+            # Installer last: until it moves, `curl | sh` still fetches the previous
+            # build, so a failure midway leaves users on the old one rather than half-moved.
+            aws s3 cp beta/install.sh "$B/install.sh" --endpoint-url "$EP"
+          else
+            aws s3 sync beta/ "$B/$DST/" --endpoint-url "$EP"
+          fi
+          echo "✓ ${{ inputs.channel }} $V promoted"

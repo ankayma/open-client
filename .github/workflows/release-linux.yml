@@ -133,10 +133,21 @@ jobs:
           EP="${{ secrets.R2_ENDPOINT }}"
 
           # curl|sh channel (install.sh + versioned binaries), same bucket as macOS.
-          aws s3 sync "dist/$VERSION/" "s3://${{ secrets.R2_BUCKET_MACOS }}/$VERSION/" --endpoint-url "$EP"
-          aws s3 sync "dist/$VERSION/" "s3://${{ secrets.R2_BUCKET_MACOS }}/latest/"   --endpoint-url "$EP"
-          aws s3 cp "dist/$VERSION/install.sh" "s3://${{ secrets.R2_BUCKET_MACOS }}/install.sh" --endpoint-url "$EP"
+          # BETA ONLY — promote.yml copies this to the stable prefix once someone has
+          # run it. Linux used to publish straight to `$VERSION/`, `latest/` and the
+          # root `install.sh`, which meant every tag reached every `curl | sh` user the
+          # moment CI went green, while macOS and Windows-headless sat behind a gate.
+          # The gate was guarding half the door. [T — audited 2026-08-04]
+          aws s3 sync "dist/$VERSION/" "s3://${{ secrets.R2_BUCKET_MACOS }}/beta/$VERSION/" --endpoint-url "$EP"
+          aws s3 sync "dist/$VERSION/" "s3://${{ secrets.R2_BUCKET_MACOS }}/beta/latest/"   --endpoint-url "$EP"
+          aws s3 cp "dist/$VERSION/install.sh" "s3://${{ secrets.R2_BUCKET_MACOS }}/beta/install.sh" --endpoint-url "$EP"
 
+          # apt/yum are NOT gated, deliberately. They are package repositories with their
+          # own suite layout, so a beta channel there means a second suite (aptly) and a
+          # second repo dir (yum), not a path prefix — separate work. The exposure is
+          # also different in kind: `apt upgrade` is something a person runs, not
+          # something that happens to them while the machine is idle. [A — revisit if a
+          # beta suite is wanted; the honest gap is that these two ship on green]
           # apt repo (aptly `public/` tree — dists/, pool/, ankayma.gpg).
           aws s3 sync public/ "s3://${{ secrets.R2_BUCKET_APT }}/" --endpoint-url "$EP"
 
