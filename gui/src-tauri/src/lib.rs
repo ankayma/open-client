@@ -4269,22 +4269,48 @@ async fn check_for_update(app: AppHandle) -> tauri_plugin_updater::Result<()> {
     // `init()`; verified via docs.rs, no ProcessExt at its crate root].
     use tauri_plugin_updater::UpdaterExt;
 
-    // Endpoints can be overridden at runtime, which is what makes one binary able to
-    // follow either channel. [T:v2.tauri.app/plugin/updater — "setting the URLs … at
-    // runtime allows more dynamic updates such as separate release channels"]
+    // Endpoints are set at runtime, always — not only for beta. tauri.conf.json can
+    // hold exactly one endpoint, and it held the macOS one, so the Windows app asked
+    // for the macOS manifest, found platforms {darwin-universal} with nothing matching
+    // `windows-x86_64`, and concluded there was no update. Not an error, not a log
+    // line: a silent no-op on every launch, forever. Every Windows user has been stuck
+    // on whatever they first installed while release-windows.yml kept publishing a
+    // latest.json nobody read.
+    // [T — tauri.conf.json plugins.updater.endpoints was ["…/macos/latest.json"];
+    //  release-windows.yml publishes platforms.windows-x86_64 to windows/]
+    //
+    // Both platforms lay out the same: `<platform>/latest.json` for stable,
+    // `<platform>/<channel>/latest.json` for anything else. Only the path differs; the
+    // manifest shape and signature scheme are identical, so a beta machine exercises
+    // the exact delivery path a stable one will.
+    // [T:v2.tauri.app/plugin/updater — "setting the URLs … at runtime allows more
+    //  dynamic updates such as separate release channels"]
     let mut builder = app.updater_builder();
     let channel = update_channel();
-    if channel != "stable" {
-        // Only the tarball path differs; the manifest and signature scheme are identical,
-        // so a beta machine exercises the exact delivery path a stable one will.
-        let url = format!("https://get.ankayma.com/macos/{channel}/latest.json");
-        log::info!("update channel: {channel} ({url})");
-        match url.parse() {
-            Ok(u) => builder = builder.endpoints(vec![u])?,
-            // A typo in the channel file must not strand the machine with no updates at
-            // all — fall back to stable and say so.
-            Err(e) => log::warn!("bad update-channel {channel:?} ({e}) — using stable"),
-        }
+
+    // Linux ships a CLI, not this app — there is no Linux GUI release and so no
+    // manifest to ask for. Checking anyway would 404 once per launch and teach whoever
+    // reads the log to ignore it.
+    let platform = if cfg!(target_os = "macos") {
+        "macos"
+    } else if cfg!(target_os = "windows") {
+        "windows"
+    } else {
+        log::info!("no update channel for this platform — skipping check");
+        return Ok(());
+    };
+
+    let url = if channel == "stable" {
+        format!("https://get.ankayma.com/{platform}/latest.json")
+    } else {
+        format!("https://get.ankayma.com/{platform}/{channel}/latest.json")
+    };
+    log::info!("update channel: {channel} ({url})");
+    match url.parse() {
+        Ok(u) => builder = builder.endpoints(vec![u])?,
+        // A typo in the channel file must not strand the machine with no updates at
+        // all — fall back to whatever tauri.conf.json holds and say so.
+        Err(e) => log::warn!("bad update-channel {channel:?} ({e}) — using the built-in endpoint"),
     }
 
     let Some(update) = builder.build()?.check().await? else {

@@ -311,6 +311,20 @@ jobs:
             # build, so a failure midway leaves users on the old one rather than half-moved.
             aws s3 cp beta/install.sh "$B/install.sh" --endpoint-url "$EP"
           else
+            # The manifest points at the beta URL; stable users must be sent to the
+            # stable one. Rewriting rather than rebuilding keeps the signature valid —
+            # it covers the installer's bytes, not the manifest, and those bytes are the
+            # same file being copied. Same treatment promote-gui-macos already applies.
+            if [ -f beta/latest.json ]; then
+              python3 - <<'PYJSON'
+          import json, pathlib
+          m = json.load(open("beta/latest.json"))
+          for plat in m["platforms"].values():
+              plat["url"] = plat["url"].replace("/beta/", "/")
+          pathlib.Path("beta/latest.json").write_text(json.dumps(m, indent=2))
+          print("stable url ->", list(m["platforms"].values())[0]["url"])
+          PYJSON
+            fi
             aws s3 sync beta/ "$B/$DST/" --endpoint-url "$EP"
           fi
           echo "✓ ${{ inputs.channel }} $V promoted"
