@@ -127,7 +127,9 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
     /// wireguard-apple instead drops to `temporaryShutdown` here — not ported, because a
     /// clean in-process stop/restart is exactly what the pump still lacks (see the TODO on
     /// ankayma_ptp_stop). TODO[A]: port it once pump cancellation lands.
-    private func didReceivePathUpdate(path: NWPath) {
+    /// `Network.NWPath`, spelled out: NetworkExtension vends an unrelated Objective-C
+    /// class of the same name, so a bare `NWPath` is ambiguous once both are imported.
+    private func didReceivePathUpdate(path: Network.NWPath) {
         guard let handle = handle else { return }
         guard path.status == .satisfied else {
             NSLog("ankayma-ptp: path unsatisfied — leaving socket pinned to if#%u", lastBoundIf)
