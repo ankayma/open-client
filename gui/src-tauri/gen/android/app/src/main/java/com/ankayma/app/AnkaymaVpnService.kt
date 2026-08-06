@@ -5,7 +5,9 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.content.Intent
 import android.net.ConnectivityManager
+import android.net.Network
 import android.net.NetworkCapabilities
+import android.net.NetworkRequest
 import android.net.VpnService
 import android.os.Build
 import android.os.ParcelFileDescriptor
@@ -18,8 +20,140 @@ import java.net.InetSocketAddress
 
 class AnkaymaVpnService : VpnService() {
 
+    /// Volatile because `publishUnderlyingNetworks` reads it from the NetworkCallback
+    /// thread to decide whether a tunnel exists yet, while onStartCommand writes it.
+    @Volatile
     private var tunInterface: ParcelFileDescriptor? = null
     private var nativeHandle: Long = 0L
+
+    /// The device's real (non-VPN) networks, kept live by `networkCallback`. Guarded by
+    /// `underlyingLock`; insertion order is irrelevant because `rankedUnderlyingNetworks`
+    /// sorts on every read.
+    private val underlying = HashMap<Network, NetworkCapabilities>()
+    private val underlyingLock = Any()
+    private var networkCallback: ConnectivityManager.NetworkCallback? = null
+
+    override fun onCreate() {
+        super.onCreate()
+        startNetworkTracking()
+    }
+
+    /// Track the real networks under us.
+    ///
+    /// `getActiveNetwork()` and `registerDefaultNetworkCallback()` are the wrong tools
+    /// inside a VpnService: once our own tunnel is up it IS the default network, so both
+    /// hand back the VPN — and a socket "bypassed" onto it loops straight back into the
+    /// TUN. The way out is a NetworkRequest that demands NOT_VPN. Tailscale's Android
+    /// client registers the same request for the same reason `[T:tailscale-android
+    /// NetworkChangeCallback — "we can't use registerDefaultNetworkCallback because the
+    /// default network used by Tailscale will always show up with capability NOT_VPN=false,
+    /// and we must filter out NOT_VPN networks to avoid routing loops"]`.
+    private fun startNetworkTracking() {
+        val cm = getSystemService(ConnectivityManager::class.java) ?: return
+        val request = NetworkRequest.Builder()
+            .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+            .addCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN)
+            .build()
+        val cb = object : ConnectivityManager.NetworkCallback() {
+            override fun onAvailable(network: Network) {
+                cm.getNetworkCapabilities(network)?.let { caps ->
+                    synchronized(underlyingLock) { underlying[network] = caps }
+                }
+                publishUnderlyingNetworks()
+            }
+
+            override fun onCapabilitiesChanged(network: Network, caps: NetworkCapabilities) {
+                synchronized(underlyingLock) { underlying[network] = caps }
+                publishUnderlyingNetworks()
+            }
+
+            override fun onLost(network: Network) {
+                synchronized(underlyingLock) { underlying.remove(network) }
+                publishUnderlyingNetworks()
+            }
+        }
+        try {
+            cm.registerNetworkCallback(request, cb)
+            networkCallback = cb
+        } catch (e: Exception) {
+            // Callback registration can be refused (per-app callback quota). Every reader
+            // falls back to a live scan, so this degrades rather than breaks.
+            android.util.Log.w("AnkaymaVPN", "registerNetworkCallback failed: ${e.message}")
+        }
+    }
+
+    private fun stopNetworkTracking() {
+        val cb = networkCallback ?: return
+        networkCallback = null
+        try {
+            getSystemService(ConnectivityManager::class.java)?.unregisterNetworkCallback(cb)
+        } catch (e: Exception) {
+            android.util.Log.w("AnkaymaVPN", "unregisterNetworkCallback failed: ${e.message}")
+        }
+        synchronized(underlyingLock) { underlying.clear() }
+    }
+
+    /// The tracked networks, best first.
+    ///
+    /// Two sort keys, DNS first: a network with no usable resolver cannot serve
+    /// `forwardDns`, and among the rest an unmetered link beats a metered one (WiFi over
+    /// cellular). Picking `firstOrNull` off an unordered list — what this used to do — hands
+    /// back cellular on a phone that also has WiFi. Falls back to a live scan when the
+    /// callback has not delivered yet: `getUpstreamDns()` runs before `establish()`, which
+    /// can be before the first callback arrives.
+    private fun rankedUnderlyingNetworks(): List<Network> {
+        val cm = getSystemService(ConnectivityManager::class.java) ?: return emptyList()
+        val tracked = synchronized(underlyingLock) { underlying.keys.toList() }
+        val candidates = if (tracked.isNotEmpty()) {
+            tracked
+        } else {
+            @Suppress("DEPRECATION")
+            cm.allNetworks.filter { net ->
+                val caps = cm.getNetworkCapabilities(net)
+                caps != null &&
+                    caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) &&
+                    caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN)
+            }
+        }
+        return candidates.sortedWith(
+            compareByDescending<Network> { net -> hasUsableDns(net) }
+                .thenByDescending { net ->
+                    cm.getNetworkCapabilities(net)
+                        ?.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_METERED) == true
+                }
+        )
+    }
+
+    /// A resolver we can actually send to. Loopback and link-local (fe80::) are excluded for
+    /// the same reason `getUpstreamDns` excludes them — a link-local address carries a zone
+    /// suffix (%wlan0) that Rust's SocketAddr parser rejects.
+    private fun hasUsableDns(net: Network): Boolean {
+        val cm = getSystemService(ConnectivityManager::class.java) ?: return false
+        val dns = cm.getLinkProperties(net)?.dnsServers ?: return false
+        return dns.any { !it.isLoopbackAddress && !it.isLinkLocalAddress }
+    }
+
+    private fun pickUnderlyingNetwork(): Network? = rankedUnderlyingNetworks().firstOrNull()
+
+    /// Tell the platform which real networks carry this tunnel.
+    ///
+    /// Not optional once a VPN binds its upstream sockets to a Network: `[T:Android
+    /// VpnService.setUnderlyingNetworks — "only needs to be called if the VPN has explicitly
+    /// bound its underlying communications channels — such as the socket(s) passed to
+    /// protect(int) — to a Network using APIs such as Network#bindSocket()"]`, which is
+    /// exactly what `bindSocketToUnderlyingNetwork` and `forwardDns` do. Without it the
+    /// platform attributes our traffic to the wrong network for metering and connectivity
+    /// reporting, for every app behind the VPN. Ordered best-first, as the API asks
+    /// ("decreasing preference order"); null hands the choice back to the system default.
+    private fun publishUnderlyingNetworks() {
+        if (tunInterface == null) return // nothing established yet — nothing to attribute
+        val ranked = rankedUnderlyingNetworks()
+        try {
+            setUnderlyingNetworks(if (ranked.isEmpty()) null else ranked.toTypedArray())
+        } catch (e: Exception) {
+            android.util.Log.w("AnkaymaVPN", "setUnderlyingNetworks failed: ${e.message}")
+        }
+    }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (intent?.action == ACTION_STOP) {
@@ -111,6 +245,8 @@ class AnkaymaVpnService : VpnService() {
                 }
 
             tunInterface = pfd
+            // The tunnel exists now, so the platform will accept an attribution.
+            publishUnderlyingNetworks()
             // Pass updated config (with upstream_dns injected) to Rust.
             nativeHandle = nativeStart(pfd.fd, obj.toString())
 
@@ -141,6 +277,7 @@ class AnkaymaVpnService : VpnService() {
     }
 
     override fun onDestroy() {
+        stopNetworkTracking()
         stopVpn()
         super.onDestroy()
     }
@@ -151,15 +288,10 @@ class AnkaymaVpnService : VpnService() {
     private fun getUpstreamDns(): String? {
         return try {
             val cm = getSystemService(ConnectivityManager::class.java) ?: return null
-            // Walk all networks to find one with internet that is NOT the VPN.
-            // activeNetwork can be the VPN itself on reconnect, so we check all networks.
-            cm.allNetworks
-                .mapNotNull { net ->
-                    val caps = cm.getNetworkCapabilities(net) ?: return@mapNotNull null
-                    if (!caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)) return@mapNotNull null
-                    if (!caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN)) return@mapNotNull null
-                    cm.getLinkProperties(net)
-                }
+            // Ranked, so a phone holding both WiFi and cellular reads WiFi's resolver
+            // rather than whichever network the platform happened to list first.
+            rankedUnderlyingNetworks()
+                .mapNotNull { net -> cm.getLinkProperties(net) }
                 .flatMap { it.dnsServers }
                 // Skip loopback and link-local (fe80::) addresses: link-local addresses
                 // carry a zone ID suffix (%wlan0) that Rust's SocketAddr parser rejects.
@@ -197,12 +329,7 @@ class AnkaymaVpnService : VpnService() {
     /// Called from Rust via JNI (dns_forward_fn in pump::DnsInterceptor).
     fun forwardDns(payload: ByteArray, upstreamIp: String): ByteArray? {
         return try {
-            val cm = getSystemService(ConnectivityManager::class.java) ?: return null
-            val net = cm.allNetworks.firstOrNull { net ->
-                val caps = cm.getNetworkCapabilities(net) ?: return@firstOrNull false
-                caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) &&
-                        caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN)
-            } ?: return null
+            val net = pickUnderlyingNetwork() ?: return null
 
             val sock = DatagramSocket()
             // Bind to the non-VPN network — this is what makes DNS bypass the TUN.
@@ -228,12 +355,7 @@ class AnkaymaVpnService : VpnService() {
     /// Must be called BEFORE connect(). Returns true if bound. [T:F-3 bindSocket pattern]
     fun bindSocketToUnderlyingNetwork(fd: Int): Boolean {
         return try {
-            val cm = getSystemService(ConnectivityManager::class.java) ?: return false
-            val net = cm.allNetworks.firstOrNull { net ->
-                val caps = cm.getNetworkCapabilities(net) ?: return@firstOrNull false
-                caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) &&
-                        caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN)
-            } ?: return false
+            val net = pickUnderlyingNetwork() ?: return false
             // fromFd dups the fd; binding the dup marks the shared underlying socket,
             // then we close the dup — the original Rust fd stays open and bound.
             val pfd = android.os.ParcelFileDescriptor.fromFd(fd)
