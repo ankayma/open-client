@@ -24,7 +24,7 @@
 #   + capabilities); re-supply the key only for altool upload (read-only uploads fine).
 #   Persistent alternative: install an Apple Distribution cert (Xcode > Settings > Accounts >
 #   Manage Certificates > + Apple Distribution) and the key may stay set the whole time.
-#   Full write-up: workspace/02-architecture/implementation/part-d-infrastructure.md §6.2.
+#   Post-build checks + known gotchas: docs/ios-build-verify-checklist.md.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
