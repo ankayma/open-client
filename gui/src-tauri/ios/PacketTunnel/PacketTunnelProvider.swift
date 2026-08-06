@@ -27,20 +27,16 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
     /// Opaque `PtpHandle *` from ankayma_ptp_start; freed in stopTunnel.
     private var handle: OpaquePointer?
 
-    /// Watches the device's physical path so the pump's UDP socket can follow it onto a
-    /// new interface. The index handed to `ankayma_ptp_start` is a snapshot of the path
-    /// at tunnel start; when the device moves — WiFi↔cellular, another WiFi network,
-    /// airplane mode, or a cellular PDP context re-established while roaming — that index
-    /// goes stale and every send on the pinned socket fails EHOSTUNREACH until re-pinned.
-    /// wireguard-apple solves this the same way: an NWPathMonitor whose pathUpdateHandler
-    /// calls wgBumpSockets. `[T:wireguard-apple WireGuardAdapter.swift —
-    /// didReceivePathUpdate → wgBumpSockets]`
+    /// Watches the device's physical path. wireguard-apple runs the same monitor and calls
+    /// wgBumpSockets on every update `[T:wireguard-apple WireGuardAdapter.swift —
+    /// didReceivePathUpdate]`; ours carries the current interface index down to the DNS
+    /// relay's pinned fallback. It does NOT re-pin the WireGuard socket — that socket is
+    /// no longer bound to an interface at all (see agent-ios-ptp `start_inner`).
     private let pathMonitor = NWPathMonitor()
     /// Serial queue for the monitor: `didReceivePathUpdate` touches `handle`, which
     /// startTunnel/stopTunnel also write. One queue, no locking.
     private let pathQueue = DispatchQueue(label: "com.ankayma.app.tunnel.path")
-    /// Last index we pinned to — used only to keep the device log readable (a path update
-    /// that resolves to the same interface is still bumped, exactly as the reference does).
+    /// Last index we reported — used only to keep the device log readable.
     private var lastBoundIf: UInt32 = 0
 
     // MARK: NEPacketTunnelProvider
@@ -66,8 +62,8 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         )
 
         // DNS forwarding of non-private names is done in Rust (the pump relays via a
-        // BSD socket pinned to the physical interface — see agent-ios-ptp
-        // `ios_dns_forward`), NOT via the provider's NWUDPSession. `matchDomains=[""]`
+        // plain BSD socket — see agent-ios-ptp `ios_dns_forward`), NOT via the
+        // provider's NWUDPSession. `matchDomains=[""]`
         // routes ALL DNS into the pump; the upstream resolver is passed to Rust in the
         // config (`upstream_dns`). Nothing to wire on the Swift side.
         let settings = makeNetworkSettings(from: loaded.config)
@@ -90,11 +86,11 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
 
             // Drive the shared Rust pump over the utun fd. The full JSON (incl. the
             // private key) goes straight to Rust — Swift only read the overlay/peers
-            // it needs for the routes above. `boundIf` pins the pump's UDP socket to
-            // the physical interface so its packets egress instead of looping back
-            // into our own tunnel (the extension-socket egress fix).
+            // it needs for the routes above. `boundIf` no longer pins the pump's UDP
+            // socket (see agent-ios-ptp `start_inner`); it is passed for the DNS
+            // relay's pinned fallback only.
             let boundIf = self.physicalInterfaceIndex()
-            NSLog("ankayma-ptp: pinning socket to physical if#%u", boundIf)
+            NSLog("ankayma-ptp: egress if#%u (DNS pinned fallback only)", boundIf)
             self.handle = loaded.rawJSON.withCString { ankayma_ptp_start(fd, $0, boundIf) }
             if self.handle == nil {
                 os_log("ankayma_ptp_start returned null", log: self.log, type: .error)
@@ -119,28 +115,25 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         pathMonitor.start(queue: pathQueue)
     }
 
-    /// Re-pin the pump's socket to the current physical interface.
+    /// Report the current physical interface to the data plane after a path change.
     ///
-    /// Runs on `pathQueue`. An unsatisfied path is skipped rather than pinned to 0: there
-    /// is no interface to move to yet, and un-pinning would put the socket back in the
-    /// state where its packets never leave the device (diagnosed 2026-07-03).
-    /// wireguard-apple instead drops to `temporaryShutdown` here — not ported, because a
-    /// clean in-process stop/restart is exactly what the pump still lacks (see the TODO on
-    /// ankayma_ptp_stop). TODO[A]: port it once pump cancellation lands.
+    /// Runs on `pathQueue`. An unsatisfied path is skipped rather than reported as 0:
+    /// there is no interface to move to yet. wireguard-apple instead drops to
+    /// `temporaryShutdown` here — not ported, because a clean in-process stop/restart is
+    /// exactly what the pump still lacks (see the TODO on ankayma_ptp_stop).
+    /// TODO[A]: port it once pump cancellation lands.
+    ///
     /// `Network.NWPath`, spelled out: NetworkExtension vends an unrelated Objective-C
     /// class of the same name, so a bare `NWPath` is ambiguous once both are imported.
     private func didReceivePathUpdate(path: Network.NWPath) {
         guard let handle = handle else { return }
         guard path.status == .satisfied else {
-            NSLog("ankayma-ptp: path unsatisfied — leaving socket pinned to if#%u", lastBoundIf)
+            NSLog("ankayma-ptp: path unsatisfied — nothing to report")
             return
         }
         let boundIf = physicalInterfaceIndex()
         if boundIf != lastBoundIf {
-            NSLog(
-                "ankayma-ptp: path changed — re-pinning socket if#%u → if#%u",
-                lastBoundIf, boundIf
-            )
+            NSLog("ankayma-ptp: path changed — egress if#%u → if#%u", lastBoundIf, boundIf)
             lastBoundIf = boundIf
         }
         ankayma_ptp_bump_sockets(handle, boundIf)
@@ -302,6 +295,26 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
     /// into our own tunnel. Heuristic: the first UP, non-loopback interface that is
     /// NOT our own tun/ipsec, with an assigned address. Returns 0 if none found
     /// (Rust then skips pinning). `[T:wireguard-apple]`
+    /// Best-effort index of a physical interface, for the DNS relay's PINNED FALLBACK only
+    /// (agent-ios-ptp `forward_once`, which sends unbound first and only pins when that
+    /// fails).
+    ///
+    /// Do NOT use this to bind the WireGuard data socket. It walks `getifaddrs` and takes
+    /// the first UP, non-loopback, non-utun interface holding an IPv4 address —
+    /// `getifaddrs` returns the kernel's enumeration order, not a preference order, so the
+    /// answer can be an interface with no route off the device. On an iPhone 11 it returns
+    /// if#3, whose only other user in the device log is `CommCenter`; binding the tunnel
+    /// socket there made every `sendto` fail EHOSTUNREACH on both cellular and WiFi, and
+    /// re-evaluating it 14 times after a network change returned if#3 every time.
+    /// `[T — device log 2026-08-06]`
+    ///
+    /// The reference implementations either never bind (wireguard-apple, wireguard-go on
+    /// darwin) or resolve the index from the kernel's default route via AF_ROUTE/RTM_GET
+    /// (Tailscale) — none of them enumerate interfaces like this.
+    /// `[T:WireGuardAdapter.swift; wireguard-go fbcd995; tailscale netns_darwin.go]`
+    ///
+    /// TODO[A]: if the DNS fallback ever actually fires on device, replace this with the
+    /// AF_ROUTE default-route lookup rather than tuning the heuristic.
     private func physicalInterfaceIndex() -> UInt32 {
         var result: UInt32 = 0
         var ifap: UnsafeMutablePointer<ifaddrs>?
@@ -341,9 +354,9 @@ private enum PtpError: Error {
 // NOTE: DNS forwarding of non-private names is NOT done on the Swift side. An earlier
 // version relayed via `NEPacketTunnelProvider.createUDPSession`/`NWUDPSession`, built on
 // the (false) premise that a raw socket can't egress a Packet Tunnel Provider. It can:
-// a plain BSD UDP socket pinned to the physical interface with `IP_BOUND_IF` egresses
-// the real network — that's how our WG data socket already reaches peers, and how
-// Tailscale forwards on darwin [T:Tailscale net/netns/netns_darwin.go]. The relay now
+// a plain BSD UDP socket egresses the real network with no interface binding at all —
+// that's how our WG data socket reaches peers, since `makeNetworkSettings` installs no
+// default route for the extension's own traffic to fall into. The relay now
 // lives in Rust (agent-ios-ptp `ios_dns_forward`), so the whole NWUDPSession bridge was
 // removed. See docs/f3-ios-dns-forwarding-resolver.md.
 

@@ -62,8 +62,10 @@ const FORWARD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
 /// `[T:Apple-DevForums-114097]`.
 ///
 /// A plain BSD UDP socket egresses the real network from inside a Packet Tunnel
-/// Provider — exactly how our WG data socket reaches peers, and how Tailscale
-/// forwards on darwin `[T:Tailscale net/netns/netns_darwin.go — IP_BOUND_IF]`.
+/// Provider, with no interface binding — exactly how our WG data socket reaches
+/// peers, because the tunnel installs no default route for its own traffic to fall
+/// into. `[T — device log 2026-08-06: unbound sockets in the AnkaymaTunnel process
+/// carried traffic on cellular and followed the device onto WiFi]`
 /// Runs on a short-lived thread so the pump's tx loop never blocks.
 fn ios_dns_forward(token: u64, query: &[u8]) {
     let upstreams: &[SocketAddr] = DNS_UPSTREAMS.get().map(Vec::as_slice).unwrap_or(&[]);
@@ -320,19 +322,27 @@ fn prepare(config_json: &str) -> Result<Prepared, String> {
 }
 
 /// Opaque handle returned to Swift. Holds the shared data-plane state alive for the
-/// tunnel's lifetime (the pump threads hold their own clones). `udp` is also the
-/// socket `ankayma_ptp_bump_sockets` re-pins when the device's network path changes.
+/// tunnel's lifetime (the pump threads hold their own clones). `_udp` is wildcard-bound
+/// and NOT bound to any interface — see `start_inner` for why. Nothing reads it today;
+/// it is the socket the real `wgBumpSockets` will have to swap (see
+/// `ankayma_ptp_bump_sockets`), and holding it keeps the port alive even if every pump
+/// thread exits.
 pub struct PtpHandle {
-    udp: Arc<UdpSocket>,
+    _udp: Arc<UdpSocket>,
     _peers: pump::Peers,
 }
 
-/// Pin the pump's UDP socket to the physical interface (`IP_BOUND_IF`/`IPV6_BOUND_IF`)
-/// so its packets egress WiFi/cellular instead of being swallowed by our own tunnel.
-/// Without this the extension's socket `sendto` SUCCEEDS but the packet never leaves
-/// the device — the peer sees nothing, the socket receives nothing (diagnosed on
-/// device 2026-07-03; the exact fix wireguard-apple uses). `bound_if == 0` skips it.
-/// `[T:Darwin IP_BOUND_IF=25/IPV6_BOUND_IF=125; wireguard-apple]`
+/// Bind a socket to one physical interface (`IP_BOUND_IF`/`IPV6_BOUND_IF`).
+/// `bound_if == 0` skips it. `[T:Darwin IP_BOUND_IF=25/IPV6_BOUND_IF=125]`
+///
+/// Used ONLY by the DNS relay's pinned fallback (`forward_once`), which tries unbound
+/// first and only lands here when that fails. It is deliberately NOT used on the
+/// WireGuard data socket — see `start_inner`.
+///
+/// An earlier revision of this comment claimed this was "the exact fix wireguard-apple
+/// uses". That was wrong: wireguard-apple never binds a socket to an interface at all
+/// `[T:wireguard-apple WireGuardAdapter.swift — no IP_BOUND_IF / bindSocketToInterface
+/// anywhere; path.availableInterfaces is logged, never used to pick]`.
 fn bind_socket_to_interface(sock: &UdpSocket, bound_if: u32) {
     if bound_if == 0 {
         ios_pump_log("bound_if=0 — socket NOT pinned to a physical interface");
@@ -380,8 +390,32 @@ fn start_inner(fd: i32, config_json: &str, bound_if: u32) -> Result<Box<PtpHandl
         UdpSocket::bind(SocketAddr::from(([0, 0, 0, 0], p.listen_port)))
             .map_err(|e| format!("bind udp/{}: {e}", p.listen_port))?,
     );
-    // Pin to the physical interface BEFORE any send (see fn doc). `[T:wireguard-apple]`
-    bind_socket_to_interface(&udp, bound_if);
+    // The WireGuard data socket is NOT bound to an interface. It was, and that binding
+    // was the whole bug: on an iPhone 11 the picker resolved to if#3 — an interface with
+    // no route off the device — and every `sendto` returned EHOSTUNREACH from the first
+    // packet on, on both cellular and WiFi. `[T — device log 2026-08-06: in one
+    // AnkaymaTunnel process, the bound UDP socket sat on if#3 with rx=0/tx=0 while the
+    // unbound TCP relay leg and the unbound DNS socket ran on if#4 (cellular) and
+    // followed the device to if#12 when it joined WiFi]`
+    //
+    // Not binding is also what the reference implementations do:
+    //   - wireguard-apple never binds a socket to an interface index at all.
+    //     `[T:WireGuardAdapter.swift]`
+    //   - wireguard-go deleted its darwin binding outright: "device: darwin actually
+    //     doesn't need bound interfaces" `[T:wireguard-go commit fbcd995]`
+    //   - Tailscale does bind on darwin, but resolves the index from the kernel's
+    //     DEFAULT ROUTE via an AF_ROUTE/RTM_GET query — never by enumerating interfaces
+    //     — and ships kill-switches (`disableBindConnToInterface`,
+    //     `disableBindConnToInterfaceAppleExt`) for exactly this class of breakage.
+    //     `[T:tailscale net/netns/netns_darwin.go]`
+    //
+    // Nothing loops back without it: `makeNetworkSettings` installs NO default route,
+    // only per-peer overlay /32s plus the DNS-carrier /24, so a datagram addressed to a
+    // peer's public endpoint cannot match an included route and be pulled into our own
+    // utun. `[T:PacketTunnel/PacketTunnelProvider.swift — includedRoutes]`
+    //
+    // `bound_if` is still accepted, and stored above into DNS_BOUND_IF: the DNS relay
+    // keeps it for its pinned fallback, which only fires when an unbound send fails.
     let peers: pump::Peers = Arc::new(Mutex::new(Vec::new()));
     let index = Arc::new(Mutex::new(0u32));
 
@@ -490,7 +524,10 @@ fn start_inner(fd: i32, config_json: &str, bound_if: u32) -> Result<Box<PtpHandl
         );
     }
 
-    Ok(Box::new(PtpHandle { udp, _peers: peers }))
+    Ok(Box::new(PtpHandle {
+        _udp: udp,
+        _peers: peers,
+    }))
 }
 
 /// Start the WireGuard packet pump over `fd` (the Packet Tunnel Provider's utun fd)
@@ -522,30 +559,33 @@ pub unsafe extern "C" fn ankayma_ptp_start(
     }
 }
 
-/// Re-pin the pump's UDP socket to `bound_if` after the device's network path changed.
+/// Tell the data plane the device's network path changed, carrying the interface index
+/// the path now resolves to.
 ///
-/// The interface index handed to `ankayma_ptp_start` is a snapshot: it is correct only
-/// for the path that existed at tunnel start. When iOS moves the device to another
-/// physical interface — WiFi↔cellular handoff, a different WiFi network, airplane mode,
-/// or a cellular PDP context re-established while roaming — the pinned index goes stale
-/// and EVERY `sendto` on the pinned socket returns `EHOSTUNREACH`, permanently, for
-/// every destination. Observed on device 2026-08-06: a roaming iPhone re-established
-/// its PDP context four times in sixty seconds, and the pump logged
-/// `timer→<peer> SEND FAILED: No route to host (os error 65)` every five seconds
-/// thereafter while its UDP flow counters stayed at tx=0/rx=0.
+/// This does NOT re-pin the WireGuard socket. An earlier revision did, on the reading
+/// that re-applying `IP_BOUND_IF` "is what `wgBumpSockets` amounts to for a socket of
+/// this shape". That reading was wrong twice over:
 ///
-/// This is the `wgBumpSockets` half of the reference design: wireguard-apple runs an
-/// `NWPathMonitor` whose `pathUpdateHandler` calls `wgBumpSockets` on every path update
-/// so the data socket follows the device onto the new interface, instead of pinning
-/// once at start. `[T:wireguard-apple WireGuardAdapter.swift — didReceivePathUpdate →
-/// wgBumpSockets]`
+///   1. wireguard-apple has no socket binding to re-apply — it never binds
+///      `[T:WireGuardAdapter.swift]`. `wgBumpSockets` is wireguard-go closing and
+///      re-opening its UDP sockets so the kernel re-resolves the route, not a socket
+///      option being refreshed.
+///   2. Re-pinning does not even converge on the right interface. Measured on device
+///      2026-08-06: after the phone moved from cellular to WiFi, the path monitor fired
+///      14 times, this function re-pinned 14 times, and the picker returned the same
+///      dead if#3 every time (`socket pinned to if#3 (IP_BOUND_IF rc=0)` ×14) while the
+///      process's unbound sockets had already moved to if#12 on their own.
 ///
-/// Our socket is wildcard-bound (`0.0.0.0:listen_port`), so it holds no stale source
-/// address: the only thing that went stale is the `IP_BOUND_IF` value, and re-applying
-/// it is what `wgBumpSockets` amounts to for a socket of this shape. `[A]` verify on
-/// device that the option change also clears the socket's cached route — if a re-pinned
-/// socket still reports `EHOSTUNREACH`, the fallback is wireguard-go's fuller move
-/// (close and re-open the socket), which needs the pump to swap its `Arc<UdpSocket>`.
+/// The socket is wildcard-bound (`0.0.0.0:listen_port`) and unbound to any interface, so
+/// it carries no stale source address and no stale interface index across a path change.
+///
+/// TODO[A]: port the real `wgBumpSockets` — close the UDP socket and re-open it on the
+/// same port so the kernel drops any cached route, which is what wireguard-go does on
+/// every path update. It needs an indirection the pump does not have yet: `Arc<UdpSocket>`
+/// is cloned into the tx, rx, timers, discovery and rendezvous threads, so all of them
+/// must observe the swap (wireguard-go's own `Bind` holds its sockets behind a RWMutex
+/// for exactly this). Verify first whether it is needed at all: watch a roaming device
+/// for `SEND FAILED` on the now-unbound socket after a WiFi↔cellular handoff.
 ///
 /// Not ported from `didReceivePathUpdate`: (a) `wgSetConfig`, which re-resolves peer
 /// endpoints — ours arrive from the control plane as `IP:port` literals, so there is no
@@ -559,18 +599,18 @@ pub unsafe extern "C" fn ankayma_ptp_start(
 /// `handle` must be a pointer returned by `ankayma_ptp_start` and not yet freed.
 #[no_mangle]
 pub unsafe extern "C" fn ankayma_ptp_bump_sockets(handle: *mut PtpHandle, bound_if: u32) {
-    let Some(h) = handle.as_ref() else {
+    if handle.is_null() {
         return;
-    };
+    }
     // 0 means "the caller found no eligible physical interface" — keep the index that
     // last worked rather than clobbering it with a pin-to-nothing.
     if bound_if == 0 {
         return;
     }
-    // The DNS relay pins to the same physical interface on its pinned-fallback path,
-    // so it must learn the new index too or it keeps the stale one.
+    // The DNS relay pins to this interface on its pinned-fallback path, so it must learn
+    // the new index or it keeps the stale one. That fallback is the only remaining
+    // consumer of `bound_if`.
     DNS_BOUND_IF.store(bound_if, std::sync::atomic::Ordering::Relaxed);
-    bind_socket_to_interface(&h.udp, bound_if);
 }
 
 /// Stop the tunnel and free the handle. Null is a no-op.
@@ -603,28 +643,52 @@ mod tests {
     #[no_mangle]
     extern "C" fn ankayma_ptp_log(_msg: *const c_char) {}
 
+    /// Read back `IP_BOUND_IF` — 0 means the socket is not bound to any interface.
+    fn bound_if_of(sock: &UdpSocket) -> u32 {
+        use std::os::unix::io::AsRawFd;
+        let mut idx: u32 = 0;
+        let mut len = std::mem::size_of::<u32>() as libc::socklen_t;
+        // SAFETY: getsockopt with a valid fd and a correctly sized out-param.
+        let rc = unsafe {
+            libc::getsockopt(
+                sock.as_raw_fd(),
+                libc::IPPROTO_IP,
+                25, // IP_BOUND_IF
+                &mut idx as *mut u32 as *mut libc::c_void,
+                &mut len,
+            )
+        };
+        assert_eq!(rc, 0, "getsockopt(IP_BOUND_IF) failed");
+        idx
+    }
+
     /// One test, not three: `DNS_BOUND_IF` is process-global, so separate tests would
     /// interleave and flake.
     #[test]
-    fn bump_sockets_repins_on_a_real_index_and_never_clobbers_with_zero() {
+    fn bump_sockets_reports_the_index_without_ever_binding_the_wg_socket() {
         // Null handle must not dereference.
         unsafe { ankayma_ptp_bump_sockets(std::ptr::null_mut(), 7) };
 
         let udp = Arc::new(UdpSocket::bind("127.0.0.1:0").expect("bind loopback"));
-        let peers: pump::Peers = Arc::new(Mutex::new(Vec::new()));
-        let handle = Box::into_raw(Box::new(PtpHandle { udp, _peers: peers }));
+        let handle = Box::into_raw(Box::new(PtpHandle {
+            _udp: udp.clone(),
+            _peers: Arc::new(Mutex::new(Vec::new())),
+        }));
 
-        // A path update carrying a real index re-pins and teaches the DNS relay the same
-        // interface. The setsockopt itself may fail on the host (the index need not exist
-        // here) — `bind_socket_to_interface` logs the rc and does not panic, which is the
-        // behaviour the extension depends on.
+        // A path update carrying a real index teaches the DNS relay that interface.
         unsafe { ankayma_ptp_bump_sockets(handle, 9) };
         assert_eq!(DNS_BOUND_IF.load(std::sync::atomic::Ordering::Relaxed), 9);
 
-        // 0 = "no eligible interface found". Must keep the last good index rather than
-        // un-pinning the socket, which is the state where packets never leave the device.
+        // 0 = "no eligible interface found". Keep the last good index for the DNS
+        // fallback rather than clobbering it with a pin-to-nothing.
         unsafe { ankayma_ptp_bump_sockets(handle, 0) };
         assert_eq!(DNS_BOUND_IF.load(std::sync::atomic::Ordering::Relaxed), 9);
+
+        // The regression this whole change is about: the WireGuard socket must stay
+        // unbound no matter what index a path update carries. Binding it to a
+        // heuristically-picked interface is what made every `sendto` return
+        // EHOSTUNREACH on device (2026-08-06).
+        assert_eq!(bound_if_of(&udp), 0, "WG socket must never be bound");
 
         unsafe { ankayma_ptp_stop(handle) };
     }
