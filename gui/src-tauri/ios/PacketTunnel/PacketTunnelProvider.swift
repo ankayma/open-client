@@ -13,6 +13,7 @@
 // Enroll + peer-refresh stay in the main app (the extension's memory budget is
 // tight); the app writes/updates the config file in the App Group.
 
+import Network
 import NetworkExtension
 import os.log
 
@@ -25,6 +26,22 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
     private let log = OSLog(subsystem: "com.ankayma.app.tunnel", category: "ptp")
     /// Opaque `PtpHandle *` from ankayma_ptp_start; freed in stopTunnel.
     private var handle: OpaquePointer?
+
+    /// Watches the device's physical path so the pump's UDP socket can follow it onto a
+    /// new interface. The index handed to `ankayma_ptp_start` is a snapshot of the path
+    /// at tunnel start; when the device moves — WiFi↔cellular, another WiFi network,
+    /// airplane mode, or a cellular PDP context re-established while roaming — that index
+    /// goes stale and every send on the pinned socket fails EHOSTUNREACH until re-pinned.
+    /// wireguard-apple solves this the same way: an NWPathMonitor whose pathUpdateHandler
+    /// calls wgBumpSockets. `[T:wireguard-apple WireGuardAdapter.swift —
+    /// didReceivePathUpdate → wgBumpSockets]`
+    private let pathMonitor = NWPathMonitor()
+    /// Serial queue for the monitor: `didReceivePathUpdate` touches `handle`, which
+    /// startTunnel/stopTunnel also write. One queue, no locking.
+    private let pathQueue = DispatchQueue(label: "com.ankayma.app.tunnel.path")
+    /// Last index we pinned to — used only to keep the device log readable (a path update
+    /// that resolves to the same interface is still bumped, exactly as the reference does).
+    private var lastBoundIf: UInt32 = 0
 
     // MARK: NEPacketTunnelProvider
 
@@ -84,9 +101,47 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
                 completionHandler(PtpError.startFailed)
                 return
             }
+            self.lastBoundIf = boundIf
+            self.startPathMonitor()
             os_log("tunnel up (fd=%d)", log: self.log, type: .info, fd)
             completionHandler(nil)
         }
+    }
+
+    // MARK: Path changes
+
+    /// Follow the device onto whatever physical interface it lands on next. Started only
+    /// after the pump exists, so an update can never race a null handle.
+    private func startPathMonitor() {
+        pathMonitor.pathUpdateHandler = { [weak self] path in
+            self?.didReceivePathUpdate(path: path)
+        }
+        pathMonitor.start(queue: pathQueue)
+    }
+
+    /// Re-pin the pump's socket to the current physical interface.
+    ///
+    /// Runs on `pathQueue`. An unsatisfied path is skipped rather than pinned to 0: there
+    /// is no interface to move to yet, and un-pinning would put the socket back in the
+    /// state where its packets never leave the device (diagnosed 2026-07-03).
+    /// wireguard-apple instead drops to `temporaryShutdown` here — not ported, because a
+    /// clean in-process stop/restart is exactly what the pump still lacks (see the TODO on
+    /// ankayma_ptp_stop). TODO[A]: port it once pump cancellation lands.
+    private func didReceivePathUpdate(path: NWPath) {
+        guard let handle = handle else { return }
+        guard path.status == .satisfied else {
+            NSLog("ankayma-ptp: path unsatisfied — leaving socket pinned to if#%u", lastBoundIf)
+            return
+        }
+        let boundIf = physicalInterfaceIndex()
+        if boundIf != lastBoundIf {
+            NSLog(
+                "ankayma-ptp: path changed — re-pinning socket if#%u → if#%u",
+                lastBoundIf, boundIf
+            )
+            lastBoundIf = boundIf
+        }
+        ankayma_ptp_bump_sockets(handle, boundIf)
     }
 
     override func stopTunnel(
@@ -94,6 +149,9 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         completionHandler: @escaping () -> Void
     ) {
         os_log("stopTunnel (reason=%d)", log: log, type: .info, reason.rawValue)
+        // Cancel BEFORE freeing the handle: a queued path update must not reach a
+        // dangling PtpHandle.
+        pathMonitor.cancel()
         if let handle = handle {
             ankayma_ptp_stop(handle)
             self.handle = nil

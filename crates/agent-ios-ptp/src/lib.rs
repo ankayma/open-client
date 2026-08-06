@@ -320,9 +320,10 @@ fn prepare(config_json: &str) -> Result<Prepared, String> {
 }
 
 /// Opaque handle returned to Swift. Holds the shared data-plane state alive for the
-/// tunnel's lifetime (the pump threads hold their own clones).
+/// tunnel's lifetime (the pump threads hold their own clones). `udp` is also the
+/// socket `ankayma_ptp_bump_sockets` re-pins when the device's network path changes.
 pub struct PtpHandle {
-    _udp: Arc<UdpSocket>,
+    udp: Arc<UdpSocket>,
     _peers: pump::Peers,
 }
 
@@ -489,10 +490,7 @@ fn start_inner(fd: i32, config_json: &str, bound_if: u32) -> Result<Box<PtpHandl
         );
     }
 
-    Ok(Box::new(PtpHandle {
-        _udp: udp,
-        _peers: peers,
-    }))
+    Ok(Box::new(PtpHandle { udp, _peers: peers }))
 }
 
 /// Start the WireGuard packet pump over `fd` (the Packet Tunnel Provider's utun fd)
@@ -524,6 +522,57 @@ pub unsafe extern "C" fn ankayma_ptp_start(
     }
 }
 
+/// Re-pin the pump's UDP socket to `bound_if` after the device's network path changed.
+///
+/// The interface index handed to `ankayma_ptp_start` is a snapshot: it is correct only
+/// for the path that existed at tunnel start. When iOS moves the device to another
+/// physical interface — WiFi↔cellular handoff, a different WiFi network, airplane mode,
+/// or a cellular PDP context re-established while roaming — the pinned index goes stale
+/// and EVERY `sendto` on the pinned socket returns `EHOSTUNREACH`, permanently, for
+/// every destination. Observed on device 2026-08-06: a roaming iPhone re-established
+/// its PDP context four times in sixty seconds, and the pump logged
+/// `timer→<peer> SEND FAILED: No route to host (os error 65)` every five seconds
+/// thereafter while its UDP flow counters stayed at tx=0/rx=0.
+///
+/// This is the `wgBumpSockets` half of the reference design: wireguard-apple runs an
+/// `NWPathMonitor` whose `pathUpdateHandler` calls `wgBumpSockets` on every path update
+/// so the data socket follows the device onto the new interface, instead of pinning
+/// once at start. `[T:wireguard-apple WireGuardAdapter.swift — didReceivePathUpdate →
+/// wgBumpSockets]`
+///
+/// Our socket is wildcard-bound (`0.0.0.0:listen_port`), so it holds no stale source
+/// address: the only thing that went stale is the `IP_BOUND_IF` value, and re-applying
+/// it is what `wgBumpSockets` amounts to for a socket of this shape. `[A]` verify on
+/// device that the option change also clears the socket's cached route — if a re-pinned
+/// socket still reports `EHOSTUNREACH`, the fallback is wireguard-go's fuller move
+/// (close and re-open the socket), which needs the pump to swap its `Arc<UdpSocket>`.
+///
+/// Not ported from `didReceivePathUpdate`: (a) `wgSetConfig`, which re-resolves peer
+/// endpoints — ours arrive from the control plane as `IP:port` literals, so there is no
+/// name to re-resolve; (b) the `.unsatisfied` → `temporaryShutdown` transition, which
+/// needs a clean in-process stop the pump does not have yet (see `ankayma_ptp_stop`).
+/// TODO[A]: revisit (b) once pump cancellation lands.
+///
+/// A null handle or `bound_if == 0` is a no-op.
+///
+/// # Safety
+/// `handle` must be a pointer returned by `ankayma_ptp_start` and not yet freed.
+#[no_mangle]
+pub unsafe extern "C" fn ankayma_ptp_bump_sockets(handle: *mut PtpHandle, bound_if: u32) {
+    let Some(h) = handle.as_ref() else {
+        return;
+    };
+    // 0 means "the caller found no eligible physical interface" — keep the index that
+    // last worked rather than clobbering it with a pin-to-nothing.
+    if bound_if == 0 {
+        return;
+    }
+    // The DNS relay pins to the same physical interface on its pinned-fallback path,
+    // so it must learn the new index too or it keeps the stale one.
+    DNS_BOUND_IF.store(bound_if, std::sync::atomic::Ordering::Relaxed);
+    bind_socket_to_interface(&h.udp, bound_if);
+}
+
 /// Stop the tunnel and free the handle. Null is a no-op.
 ///
 /// TODO[A]: the pump threads currently stop only when the extension process is torn
@@ -546,6 +595,39 @@ pub unsafe extern "C" fn ankayma_ptp_stop(handle: *mut PtpHandle) {
 mod tests {
     use super::*;
     use agent_core::WgKeypair;
+
+    /// `ankayma_ptp_log` is provided by the Swift extension (`@_cdecl`), so a host test
+    /// binary that reaches `ios_pump_log` has no definition to link against. Until this
+    /// test nothing pulled that path in and `-dead_strip` hid the gap. Stub it here so
+    /// the FFI entry points can be exercised on the host.
+    #[no_mangle]
+    extern "C" fn ankayma_ptp_log(_msg: *const c_char) {}
+
+    /// One test, not three: `DNS_BOUND_IF` is process-global, so separate tests would
+    /// interleave and flake.
+    #[test]
+    fn bump_sockets_repins_on_a_real_index_and_never_clobbers_with_zero() {
+        // Null handle must not dereference.
+        unsafe { ankayma_ptp_bump_sockets(std::ptr::null_mut(), 7) };
+
+        let udp = Arc::new(UdpSocket::bind("127.0.0.1:0").expect("bind loopback"));
+        let peers: pump::Peers = Arc::new(Mutex::new(Vec::new()));
+        let handle = Box::into_raw(Box::new(PtpHandle { udp, _peers: peers }));
+
+        // A path update carrying a real index re-pins and teaches the DNS relay the same
+        // interface. The setsockopt itself may fail on the host (the index need not exist
+        // here) — `bind_socket_to_interface` logs the rc and does not panic, which is the
+        // behaviour the extension depends on.
+        unsafe { ankayma_ptp_bump_sockets(handle, 9) };
+        assert_eq!(DNS_BOUND_IF.load(std::sync::atomic::Ordering::Relaxed), 9);
+
+        // 0 = "no eligible interface found". Must keep the last good index rather than
+        // un-pinning the socket, which is the state where packets never leave the device.
+        unsafe { ankayma_ptp_bump_sockets(handle, 0) };
+        assert_eq!(DNS_BOUND_IF.load(std::sync::atomic::Ordering::Relaxed), 9);
+
+        unsafe { ankayma_ptp_stop(handle) };
+    }
 
     fn valid_key_b64() -> String {
         // A real 32-byte X25519 key, base64 — exercises `key_bytes_from_b64`.

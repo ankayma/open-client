@@ -42,6 +42,21 @@ typedef struct PtpHandle PtpHandle;
  */
 PtpHandle *ankayma_ptp_start(int32_t fd, const char *config_json, uint32_t bound_if);
 
+/*
+ * Re-pin the pump's UDP socket after the device's network path changed.
+ *
+ * The `bound_if` passed to ankayma_ptp_start() is only correct for the path that
+ * existed at tunnel start. On a WiFi/cellular handoff, a WiFi network change, an
+ * airplane-mode toggle, or a cellular PDP context re-established while roaming, that
+ * index goes stale and every sendto on the pinned socket fails with EHOSTUNREACH — for
+ * every destination — until it is re-pinned.
+ *
+ * Call this from an NWPathMonitor pathUpdateHandler with a freshly computed interface
+ * index, on every satisfied path update. Same contract wireguard-apple implements as
+ * wgBumpSockets. NULL handle or bound_if == 0 is a no-op.
+ */
+void ankayma_ptp_bump_sockets(PtpHandle *handle, uint32_t bound_if);
+
 /* Stop the tunnel and free `handle`. NULL is a no-op. */
 void ankayma_ptp_stop(PtpHandle *handle);
 
