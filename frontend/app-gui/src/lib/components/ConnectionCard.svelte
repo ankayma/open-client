@@ -18,7 +18,8 @@
 		vpnStatus,
 		getPlatform,
 		getNodeInfo,
-		preflightStatus
+		preflightStatus,
+		isSessionError
 	} from '$lib/tauri';
 	import type { PathProof } from '$lib/types';
 	import PreflightGate from './PreflightGate.svelte';
@@ -172,7 +173,14 @@
 			}
 		} catch (e) {
 			connection.set({ status: 'disconnected' });
-			connectError = e instanceof Error ? e.message : String(e);
+			// Reaching here with a session error means the device already TRIED to
+			// re-authenticate and the control plane refused. Say that in words the user can
+			// act on, never the raw SESSION_EXPIRED marker.
+			connectError = isSessionError(e)
+				? STRINGS[lang].session_expired
+				: e instanceof Error
+					? e.message
+					: String(e);
 		} finally {
 			toggling = false;
 		}

@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { goto } from "$app/navigation";
-  import { myAccess, openSubdomain, getNodeInfo, listNodes, listCiPolicies, ciHistory, sshHistory, getPathProof, probeReachable, getQuota } from "$lib/tauri";
+  import { myAccess, openSubdomain, getNodeInfo, listNodes, listCiPolicies, ciHistory, sshHistory, getPathProof, probeReachable, getQuota, isSessionError } from "$lib/tauri";
   import type { MyAccess, AccessService, PeerBrief, CiPolicy, CiRun, SshSession, PathProof, PathPeer } from "$lib/types";
   import { connection, myRole, quota } from "$lib/stores";
   import ConnectionCard from "$lib/components/ConnectionCard.svelte";
@@ -171,7 +171,13 @@
       data = await myAccess();
       myRole.set(data.role); // surface role app-wide (BottomTabBar admin-tab gate)
     } catch (e: unknown) {
-      error = e instanceof Error ? e.message : "Failed to load services";
+      // myAccess() already retried behind a device-key re-auth; a session error here
+      // means that re-auth was refused, so tell the user the one thing that helps.
+      error = isSessionError(e)
+        ? "Your session expired. Please sign in again."
+        : e instanceof Error
+          ? e.message
+          : "Failed to load services";
     } finally {
       loading = false;
     }

@@ -64,6 +64,9 @@ export const STRINGS: Record<Lang, Record<string, string>> = {
     diag_sent:        'Đã gửi. Mã báo cáo:',
     diag_sent_hint:   'Đưa mã này cho support để tra đúng báo cáo.',
     diag_error:       'Không gửi được:',
+    // Shown only when the device could not re-authenticate on its own — the marker the
+    // Rust side returns (SESSION_EXPIRED) must never reach the screen as-is.
+    session_expired:  'Phiên đăng nhập đã hết hạn. Hãy đăng nhập lại.',
   },
 
   en: {
@@ -129,6 +132,9 @@ export const STRINGS: Record<Lang, Record<string, string>> = {
     diag_sent:        'Sent. Report id:',
     diag_sent_hint:   'Give this id to support to find your report.',
     diag_error:       'Couldn’t send:',
+    // Shown only when the device could not re-authenticate on its own — the marker the
+    // Rust side returns (SESSION_EXPIRED) must never reach the screen as-is.
+    session_expired:  'Your session expired. Please sign in again.',
   },
 };
 

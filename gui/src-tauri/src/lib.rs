@@ -64,6 +64,14 @@ fn get_platform() -> &'static str {
 /// Default control plane; override with ANKAYMA_CONTROL_PLANE for dev/staging.
 const DEFAULT_CONTROL_PLANE: &str = "https://cp.ankayma.com";
 
+/// Sentinel a command returns when it needs a session and none is held in memory.
+/// The frontend matches it to re-authenticate via the device key and retry, exactly
+/// as it already does for `STEP_UP_REQUIRED` — a machine-readable marker rather than
+/// prose, because the prose used to be `"not signed in"`, which matched none of the
+/// frontend's recovery conditions and so froze the app in a state it could have
+/// healed itself out of in one round-trip. `[T:E-6 device-key re-auth + A.1.10]`
+const SESSION_EXPIRED: &str = "SESSION_EXPIRED";
+
 /// A node enrolled on the mesh: its WireGuard identity + assigned overlay IP +
 /// the peers the control plane returned. The private key stays in-process.
 struct EnrolledNode {
@@ -261,6 +269,13 @@ impl AppState {
 
     fn set_token(&self, tok: Option<String>) {
         *self.session.lock().expect("session lock poisoned") = tok;
+    }
+
+    /// The bearer token for a control-plane call, or `SESSION_EXPIRED` so the caller's
+    /// error travels to the frontend as a marker it can act on instead of prose it can
+    /// only display.
+    fn require_token(&self) -> Result<String, String> {
+        self.token().ok_or_else(|| SESSION_EXPIRED.to_string())
     }
 
     fn set_email(&self, email: Option<String>) {
@@ -612,7 +627,7 @@ fn load_stored_service_token(dir: &std::path::Path) -> Option<String> {
 /// second one. `agent.json` is the WireGuard key and dies with the tenant;
 /// `machine.key` is the device and outlives every tenant it joins.
 async fn connect_inner(state: &AppState) -> Result<(), String> {
-    let tok = state.token().ok_or("not signed in")?;
+    let tok = state.require_token()?;
     if state.node.lock().expect("node lock poisoned").is_some() {
         return Ok(());
     }
@@ -708,13 +723,32 @@ fn apply_connection_change(app: &AppHandle) {
 
 // --- Commands ---
 
+/// Why a device-key re-auth produced no session.
+///
+/// The distinction decides whether the stored session token is DELETED. Treating both
+/// alike is what turned one unanswered request into a permanent logout: the token file
+/// is the only thing that gets a later attempt into the re-auth path at all, so erasing
+/// it on a network blip left a device with a perfectly good machine key unable to do
+/// anything but wait for a hand-pasted token. `[T:P.3 honest gap]`
+#[derive(Debug, PartialEq, Eq)]
+enum ReauthFailure {
+    /// The control plane answered, and said no — revoked device, legacy node with no
+    /// recorded machine key, or a proof it would not accept. Retrying changes nothing;
+    /// this is a real logout.
+    Refused,
+    /// No verdict was reached: offline, DNS/TLS failure, timeout, or this device could
+    /// not even build a proof. Says nothing about whether the session is still good, so
+    /// nothing may be thrown away on its account.
+    Inconclusive,
+}
+
 /// The stored session expired (4h). Instead of logging out, prove possession of this
 /// device's DURABLE machine key and re-mint a session — no second sign-in, no "4h
 /// wall" (E-6 device-key model; [T:E-6 device-key re-auth + A.1.10]).
-/// Returns the refreshed user, or None if this device cannot re-auth: no enrolled node
-/// in memory (never connected this run), or the CP rejects the proof (device revoked /
-/// legacy). None → the caller does a real logout + disconnect.
-async fn try_reauth_via_device_key(app: &AppHandle, state: &AppState) -> Option<User> {
+async fn try_reauth_via_device_key(
+    app: &AppHandle,
+    state: &AppState,
+) -> Result<User, ReauthFailure> {
     // Node identity: the in-memory enrolled node if we connected this run, else recover it
     // from the persisted handoff (agent.json). The disk fallback is what makes re-auth work
     // on a COLD START — after the app is killed and reopened, `state.node` is empty, but the
@@ -727,11 +761,19 @@ async fn try_reauth_via_device_key(app: &AppHandle, state: &AppState) -> Option<
         });
         match held {
             Some(pair) => pair,
-            None => load_stored_node_identity(&handoff_state_dir(state))?,
+            // Never enrolled on this device (or the handoff file is gone). Nothing to
+            // prove — but nothing was refused either, so the caller keeps what it has.
+            None => match load_stored_node_identity(&handoff_state_dir(state)) {
+                Some(pair) => pair,
+                None => return Err(ReauthFailure::Inconclusive),
+            },
         }
     };
-    let machine = machine_key::MachineKey::load_or_create(&handoff_state_dir(state)).ok()?;
-    let proof = machine.proof_now(&wg_pubkey).ok()?;
+    let machine = machine_key::MachineKey::load_or_create(&handoff_state_dir(state))
+        .map_err(|_| ReauthFailure::Inconclusive)?;
+    let proof = machine
+        .proof_now(&wg_pubkey)
+        .map_err(|_| ReauthFailure::Inconclusive)?;
     // session_refresh runs on — and mints the session INTO — the owner's REGIONAL CP
     // (regional_base_url). Validate + adopt it THERE, not the gateway (auth_base_url):
     // a regional (e.g. UAE) session lives only on its region's box, so checking it
@@ -739,16 +781,28 @@ async fn try_reauth_via_device_key(app: &AppHandle, state: &AppState) -> Option<
     let base = state.regional_base_url();
     let session = adapters::session_refresh(&state.http, &base, &node_id, &proof)
         .await
-        .ok()?;
+        .map_err(classify_reauth_error)?;
     let info = adapters::session_info(&state.http, &base, &session)
         .await
-        .ok()?;
+        .map_err(classify_reauth_error)?;
     state.set_email(Some(info.email.clone()));
     state.update_region(&info.region);
     save_session_to_disk(&state.data_dir, &session);
     state.set_token(Some(session));
     apply_connection_change(app);
-    Some(info.into())
+    Ok(info.into())
+}
+
+/// A control-plane answer of 401/403 is the CP refusing this device; every other error
+/// (transport, 5xx, an undecodable body) means we never learned its verdict.
+fn classify_reauth_error(e: adapters::ApiError) -> ReauthFailure {
+    match e {
+        adapters::ApiError::Status(401 | 403)
+        | adapters::ApiError::Server {
+            status: 401 | 403, ..
+        } => ReauthFailure::Refused,
+        _ => ReauthFailure::Inconclusive,
+    }
 }
 
 #[tauri::command]
@@ -760,8 +814,34 @@ async fn check_auth_state(app: AppHandle, state: State<'_, AppState>) -> Result<
             state.set_token(Some(pending));
         }
     }
+    let reauth = |outcome: Result<User, ReauthFailure>| match outcome {
+        Ok(user) => AuthState::Authenticated { user },
+        // The CP answered and refused: revoked, or a node it will not vouch for. A real
+        // logout — drop the token, erase it from disk, tear the tunnel down.
+        Err(ReauthFailure::Refused) => {
+            clear_session_from_disk(&state.data_dir);
+            state.set_token(None);
+            state.set_email(None);
+            disconnect_inner(state.inner());
+            AuthState::Unauthenticated
+        }
+        // No verdict. Report "signed out" so the UI stops pretending, but keep the token
+        // file: it is the device's way back in, and the next attempt may well succeed.
+        Err(ReauthFailure::Inconclusive) => AuthState::Unauthenticated,
+    };
+
     let result = match state.token() {
-        None => AuthState::Unauthenticated,
+        // No session in memory — but a device that has enrolled still holds a machine key
+        // and a node identity on disk, which is everything a re-auth needs. Trying here is
+        // what lets the app recover on its own instead of demanding a hand-pasted token
+        // for the rest of the install's life. [T:E-6 device-key re-auth + A.1.10]
+        //
+        // This does NOT resurrect a deliberate sign-out: `sign_out` deletes `agent.json`,
+        // so there is no node identity to prove and re-auth stops at the first step. That
+        // asymmetry is the whole seam — `machine.key` survives sign-out on purpose (it is
+        // the device, not the tenant), so re-auth must keep requiring the node handoff too.
+        // Never "improve" this into a machine-key-only path.
+        None => reauth(try_reauth_via_device_key(&app, state.inner()).await),
         // Re-validate the stored token against the control plane.
         Some(tok) => match adapters::session_info(&state.http, &state.auth_base_url, &tok).await {
             Ok(s) => {
@@ -771,18 +851,7 @@ async fn check_auth_state(app: AppHandle, state: State<'_, AppState>) -> Result<
             }
             // Session invalid/expired (4h). Try device-key re-auth before giving up —
             // no second sign-in, no dropped tunnel. [T:E-6 device-key re-auth + A.1.10]
-            Err(_) => match try_reauth_via_device_key(&app, state.inner()).await {
-                Some(user) => AuthState::Authenticated { user },
-                None => {
-                    // Device can't re-auth (revoked / legacy / never enrolled) → real
-                    // logout, and tear the tunnel down too (fix: logout must disconnect).
-                    clear_session_from_disk(&state.data_dir);
-                    state.set_token(None);
-                    state.set_email(None);
-                    disconnect_inner(state.inner());
-                    AuthState::Unauthenticated
-                }
-            },
+            Err(_) => reauth(try_reauth_via_device_key(&app, state.inner()).await),
         },
     };
     // Hand any held invite token to the frontend, but ONLY once authenticated. A
@@ -1114,7 +1183,7 @@ async fn sign_out(app: AppHandle, state: State<'_, AppState>) -> Result<(), Stri
 
 #[tauri::command]
 async fn get_quota(state: State<'_, AppState>) -> Result<Quota, String> {
-    let tok = state.token().ok_or("not signed in")?;
+    let tok = state.require_token()?;
     let q = adapters::quota(&state.http, &state.regional_base_url(), &tok)
         .await
         .map_err(|e| e.to_string())?;
@@ -1476,7 +1545,7 @@ async fn create_join_link(
     // admin pick the expiry; the control plane clamps it. In a multi-user tenant the
     // server gates this behind a step-up — on the first call (no proof) it returns
     // STEP_UP_REQUIRED; the GUI runs the step-up flow and retries with a proof_token.
-    let tok = state.token().ok_or("not signed in")?;
+    let tok = state.require_token()?;
     adapters::issue_join_token(
         &state.http,
         &state.regional_base_url(),
@@ -1555,7 +1624,7 @@ struct ServerEnrollCommands {
 async fn request_step_up(state: State<'_, AppState>, purpose: String) -> Result<String, String> {
     // Ask the control plane to email an OTP for a sensitive action; returns the
     // challenge_id to pass back at `verify_step_up`. [T:Part D §Authority model]
-    let tok = state.token().ok_or("not signed in")?;
+    let tok = state.require_token()?;
     adapters::request_step_up(&state.http, &state.regional_base_url(), &tok, &purpose)
         .await
         .map_err(|e| e.to_string())
@@ -1570,7 +1639,7 @@ async fn verify_step_up(
 ) -> Result<String, String> {
     // Exchange the solved OTP for a proof_token, then retry the original action
     // with it. [T:Part D §H.5]
-    let tok = state.token().ok_or("not signed in")?;
+    let tok = state.require_token()?;
     adapters::verify_step_up(
         &state.http,
         &state.regional_base_url(),
@@ -1591,7 +1660,7 @@ async fn verify_step_up_totp(
 ) -> Result<String, String> {
     // Same exchange, against the enrolled TOTP secret instead of an emailed
     // challenge. [T:Part D §H.8 Phase 2]
-    let tok = state.token().ok_or("not signed in")?;
+    let tok = state.require_token()?;
     adapters::verify_step_up_totp(
         &state.http,
         &state.regional_base_url(),
@@ -1607,7 +1676,7 @@ async fn verify_step_up_totp(
 
 #[tauri::command]
 async fn totp_status(state: State<'_, AppState>) -> Result<bool, String> {
-    let tok = state.token().ok_or("not signed in")?;
+    let tok = state.require_token()?;
     adapters::totp_status(&state.http, &state.regional_base_url(), &tok)
         .await
         .map_err(|e| e.to_string())
@@ -1615,7 +1684,7 @@ async fn totp_status(state: State<'_, AppState>) -> Result<bool, String> {
 
 #[tauri::command]
 async fn totp_enroll(state: State<'_, AppState>) -> Result<(String, String), String> {
-    let tok = state.token().ok_or("not signed in")?;
+    let tok = state.require_token()?;
     adapters::totp_enroll(&state.http, &state.regional_base_url(), &tok)
         .await
         .map_err(|e| e.to_string())
@@ -1623,7 +1692,7 @@ async fn totp_enroll(state: State<'_, AppState>) -> Result<(String, String), Str
 
 #[tauri::command]
 async fn totp_confirm(state: State<'_, AppState>, code: String) -> Result<(), String> {
-    let tok = state.token().ok_or("not signed in")?;
+    let tok = state.require_token()?;
     adapters::totp_confirm(&state.http, &state.regional_base_url(), &tok, &code)
         .await
         .map_err(|e| e.to_string())
@@ -1638,7 +1707,7 @@ async fn totp_disable(
     state: State<'_, AppState>,
     proof_token: Option<String>,
 ) -> Result<(), String> {
-    let tok = state.token().ok_or("not signed in")?;
+    let tok = state.require_token()?;
     adapters::totp_disable(
         &state.http,
         &state.regional_base_url(),
@@ -1756,7 +1825,7 @@ async fn webauthn_native_authenticate(
 
 #[tauri::command]
 async fn webauthn_status(state: State<'_, AppState>) -> Result<bool, String> {
-    let tok = state.token().ok_or("not signed in")?;
+    let tok = state.require_token()?;
     adapters::webauthn_status(&state.http, &state.regional_base_url(), &tok)
         .await
         .map_err(|e| e.to_string())
@@ -1764,7 +1833,7 @@ async fn webauthn_status(state: State<'_, AppState>) -> Result<bool, String> {
 
 #[tauri::command]
 async fn webauthn_register_start(state: State<'_, AppState>) -> Result<serde_json::Value, String> {
-    let tok = state.token().ok_or("not signed in")?;
+    let tok = state.require_token()?;
     adapters::webauthn_register_start(&state.http, &state.regional_base_url(), &tok)
         .await
         .map_err(|e| e.to_string())
@@ -1777,7 +1846,7 @@ async fn webauthn_register_finish(
     credential: serde_json::Value,
     label: Option<String>,
 ) -> Result<(), String> {
-    let tok = state.token().ok_or("not signed in")?;
+    let tok = state.require_token()?;
     adapters::webauthn_register_finish(
         &state.http,
         &state.regional_base_url(),
@@ -1794,7 +1863,7 @@ async fn webauthn_register_finish(
 async fn webauthn_authenticate_start(
     state: State<'_, AppState>,
 ) -> Result<serde_json::Value, String> {
-    let tok = state.token().ok_or("not signed in")?;
+    let tok = state.require_token()?;
     adapters::webauthn_authenticate_start(&state.http, &state.regional_base_url(), &tok)
         .await
         .map_err(|e| e.to_string())
@@ -1807,7 +1876,7 @@ async fn verify_step_up_webauthn(
     state_id: String,
     credential: serde_json::Value,
 ) -> Result<String, String> {
-    let tok = state.token().ok_or("not signed in")?;
+    let tok = state.require_token()?;
     adapters::verify_step_up_webauthn(
         &state.http,
         &state.regional_base_url(),
@@ -2144,7 +2213,7 @@ fn biometric_key_label() -> String {
 #[cfg(any(target_os = "macos", target_os = "ios"))]
 #[tauri::command]
 async fn platform_key_enroll(state: State<'_, AppState>) -> Result<(), String> {
-    let tok = state.token().ok_or("not signed in")?;
+    let tok = state.require_token()?;
     // Check before creating anything: enrolling a key this Mac cannot sign with would
     // leave the account advertising a factor it cannot produce.
     if let Some(reason) = biometrics_unavailable_reason() {
@@ -2227,7 +2296,7 @@ async fn platform_key_sign_challenge(
     purpose: String,
 ) -> Result<String, String> {
     use security_framework::key::Algorithm;
-    let tok = state.token().ok_or("not signed in")?;
+    let tok = state.require_token()?;
     // Fail before minting a server challenge we cannot answer. The caller falls through to
     // TOTP/OTP on any error here, which is right — a lid-shut Mac must not block the
     // action — but the reason still belongs in the log rather than nowhere.
@@ -2327,7 +2396,7 @@ async fn platform_key_sign_challenge(
 #[cfg(any(target_os = "macos", target_os = "ios"))]
 #[tauri::command]
 async fn platform_key_status(state: State<'_, AppState>) -> Result<bool, String> {
-    let tok = state.token().ok_or("not signed in")?;
+    let tok = state.require_token()?;
     let on_server = adapters::platform_key_status(&state.http, &state.regional_base_url(), &tok)
         .await
         .map_err(|e| e.to_string())?;
@@ -2345,7 +2414,7 @@ async fn platform_key_status(state: State<'_, AppState>) -> Result<bool, String>
 async fn platform_key_list(
     state: State<'_, AppState>,
 ) -> Result<Vec<adapters::StepUpFactor>, String> {
-    let tok = state.token().ok_or("not signed in")?;
+    let tok = state.require_token()?;
     adapters::platform_key_list(&state.http, &state.regional_base_url(), &tok)
         .await
         .map_err(|e| e.to_string())
@@ -2355,7 +2424,7 @@ async fn platform_key_list(
 async fn security_key_list(
     state: State<'_, AppState>,
 ) -> Result<Vec<adapters::StepUpFactor>, String> {
-    let tok = state.token().ok_or("not signed in")?;
+    let tok = state.require_token()?;
     adapters::security_key_list(&state.http, &state.regional_base_url(), &tok)
         .await
         .map_err(|e| e.to_string())
@@ -2369,7 +2438,7 @@ async fn platform_key_remove(
     key_id: String,
     proof_token: Option<String>,
 ) -> Result<(), String> {
-    let tok = state.token().ok_or("not signed in")?;
+    let tok = state.require_token()?;
     adapters::platform_key_delete(
         &state.http,
         &state.regional_base_url(),
@@ -2399,7 +2468,7 @@ async fn security_key_remove(
     credential_id: String,
     proof_token: Option<String>,
 ) -> Result<(), String> {
-    let tok = state.token().ok_or("not signed in")?;
+    let tok = state.require_token()?;
     adapters::security_key_delete(
         &state.http,
         &state.regional_base_url(),
@@ -2915,7 +2984,7 @@ async fn start_dataplane(state: State<'_, AppState>) -> Result<(), String> {
 /// Connect used to run `connect_inner` alone, which enrolled but never brought
 /// the tunnel up (one more way to a green UI over a dead data plane).
 async fn start_dataplane_inner(state: &AppState) -> Result<(), String> {
-    let tok = state.token().ok_or("not signed in")?;
+    let tok = state.require_token()?;
     if state.node.lock().expect("node lock poisoned").is_none() {
         return Err("not connected — enroll first".into());
     }
@@ -2997,7 +3066,7 @@ async fn open_ssh_terminal(
 ) -> Result<(), String> {
     #[cfg(target_os = "macos")]
     {
-        state.token().ok_or("not signed in")?;
+        state.require_token()?;
         // node_id/login are interpolated into a shell line — allowlist, don't escape.
         let ok = |s: &str| {
             !s.is_empty()
@@ -3056,7 +3125,7 @@ async fn open_ssh_terminal(
     }
     #[cfg(target_os = "windows")]
     {
-        state.token().ok_or("not signed in")?;
+        state.require_token()?;
         // node_id/login are interpolated into a command line — allowlist, don't escape.
         let ok = |s: &str| {
             !s.is_empty()
@@ -3145,7 +3214,7 @@ async fn ssh_open(
     use base64::Engine as _;
     use tauri::Emitter;
 
-    let token = state.token().ok_or("not signed in")?;
+    let token = state.require_token()?;
 
     // 1. Resolve the target + anchor the session in the ledger (never sees the stream).
     let resp = agent_core::adapters::open_ssh_session(
@@ -3503,7 +3572,7 @@ async fn track_event(
 /// key, get a URL, and open it in the system browser.
 #[tauri::command]
 async fn open_billing_checkout(state: State<'_, AppState>, plan: String) -> Result<(), String> {
-    let tok = state.token().ok_or("not signed in")?;
+    let tok = state.require_token()?;
     let checkout_url =
         adapters::billing_checkout(&state.http, &state.regional_base_url(), &tok, &plan)
             .await
@@ -3529,7 +3598,7 @@ struct CiPolicyDraft {
 
 #[tauri::command]
 async fn list_ci_policies(state: State<'_, AppState>) -> Result<Vec<domain::CiPolicy>, String> {
-    let tok = state.token().ok_or("not signed in")?;
+    let tok = state.require_token()?;
     adapters::list_ci_policies(&state.http, &state.regional_base_url(), &tok)
         .await
         .map_err(|e| e.to_string())
@@ -3543,7 +3612,7 @@ async fn ci_history(
     node: Option<String>,
     state: State<'_, AppState>,
 ) -> Result<Vec<domain::CiRun>, String> {
-    let tok = state.token().ok_or("not signed in")?;
+    let tok = state.require_token()?;
     adapters::ci_history(
         &state.http,
         &state.regional_base_url(),
@@ -3560,7 +3629,7 @@ async fn ssh_history(
     node: Option<String>,
     state: State<'_, AppState>,
 ) -> Result<Vec<domain::SshSession>, String> {
-    let tok = state.token().ok_or("not signed in")?;
+    let tok = state.require_token()?;
     adapters::ssh_history(
         &state.http,
         &state.regional_base_url(),
@@ -3577,7 +3646,7 @@ async fn add_ci_policy(
     state: State<'_, AppState>,
     proof_token: Option<String>,
 ) -> Result<(), String> {
-    let tok = state.token().ok_or("not signed in")?;
+    let tok = state.require_token()?;
     let nonempty = |s: Option<String>| s.filter(|v| !v.trim().is_empty());
     let body = domain::CiPolicyReq {
         issuer: req.issuer,
@@ -3605,7 +3674,7 @@ async fn delete_ci_policy(
     state: State<'_, AppState>,
     proof_token: Option<String>,
 ) -> Result<(), String> {
-    let tok = state.token().ok_or("not signed in")?;
+    let tok = state.require_token()?;
     adapters::delete_ci_policy(
         &state.http,
         &state.regional_base_url(),
@@ -3621,7 +3690,7 @@ async fn delete_ci_policy(
 
 #[tauri::command]
 async fn list_subdomains(state: State<'_, AppState>) -> Result<Vec<domain::Subdomain>, String> {
-    let tok = state.token().ok_or("not signed in")?;
+    let tok = state.require_token()?;
     adapters::list_subdomains(&state.http, &state.regional_base_url(), &tok)
         .await
         .map_err(|e| e.to_string())
@@ -3635,7 +3704,7 @@ async fn create_subdomain(
     state: State<'_, AppState>,
     proof_token: Option<String>,
 ) -> Result<String, String> {
-    let tok = state.token().ok_or("not signed in")?;
+    let tok = state.require_token()?;
     let req = domain::SubdomainReq {
         label: label.trim().to_string(),
         target_node_id,
@@ -3657,7 +3726,7 @@ async fn get_subdomain_cert(
     fqdn: String,
     state: State<'_, AppState>,
 ) -> Result<domain::SubdomainCert, String> {
-    let tok = state.token().ok_or("not signed in")?;
+    let tok = state.require_token()?;
     adapters::get_subdomain_cert(&state.http, &state.regional_base_url(), &tok, &fqdn)
         .await
         .map_err(|e| e.to_string())
@@ -3669,7 +3738,7 @@ async fn delete_subdomain(
     state: State<'_, AppState>,
     proof_token: Option<String>,
 ) -> Result<(), String> {
-    let tok = state.token().ok_or("not signed in")?;
+    let tok = state.require_token()?;
     adapters::delete_subdomain(
         &state.http,
         &state.regional_base_url(),
@@ -3710,7 +3779,7 @@ async fn publish_sample_demo(
     state: State<'_, AppState>,
     proof_token: Option<String>,
 ) -> Result<String, String> {
-    let tok = state.token().ok_or("not signed in")?;
+    let tok = state.require_token()?;
     let node_id = state
         .node
         .lock()
@@ -3779,7 +3848,7 @@ async fn unpublish_sample_demo(
     state: State<'_, AppState>,
     proof_token: Option<String>,
 ) -> Result<(), String> {
-    let tok = state.token().ok_or("not signed in")?;
+    let tok = state.require_token()?;
     adapters::delete_subdomain(
         &state.http,
         &state.regional_base_url(),
@@ -3795,7 +3864,7 @@ async fn unpublish_sample_demo(
 
 #[tauri::command]
 async fn list_members(state: State<'_, AppState>) -> Result<domain::MembersView, String> {
-    let tok = state.token().ok_or("not signed in")?;
+    let tok = state.require_token()?;
     adapters::list_members(&state.http, &state.regional_base_url(), &tok)
         .await
         .map_err(|e| e.to_string())
@@ -3809,7 +3878,7 @@ async fn invite_member(
     ttl_seconds: Option<u64>,
     proof_token: Option<String>,
 ) -> Result<String, String> {
-    let tok = state.token().ok_or("not signed in")?;
+    let tok = state.require_token()?;
     adapters::invite_member(
         &state.http,
         &state.regional_base_url(),
@@ -3830,7 +3899,7 @@ async fn invite_member(
 async fn list_member_invites(
     state: State<'_, AppState>,
 ) -> Result<domain::PendingInvitesView, String> {
-    let tok = state.token().ok_or("not signed in")?;
+    let tok = state.require_token()?;
     adapters::list_member_invites(&state.http, &state.regional_base_url(), &tok)
         .await
         .map_err(|e| e.to_string())
@@ -3839,7 +3908,7 @@ async fn list_member_invites(
 /// Withdraw a pending invite before it is redeemed (admin).
 #[tauri::command]
 async fn revoke_member_invite(state: State<'_, AppState>, email: String) -> Result<(), String> {
-    let tok = state.token().ok_or("not signed in")?;
+    let tok = state.require_token()?;
     adapters::revoke_member_invite(&state.http, &state.regional_base_url(), &tok, email.trim())
         .await
         .map_err(|e| e.to_string())
@@ -3908,7 +3977,7 @@ async fn resolve_deferred_invite() -> Result<Option<deferred_invite::DeferredInv
 
 #[tauri::command]
 async fn join_team(invite: String, state: State<'_, AppState>) -> Result<(), String> {
-    let tok = state.token().ok_or("not signed in")?;
+    let tok = state.require_token()?;
     adapters::join_team(&state.http, &state.regional_base_url(), &tok, invite.trim())
         .await
         .map_err(|e| e.to_string())
@@ -3920,7 +3989,7 @@ async fn remove_member(
     state: State<'_, AppState>,
     proof_token: Option<String>,
 ) -> Result<(), String> {
-    let tok = state.token().ok_or("not signed in")?;
+    let tok = state.require_token()?;
     adapters::remove_member(
         &state.http,
         &state.regional_base_url(),
@@ -3941,7 +4010,7 @@ async fn reset_member_totp(
     state: State<'_, AppState>,
     proof_token: Option<String>,
 ) -> Result<(), String> {
-    let tok = state.token().ok_or("not signed in")?;
+    let tok = state.require_token()?;
     adapters::reset_member_totp(
         &state.http,
         &state.regional_base_url(),
@@ -3957,7 +4026,7 @@ async fn reset_member_totp(
 
 #[tauri::command]
 async fn get_policy(state: State<'_, AppState>) -> Result<domain::PolicyView, String> {
-    let tok = state.token().ok_or("not signed in")?;
+    let tok = state.require_token()?;
     adapters::get_policy(&state.http, &state.regional_base_url(), &tok)
         .await
         .map_err(|e| e.to_string())
@@ -3969,7 +4038,7 @@ async fn submit_policy(
     state: State<'_, AppState>,
     proof_token: Option<String>,
 ) -> Result<(), String> {
-    let tok = state.token().ok_or("not signed in")?;
+    let tok = state.require_token()?;
     adapters::submit_policy(
         &state.http,
         &state.regional_base_url(),
@@ -3983,7 +4052,7 @@ async fn submit_policy(
 
 #[tauri::command]
 async fn my_access(state: State<'_, AppState>) -> Result<domain::MyAccess, String> {
-    let tok = state.token().ok_or("not signed in")?;
+    let tok = state.require_token()?;
     adapters::my_access(&state.http, &state.regional_base_url(), &tok)
         .await
         .map_err(|e| e.to_string())
@@ -4000,7 +4069,7 @@ async fn delete_node(
 ) -> Result<(), String> {
     // Multi-user tenant gates revoke behind a step-up (Part D §Authority): first call
     // without proof returns STEP_UP_REQUIRED; the GUI runs the step-up flow and retries.
-    let tok = state.token().ok_or("not signed in")?;
+    let tok = state.require_token()?;
     adapters::delete_node(
         &state.http,
         &state.regional_base_url(),
@@ -4029,7 +4098,7 @@ async fn delete_node(
 /// Tenant node roster for the deploy-target picker. Reuses `GET /api/v1/peers`.
 #[tauri::command]
 async fn list_nodes(state: State<'_, AppState>) -> Result<Vec<domain::NodeBrief>, String> {
-    let tok = state.token().ok_or("not signed in")?;
+    let tok = state.require_token()?;
     // Use the management endpoint (GET /api/v1/nodes) instead of /peers:
     // server-side role filter returns all nodes for admin, own nodes for member.
     // [T:A.1.2 + Part D §D.10.3 — no cross-member node visibility]
@@ -4632,9 +4701,50 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::{
-        is_region_handoff, parse_deep_link, region_from_handoff, DeepLinkKind,
-        REGION_HANDOFF_PREFIX,
+        classify_reauth_error, is_region_handoff, parse_deep_link, region_from_handoff,
+        DeepLinkKind, ReauthFailure, REGION_HANDOFF_PREFIX, SESSION_EXPIRED,
     };
+    use agent_core::adapters::ApiError;
+
+    // The whole point of the split: only an answered refusal may delete the session file.
+    // Before this, a timeout and a revoked device were the same value, so one unanswered
+    // request cost the user their session and left the device unable to re-auth at all.
+    #[test]
+    fn only_an_answered_refusal_counts_as_refused() {
+        for refused in [
+            ApiError::Status(401),
+            ApiError::Status(403),
+            ApiError::Server {
+                status: 401,
+                message: "device revoked".into(),
+            },
+        ] {
+            assert_eq!(classify_reauth_error(refused), ReauthFailure::Refused);
+        }
+        for inconclusive in [
+            ApiError::Transport("dns failure".into()),
+            ApiError::Status(500),
+            ApiError::Status(502),
+            ApiError::Decode("bad json".into()),
+            ApiError::Server {
+                status: 409,
+                message: "conflict".into(),
+            },
+        ] {
+            assert_eq!(
+                classify_reauth_error(inconclusive),
+                ReauthFailure::Inconclusive
+            );
+        }
+    }
+
+    // The frontend keys its re-auth-and-retry off this marker. If it ever drifts back to
+    // prose, every command that needs a session stops being recoverable — the exact bug
+    // this replaced. Kept in lockstep with `isSessionError` in frontend/src/lib/tauri.ts.
+    #[test]
+    fn session_expired_marker_is_the_string_the_frontend_matches() {
+        assert_eq!(SESSION_EXPIRED, "SESSION_EXPIRED");
+    }
 
     // Build a hand-off blob the way the control plane does: rhf1.<b64url(json)>.<sig>.
     // The client only reads `region`; the sig segment is opaque here.

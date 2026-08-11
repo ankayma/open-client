@@ -34,6 +34,21 @@ export async function checkAuthState(): Promise<AuthState> {
   return invoke<AuthState>("check_auth_state");
 }
 
+// A command failed for want of a live session, rather than on its own merits. Two
+// shapes reach us: the control plane rejecting a stale token (HTTP 401), and the Rust
+// side holding no token at all (`SESSION_EXPIRED`). The second used to read
+// "not signed in", which matched nothing here — so the one case the device could fix by
+// itself was the one case that never triggered a retry, and the app sat there showing
+// a red error with a valid machine key on disk. [T:E-6 device-key re-auth + A.1.10]
+export function isSessionError(e: unknown): boolean {
+  const msg = String(e);
+  return (
+    msg.includes("SESSION_EXPIRED") ||
+    msg.includes("401") ||
+    msg.toLowerCase().includes("unauthorized")
+  );
+}
+
 // Read commands can hit an expired session (4h TTL) — overnight on mobile, or the first
 // load after a cold start. Instead of surfacing a dead "control-plane returned HTTP 401"
 // with a Retry that reuses the same stale token, transparently re-authenticate via the
@@ -47,8 +62,7 @@ async function invokeWithReauth<T>(
   try {
     return await invoke<T>(cmd, args);
   } catch (e) {
-    const msg = String(e);
-    if (msg.includes("401") || msg.toLowerCase().includes("unauthorized")) {
+    if (isSessionError(e)) {
       const s = await invoke<AuthState>("check_auth_state");
       if (s.status === "authenticated") return await invoke<T>(cmd, args);
     }
@@ -80,8 +94,11 @@ export async function getConnectionStatus(): Promise<ConnectionState> {
   return invokeWithReauth<ConnectionState>("get_connection_status");
 }
 
+// Wrapped like the read commands: Connect is where an expired session is MOST likely to
+// be noticed, because it is the button a user presses after leaving the app open past the
+// 4h TTL. Unwrapped, it answered a perfectly recoverable state with a red error.
 export async function connect(): Promise<void> {
-  return invoke("connect");
+  return invokeWithReauth("connect");
 }
 
 export async function disconnect(): Promise<void> {
