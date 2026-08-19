@@ -434,6 +434,13 @@ pub(crate) async fn serve_dataplane(
         &state.node_id,
         &dev_name,
         &ctx.http,
+        // The node service token is what authenticates an outcome report. Without one the
+        // node can enforce but cannot say what it did, and a ledger that records
+        // "authorised" and never records the result is the half nobody can use.
+        {
+            let t = ctx.service_token.read().unwrap().clone();
+            (!t.is_empty()).then_some(adapters::NodeServiceToken(t))
+        },
     )
     .await;
 
@@ -855,7 +862,10 @@ async fn start_embedded_ssh(
     node_id: &str,
     overlay_iface: &str,
     http: &reqwest::Client,
+    service_token: Option<adapters::NodeServiceToken>,
 ) {
+    use agent_core::cmd_grant::CommandGrantVerifier;
+    use agent_core::exec_outcome::OutcomeQueue;
     use agent_core::ssh_grant::GrantVerifier;
     use agent_core::ssh_server::{serve, SshHostKey, SshServerConfig};
 
@@ -913,6 +923,32 @@ async fn start_embedded_ssh(
         Err(e) => eprintln!("[F-2] elevation disabled (CP key unavailable): {e}"),
     }
 
+    // Command grants ride the SAME control-plane key as elevation — one key, one fetch,
+    // and a checked `purpose` field keeps the two apart. Enabled only when that key is
+    // available AND this node can report outcomes, because a node that enforces without
+    // reporting produces a ledger that says "authorised" and never says what happened.
+    match (
+        adapters::elevate_pubkey(http, control_plane).await,
+        service_token.clone(),
+    ) {
+        (Ok(pubkey), Some(token)) => match CommandGrantVerifier::new(&pubkey, node_id) {
+            Ok(v) => {
+                let queue = OutcomeQueue::new();
+                cfg = cfg
+                    .with_command_grants(v)
+                    .reporting_to(queue.clone(), node_id);
+                spawn_outcome_delivery(http.clone(), control_plane.to_string(), token, queue);
+                println!("[F-2] command grants enabled (per-command digest enforced)");
+            }
+            Err(e) => eprintln!("[F-2] command grants disabled (bad CP key): {e}"),
+        },
+        (_, None) => eprintln!(
+            "[F-2] command grants disabled: no node service token, so outcomes could not \
+             be reported"
+        ),
+        (Err(e), _) => eprintln!("[F-2] command grants disabled (CP key unavailable): {e}"),
+    }
+
     println!("[F-2] embedded ssh server on {self_overlay}:{port} (user ankayma, identity-bound)");
     // A default-deny firewall (ufw) silently drops the overlay port → clients time
     // out. Tell the operator (or auto-open with their opt-in). `[T:f2 §H.1]`
@@ -920,6 +956,33 @@ async fn start_embedded_ssh(
     tokio::spawn(async move {
         if let Err(e) = serve(cfg, host_key).await {
             eprintln!("[F-2] embedded ssh server stopped: {e}");
+        }
+    });
+}
+
+/// Drain the outcome queue toward the control plane.
+///
+/// Ten seconds is well inside the shortest grant TTL, so an outcome is rarely long stale
+/// before the ledger has it — and a control-plane outage costs delay rather than truth,
+/// because a grant that expires unreported closes as `outcome_unreported` rather than as
+/// success. `[A — interval not calibrated]`
+fn spawn_outcome_delivery(
+    http: reqwest::Client,
+    control_plane: String,
+    token: adapters::NodeServiceToken,
+    queue: agent_core::exec_outcome::OutcomeQueue,
+) {
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(std::time::Duration::from_secs(10));
+        loop {
+            tick.tick().await;
+            if queue.is_empty() {
+                continue;
+            }
+            let n = adapters::deliver_outcomes(&http, &control_plane, &token, &queue).await;
+            if n > 0 {
+                println!("[F-2] reported {n} command outcome(s)");
+            }
         }
     });
 }
