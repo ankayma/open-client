@@ -225,3 +225,41 @@ export interface MyAccess {
   role: string;
   services: AccessService[];
 }
+
+// ── Governance surfaces ───────────────────────────────────────────────────────
+// The register, the approval queue and the task dossier. Each mirrors what the control
+// plane recorded; none of it is decided here.
+
+/** One legal entity in the tenant's register, with its gaps named rather than blank. */
+export interface RegisteredPrincipal {
+	principal_id: string;
+	/** `self` = the tenant's own entity · `third_party` = a supplier. */
+	relationship: string;
+	legal_name: string | null;
+	lei: string | null;
+	jurisdiction: string | null;
+	criticality: string | null;
+	/**
+	 * What is still unstated. Shown, because a register that looks complete and is not is
+	 * exactly what the regulatory export exists to avoid.
+	 */
+	missing_fields: string[];
+}
+
+/** A command waiting for a person. */
+export interface PendingApproval {
+	approval_id: string;
+	template_id: string;
+	/** The exact argv. A gate that shows a summary is a gate on the summary. */
+	argv: string[];
+	cmd_digest: string;
+	risk_class: string;
+	/** `gate` · `irreversible` · `freeform` — three different questions to be asked. */
+	gate_reason: string;
+	justification: string | null;
+	node_id: string;
+	actor_id: string;
+	requested_by: string;
+	requested_at: string;
+	expires_at: string;
+}

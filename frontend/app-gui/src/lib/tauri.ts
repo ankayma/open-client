@@ -4,6 +4,8 @@
 
 import type {
   AuthState,
+  RegisteredPrincipal,
+  PendingApproval,
   ConnectionState,
   Quota,
   NodeInfo,
@@ -631,4 +633,50 @@ export async function submitPolicy(body: string, proof?: StepUpProof): Promise<v
 }
 export async function myAccess(): Promise<MyAccess> {
   return invokeWithReauth<MyAccess>("my_access");
+}
+
+// ── Governance surfaces (register · approvals · task record) ──────────────────
+// Session-authed in agent-core, like every other call here.
+
+export async function listPrincipals(): Promise<RegisteredPrincipal[]> {
+  return invoke<RegisteredPrincipal[]>("list_principals");
+}
+
+/**
+ * State what was not known before about a legal entity. Fields left undefined are left
+ * alone — a partial amendment stays partial rather than blanking what someone recorded.
+ */
+export async function amendPrincipal(
+  principalId: string,
+  fields: {
+    legalName?: string;
+    lei?: string;
+    jurisdiction?: string;
+    criticality?: string;
+  },
+): Promise<void> {
+  return invoke("amend_principal", {
+    principalId,
+    legalName: fields.legalName,
+    lei: fields.lei,
+    jurisdiction: fields.jurisdiction,
+    criticality: fields.criticality,
+  });
+}
+
+export async function listPendingApprovals(): Promise<PendingApproval[]> {
+  return invoke<PendingApproval[]>("list_pending_approvals");
+}
+
+/** The decision that creates, or withholds, a credential. The control plane mints. */
+export async function decideApproval(
+  approvalId: string,
+  approve: boolean,
+): Promise<void> {
+  return invoke("decide_approval", { approvalId, approve });
+}
+
+/** The one-page dossier, passed through as the control plane shaped it. */
+export async function taskRecord(taskId: string): Promise<unknown> {
+  return invoke<unknown>("task_record", { taskId });
 }

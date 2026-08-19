@@ -651,6 +651,10 @@ async fn connect_inner(state: &AppState) -> Result<(), String> {
         workload_kind: Some("ClientDevice".to_string()),
         platform: Some(std::env::consts::OS.to_string()),
         machine_proof: Some(proof),
+        // The app ships the agent binary it will run, so what this build can enforce is
+        // what that agent can enforce. Declared rather than assumed — the control plane
+        // reads absence as "has not said", never as yes. [T:A.1.20]
+        caps: vec![agent_core::cmd_grant::CAP_CMD_GRANT.to_string()],
     };
     let resp = adapters::enroll(&state.http, &state.regional_base_url(), &tok, &req)
         .await
@@ -2546,6 +2550,10 @@ async fn join_enroll_node(
         workload_kind: None,
         platform: Some(std::env::consts::OS.to_string()),
         machine_proof: Some(proof),
+        // The app ships the agent binary it will run, so what this build can enforce is
+        // what that agent can enforce. Declared rather than assumed — the control plane
+        // reads absence as "has not said", never as yes. [T:A.1.20]
+        caps: vec![agent_core::cmd_grant::CAP_CMD_GRANT.to_string()],
     };
     let resp = adapters::enroll_via_join_token(&state.http, &state.regional_base_url(), &req)
         .await
@@ -3596,6 +3604,94 @@ struct CiPolicyDraft {
     target_hostname: Option<String>,
 }
 
+// ── Governance surfaces (register · approvals · task record) ──────────────────
+// Each is a read of the tenant's own evidence, or a human decision about it. The client
+// shows and asks; the control plane decides and records. [T:A.1.4 + Part D §D.2]
+
+#[tauri::command]
+async fn list_principals(
+    state: State<'_, AppState>,
+) -> Result<Vec<adapters::RegisteredPrincipal>, String> {
+    let tok = state.require_token()?;
+    adapters::list_principals(&state.http, &state.regional_base_url(), &tok)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// State what was not known before about one legal entity.
+///
+/// Fields left `None` are left alone by the control plane, so a partial amendment stays
+/// partial rather than blanking what somebody already recorded.
+#[tauri::command]
+async fn amend_principal(
+    principal_id: String,
+    legal_name: Option<String>,
+    lei: Option<String>,
+    jurisdiction: Option<String>,
+    criticality: Option<String>,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let tok = state.require_token()?;
+    // Empty strings from a form mean "left blank", not "set to empty". Sending them would
+    // record a stated-and-empty legal name, which reads as a fact.
+    let clean = |v: Option<String>| v.map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+    adapters::amend_principal(
+        &state.http,
+        &state.regional_base_url(),
+        &tok,
+        &principal_id,
+        &adapters::PrincipalAmendment {
+            legal_name: clean(legal_name),
+            lei: clean(lei),
+            jurisdiction: clean(jurisdiction),
+            criticality: clean(criticality),
+        },
+    )
+    .await
+    .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn list_pending_approvals(
+    state: State<'_, AppState>,
+) -> Result<Vec<adapters::PendingApproval>, String> {
+    let tok = state.require_token()?;
+    adapters::list_pending_approvals(&state.http, &state.regional_base_url(), &tok)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Approve or deny one command. The credential is minted by the control plane on
+/// approval — nothing here holds or creates one.
+#[tauri::command]
+async fn decide_approval(
+    approval_id: String,
+    approve: bool,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let tok = state.require_token()?;
+    adapters::decide_approval(
+        &state.http,
+        &state.regional_base_url(),
+        &tok,
+        &approval_id,
+        approve,
+    )
+    .await
+    .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn task_record(
+    task_id: String,
+    state: State<'_, AppState>,
+) -> Result<serde_json::Value, String> {
+    let tok = state.require_token()?;
+    adapters::task_record(&state.http, &state.regional_base_url(), &tok, &task_id)
+        .await
+        .map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 async fn list_ci_policies(state: State<'_, AppState>) -> Result<Vec<domain::CiPolicy>, String> {
     let tok = state.require_token()?;
@@ -4614,6 +4710,11 @@ pub fn run() {
             get_path_proof,
             probe_reachable,
             list_ci_policies,
+            list_principals,
+            amend_principal,
+            list_pending_approvals,
+            decide_approval,
+            task_record,
             ci_history,
             ssh_history,
             add_ci_policy,

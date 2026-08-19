@@ -1078,6 +1078,184 @@ pub async fn deliver_outcomes(
     delivered
 }
 
+// ── Governance surfaces (register · approvals · task record) ──────────────────
+// [T:A.1.4 — the customer sees what the control plane recorded, in their own client]
+//
+// Every one of these is a READ of the tenant's own evidence, or a human decision about
+// it. None of them is control-plane logic: the client shows and asks, the control plane
+// decides and records. `[T:Part D §D.2 open/closed]`
+
+/// One legal entity in the tenant's register, with its gaps named.
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+pub struct RegisteredPrincipal {
+    pub principal_id: String,
+    pub relationship: String,
+    pub legal_name: Option<String>,
+    pub lei: Option<String>,
+    pub jurisdiction: Option<String>,
+    pub criticality: Option<String>,
+    /// What is still unstated. Surfaced rather than left blank, because a register that
+    /// looks complete and is not is the failure `roi_export` exists to prevent.
+    #[serde(default)]
+    pub missing_fields: Vec<String>,
+}
+
+/// Fields a person may state about an entity. All optional — stating one is not a promise
+/// to state the rest, and a half-filled entity beats none.
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct PrincipalAmendment {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub legal_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lei: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub jurisdiction: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub criticality: Option<String>,
+}
+
+/// `GET /api/v1/principals`.
+pub async fn list_principals(
+    http: &reqwest::Client,
+    base_url: &str,
+    token: &str,
+) -> Result<Vec<RegisteredPrincipal>, ApiError> {
+    #[derive(serde::Deserialize)]
+    struct Resp {
+        principals: Vec<RegisteredPrincipal>,
+    }
+    let resp = http
+        .get(url(base_url, "/api/v1/principals"))
+        .bearer_auth(token)
+        .timeout(CP_REST_TIMEOUT)
+        .send()
+        .await
+        .map_err(|e| ApiError::Transport(e.to_string()))?;
+    if !resp.status().is_success() {
+        return Err(status_error(resp).await);
+    }
+    resp.json::<Resp>()
+        .await
+        .map(|r| r.principals)
+        .map_err(|e| ApiError::Decode(e.to_string()))
+}
+
+/// `PATCH /api/v1/principals/{id}` — state what was not known before.
+pub async fn amend_principal(
+    http: &reqwest::Client,
+    base_url: &str,
+    token: &str,
+    principal_id: &str,
+    amendment: &PrincipalAmendment,
+) -> Result<(), ApiError> {
+    let resp = http
+        .patch(url(base_url, &format!("/api/v1/principals/{principal_id}")))
+        .bearer_auth(token)
+        .json(amendment)
+        .timeout(CP_REST_TIMEOUT)
+        .send()
+        .await
+        .map_err(|e| ApiError::Transport(e.to_string()))?;
+    expect_ok(resp).await
+}
+
+/// A command waiting for a person to decide.
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+pub struct PendingApproval {
+    pub approval_id: String,
+    pub template_id: String,
+    /// The EXACT argv. A gate that shows a summary is a gate on the summary.
+    pub argv: Vec<String>,
+    pub cmd_digest: String,
+    pub risk_class: String,
+    /// `gate` · `irreversible` · `freeform` — three different conversations for whoever
+    /// is being asked, so the reason travels with the request.
+    pub gate_reason: String,
+    pub justification: Option<String>,
+    pub node_id: String,
+    pub actor_id: String,
+    pub requested_by: String,
+    pub requested_at: String,
+    pub expires_at: String,
+}
+
+/// `GET /api/v1/approvals`.
+pub async fn list_pending_approvals(
+    http: &reqwest::Client,
+    base_url: &str,
+    token: &str,
+) -> Result<Vec<PendingApproval>, ApiError> {
+    #[derive(serde::Deserialize)]
+    struct Resp {
+        pending: Vec<PendingApproval>,
+    }
+    let resp = http
+        .get(url(base_url, "/api/v1/approvals"))
+        .bearer_auth(token)
+        .timeout(CP_REST_TIMEOUT)
+        .send()
+        .await
+        .map_err(|e| ApiError::Transport(e.to_string()))?;
+    if !resp.status().is_success() {
+        return Err(status_error(resp).await);
+    }
+    resp.json::<Resp>()
+        .await
+        .map(|r| r.pending)
+        .map_err(|e| ApiError::Decode(e.to_string()))
+}
+
+/// `POST /api/v1/approvals/{id}/decide` — the decision that creates, or withholds, a
+/// credential. The control plane mints on approval; nothing is minted here.
+pub async fn decide_approval(
+    http: &reqwest::Client,
+    base_url: &str,
+    token: &str,
+    approval_id: &str,
+    approve: bool,
+) -> Result<(), ApiError> {
+    let resp = http
+        .post(url(
+            base_url,
+            &format!("/api/v1/approvals/{approval_id}/decide"),
+        ))
+        .bearer_auth(token)
+        .json(&serde_json::json!({
+            "decision": if approve { "approve" } else { "deny" }
+        }))
+        .timeout(CP_REST_TIMEOUT)
+        .send()
+        .await
+        .map_err(|e| ApiError::Transport(e.to_string()))?;
+    expect_ok(resp).await
+}
+
+/// `GET /api/v1/tasks/{id}` — the one-page dossier, returned as-is.
+///
+/// Deliberately untyped. The dossier is a REPORT whose shape is the control plane's to
+/// decide; mirroring it into a struct here would mean a client release every time a
+/// column is added to a summary the client only displays.
+pub async fn task_record(
+    http: &reqwest::Client,
+    base_url: &str,
+    token: &str,
+    task_id: &str,
+) -> Result<serde_json::Value, ApiError> {
+    let resp = http
+        .get(url(base_url, &format!("/api/v1/tasks/{task_id}")))
+        .bearer_auth(token)
+        .timeout(CP_REST_TIMEOUT)
+        .send()
+        .await
+        .map_err(|e| ApiError::Transport(e.to_string()))?;
+    if !resp.status().is_success() {
+        return Err(status_error(resp).await);
+    }
+    resp.json::<serde_json::Value>()
+        .await
+        .map_err(|e| ApiError::Decode(e.to_string()))
+}
+
 /// Open an SSE stream for peer events. `GET /api/v1/peers/events`.
 /// Authenticated with the node service token (not the user session token).
 /// Returns the raw response; the caller reads it as a byte stream.

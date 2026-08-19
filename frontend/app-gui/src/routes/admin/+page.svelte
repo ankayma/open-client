@@ -51,6 +51,15 @@
 				<path d="M9 18l6-6-6-6"/>
 			</svg>
 		</button>
+		<button class="quick-item" onclick={() => goto('/governance')}>
+			<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+				<path d="M12 3l8 4v6c0 4-3.5 7-8 8-4.5-1-8-4-8-8V7z"/>
+			</svg>
+			<span>Governance</span>
+			<svg class="arrow" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+				<path d="M9 18l6-6-6-6"/>
+			</svg>
+		</button>
 	</section>
 
 	{#if tier === 'F0'}

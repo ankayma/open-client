@@ -20,7 +20,7 @@
 			icon: 'M3 7h18M3 12h18M3 17h18'
 		},
 		{
-			hrefs: ['/admin', '/subdomains', '/members', '/access', '/policies'],
+			hrefs: ['/admin', '/subdomains', '/members', '/access', '/policies', '/governance'],
 			go: '/admin',
 			label: () => STRINGS[lang].nav_admin,
 			icon: 'M3 11h18v11H3zM7 11V7a5 5 0 0110 0v4',
