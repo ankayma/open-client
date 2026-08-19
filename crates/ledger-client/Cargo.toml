@@ -4,4 +4,11 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 
+# [T:A.1.21] Every version here is already in this workspace's lockfile, so making them
+# direct adds zero supply-chain surface — the same rationale `crypto` records for
+# x509-parser. sha2 arrives transitively at 0.10.9; ed25519-dalek is a direct dep of
+# agent-core at 2; base64 is a direct dep of crypto at 0.22.1.
 [dependencies]
+sha2          = "0.10.9"
+base64        = "0.22.1"
+ed25519-dalek = "2"

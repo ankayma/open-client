@@ -3222,6 +3222,11 @@ checksum = "09edd9e8b54e49e587e4f6295a7d29c3ea94d469cb40ab8ca70b288248a81db2"
 [[package]]
 name = "ledger-client"
 version = "1.1.8"
+dependencies = [
+ "base64 0.22.1",
+ "ed25519-dalek 2.2.0",
+ "sha2 0.10.9",
+]
 
 [[package]]
 name = "libappindicator"
