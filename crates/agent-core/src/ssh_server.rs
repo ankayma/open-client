@@ -131,9 +131,9 @@ pub struct SshServerConfig {
     /// this node (a client that presents a grant just lands unprivileged). Set once
     /// the agent has fetched the CP's elevation public key. `[T:f2 §H.4]`
     pub elevate: Option<GrantVerifier>,
-    /// Verifier for COMMAND grants (W2 / S-5). `None` → this node cannot enforce them,
+    /// Verifier for COMMAND grants. `None` → this node cannot enforce them,
     /// and the control plane will not issue one to it: absent capability means "has not
-    /// said", which is not "yes". `[T:masterplan W2 R-1]`
+    /// said", which is not "yes". `[T:A.1.20 capability negotiation + A.1.6 fail-closed]`
     pub cmd_grant: Option<CommandGrantVerifier>,
 }
 
@@ -154,7 +154,7 @@ impl SshServerConfig {
     /// Enable command grants on this node. Until this is set the node runs the legacy
     /// exec path, which is exactly why the control plane refuses to issue it a command
     /// grant — a node that cannot compare a digest would record an enforcement it did not
-    /// perform. `[T:masterplan W2 R-1]`
+    /// perform. `[T:A.1.20 capability negotiation + A.1.6 fail-closed]`
     pub fn with_command_grants(mut self, verifier: CommandGrantVerifier) -> Self {
         self.cmd_grant = Some(verifier);
         self
@@ -522,7 +522,7 @@ impl ConnHandler {
         let Some(verifier) = self.cmd_grant.clone() else {
             // The node was handed a command grant it cannot check. Refusing is the only
             // honest answer: running it anyway would produce a ledger entry claiming an
-            // enforcement that never happened. [T:masterplan W2 R-1]
+            // enforcement that never happened. [T:A.1.20 capability negotiation + A.1.6 fail-closed]
             eprintln!("[F-2] command grant presented, but this node cannot verify one");
             let _ = session.channel_failure(channel);
             return None;
@@ -704,7 +704,7 @@ impl server::Handler for ConnHandler {
         _modes: &[(russh::Pty, u32)],
         _session: &mut Session,
     ) -> Result<(), Self::Error> {
-        // [T:buildspec §1.1(1)] A command grant authorises ONE command. Allowing a PTY
+        // [T:A.1.7 — authority is bounded to what was issued] A command grant authorises ONE command. Allowing a PTY
         // under it would turn that into an interactive session with one line of client
         // code — the exact degradation `kind` exists to prevent. Refused before the
         // terminal is even recorded.
@@ -738,7 +738,7 @@ impl server::Handler for ConnHandler {
         if variable_name == ELEVATE_GRANT_ENV {
             self.pending_grant = Some(variable_value.to_string());
         }
-        // [T:buildspec §1.1(4)] Reuse the env-var channel the elevation grant already
+        // [T:P.4 — one channel, one parser] Reuse the env-var channel the elevation grant already
         // uses rather than inventing a second one (P.4).
         if variable_name == CMD_GRANT_ENV {
             self.pending_cmd_grant = Some(variable_value.to_string());
@@ -856,7 +856,7 @@ impl server::Handler for ConnHandler {
     ) -> Result<(), Self::Error> {
         let command = String::from_utf8_lossy(data).into_owned();
 
-        // [T:buildspec §S-5] The command-grant path is taken FIRST and never falls back
+        // [T:A.1.27 #1 — a grant may not widen in transit] The command-grant path is taken FIRST and never falls back
         // to the legacy one: a token that fails to verify means no command runs, because
         // a fallback would let a caller downgrade to the unverified path by sending a
         // deliberately broken grant.
@@ -1313,7 +1313,7 @@ mod tests {
     }
 }
 
-/// Structural guards for the command-grant path (S-5 gate).
+/// Structural guards for the command-grant path (command-grant gate).
 ///
 /// These read the source rather than exercise a socket, deliberately. Each property below
 /// is enforced by the ABSENCE of a line — no shell, no fallback, no PTY — and a behavioural
@@ -1339,7 +1339,19 @@ mod command_grant_structure {
     #[test]
     fn the_command_grant_path_cannot_build_a_shell() {
         let body = grant_path();
-        for forbidden in ["-c", "/bin/sh", "/bin/bash", "SHELL", "su\"", "arg(\"-c\")"] {
+        // Code-shaped patterns, not prose. A bare "-c" also matches the word
+        // "fail-closed" in a comment, which makes the test fire on documentation and —
+        // worse — makes it look strict while a differently-spelled shell would still walk
+        // past it. These are the constructions that actually reach an interpreter.
+        for forbidden in [
+            r#".arg("-c")"#,
+            r#"arg("-c")"#,
+            "/bin/sh",
+            "/bin/bash",
+            r#"var("SHELL")"#,
+            r#"Command::new(shell"#,
+            r#"Command::new("su""#,
+        ] {
             assert!(
                 !body.contains(forbidden),
                 "the command-grant path must not be able to reach a shell, found {forbidden:?}"

@@ -7,7 +7,7 @@
 //! that something. Without it the control plane records an enforcement that never
 //! happened, which is worse than recording nothing: the ledger would assert a guarantee
 //! the wire did not have. That is why the control plane refuses to issue a command grant
-//! to a node that has not declared [`CAP_CMD_GRANT`]. `[T:masterplan W2 R-1]`
+//! to a node that has not declared [`CAP_CMD_GRANT`]. `[T:A.1.20 capability negotiation + A.1.6 fail-closed]`
 //!
 //! **The argv comes from the GRANT, never from the SSH exec string.** A client that could
 //! supply the command would be a client that decides what runs, which is the property
@@ -33,7 +33,7 @@ use sha2::{Digest, Sha256};
 pub const CMD_GRANT_ENV: &str = "ANKAYMA_CMD_GRANT";
 
 /// What a node must declare before the control plane will issue it a command grant.
-/// A node that has not said this is not assumed to mean yes. `[T:masterplan W2 R-1]`
+/// A node that has not said this is not assumed to mean yes. `[T:A.1.20 capability negotiation + A.1.6 fail-closed]`
 pub const CAP_CMD_GRANT: &str = "cmd-grant-v1";
 
 /// Purpose string inside the signed payload. Present so that a signature over one kind of
@@ -284,7 +284,7 @@ impl CommandGrant {
     ///
     /// A `std::process::Command` built from `argv`, element by element. There is no shell
     /// in this function and no string that could be handed to one — the structural
-    /// property the whole tier rests on. `[T:buildspec §1.1(2)]`
+    /// property the whole tier rests on. `[T:A.1.6 — a shell is not reachable, not merely forbidden]`
     pub fn to_command(&self) -> std::process::Command {
         let mut c = std::process::Command::new(&self.argv[0]);
         for a in self.argv.iter().skip(1) {
