@@ -459,3 +459,27 @@ mod tests {
         assert_eq!(Refusal::PtyRefused.termination_reason(), "failed");
     }
 }
+
+/// Interoperability fixtures, shared with the control plane.
+///
+/// The node and the control plane compute this digest separately — one decided, the other
+/// runs — and a difference between them must stop the command rather than be reconciled.
+/// That only helps if a drift is caught, so both sides pin the same vector. The control
+/// plane's `policy::authz` asserts the identical value.
+#[cfg(test)]
+mod interop {
+    use super::*;
+
+    #[test]
+    fn the_golden_command_digest_is_stable() {
+        let argv: Vec<String> = ["systemctl", "restart", "--", "payments"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert_eq!(
+            cmd_digest(&argv, None, &[], "none", None),
+            "d1f8ca8d8e6597a9041fd2b10222120cde2d84e346a26085c3342b8b5c123c8d",
+            "the digest is a wire contract between the control plane and this node"
+        );
+    }
+}
