@@ -33,6 +33,7 @@ use tokio::net::TcpListener;
 use tokio::sync::mpsc;
 
 use crate::cmd_grant::{CommandGrantVerifier, Refusal, CMD_GRANT_ENV};
+use crate::exec_outcome::{ExecOutcome, OutcomeQueue};
 
 use crate::ssh_grant::{ElevationGrant, GrantVerifier};
 
@@ -135,6 +136,11 @@ pub struct SshServerConfig {
     /// and the control plane will not issue one to it: absent capability means "has not
     /// said", which is not "yes". `[T:A.1.20 capability negotiation + A.1.6 fail-closed]`
     pub cmd_grant: Option<CommandGrantVerifier>,
+    /// Where outcomes of command grants are queued for delivery. Shared with whatever
+    /// drains it — the ssh server observes, it does not talk to the control plane.
+    pub outcomes: Option<OutcomeQueue>,
+    /// This node's own id, so an outcome can name WHICH enforcement point measured it.
+    pub node_id: Option<String>,
 }
 
 impl SshServerConfig {
@@ -148,6 +154,8 @@ impl SshServerConfig {
             shell: ShellSpec::LoginShell("ankayma".to_string()),
             elevate: None,
             cmd_grant: None,
+            outcomes: None,
+            node_id: None,
         }
     }
 
@@ -157,6 +165,14 @@ impl SshServerConfig {
     /// perform. `[T:A.1.20 capability negotiation + A.1.6 fail-closed]`
     pub fn with_command_grants(mut self, verifier: CommandGrantVerifier) -> Self {
         self.cmd_grant = Some(verifier);
+        self
+    }
+
+    /// Where to queue the outcome of every command grant, and the node id to attribute
+    /// the measurement to.
+    pub fn reporting_to(mut self, outcomes: OutcomeQueue, node_id: impl Into<String>) -> Self {
+        self.outcomes = Some(outcomes);
+        self.node_id = Some(node_id.into());
         self
     }
 
@@ -270,6 +286,8 @@ pub async fn serve_on(
         shell: cfg.shell,
         elevate: cfg.elevate.map(Arc::new),
         cmd_grant: cfg.cmd_grant.map(Arc::new),
+        outcomes: cfg.outcomes,
+        node_id: cfg.node_id,
     };
     listener_srv
         .run_on_socket(config, &listener)
@@ -283,6 +301,8 @@ struct Listener {
     shell: ShellSpec,
     elevate: Option<Arc<GrantVerifier>>,
     cmd_grant: Option<Arc<CommandGrantVerifier>>,
+    outcomes: Option<OutcomeQueue>,
+    node_id: Option<String>,
 }
 
 impl server::Server for Listener {
@@ -293,6 +313,8 @@ impl server::Server for Listener {
             shell: self.shell.clone(),
             elevate: self.elevate.clone(),
             cmd_grant: self.cmd_grant.clone(),
+            outcomes: self.outcomes.clone(),
+            node_id: self.node_id.clone(),
             pending_grant: None,
             pending_cmd_grant: None,
             active_grant: None,
@@ -319,6 +341,8 @@ struct ConnHandler {
     shell: ShellSpec,
     elevate: Option<Arc<GrantVerifier>>,
     cmd_grant: Option<Arc<CommandGrantVerifier>>,
+    outcomes: Option<OutcomeQueue>,
+    node_id: Option<String>,
     /// The grant token the client set via env, awaiting verification at shell time.
     pending_grant: Option<String>,
     /// A COMMAND grant token set via env. Its presence changes what this channel is
@@ -539,6 +563,16 @@ impl ConnHandler {
                     refusal.message(),
                     refusal.termination_reason()
                 );
+                // Reported, not just logged. A refusal is stronger evidence than a
+                // permit, and one that never reaches the ledger did not happen as far as
+                // the record is concerned. The grant id comes from the token's payload
+                // even though the token was refused — a digest mismatch still names WHICH
+                // grant was mismatched, which is the interesting part.
+                if let (Some(q), Some(node)) = (self.outcomes.as_ref(), self.node_id.as_ref()) {
+                    if let Some(id) = grant_id_of(token) {
+                        q.push(ExecOutcome::refused(id, refusal.termination_reason(), node));
+                    }
+                }
                 self.last_refusal = Some(refusal);
                 let _ = session.channel_failure(channel);
                 return None;
@@ -644,8 +678,16 @@ impl ConnHandler {
         drop(tx);
 
         let mut exec_child = self.exec_child.take();
+        let outcomes = self.outcomes.clone();
+        let node_id = self.node_id.clone();
+        let grant_id = self.active_grant.as_ref().map(|g| g.grant_id.clone());
         tokio::spawn(async move {
+            // Counted here because this is the only place the bytes pass through. The
+            // control plane can never measure them (A.1.1), so a NULL on its side means
+            // nobody did — which is why the count is attributed to this node by name.
+            let mut bytes_out: usize = 0;
             while let Some(chunk) = rx.recv().await {
+                bytes_out += chunk.len();
                 if handle.data(channel, chunk).await.is_err() {
                     break;
                 }
@@ -662,6 +704,17 @@ impl ConnHandler {
             })
             .await
             .unwrap_or(1);
+            // The only observation of this execution that ever reaches the ledger. The
+            // control plane is not on the data path (A.1.1), so if this is not reported
+            // the grant closes as `outcome_unreported` — true, and less useful.
+            if let (Some(q), Some(node), Some(id)) = (outcomes, node_id, grant_id) {
+                if q.push(ExecOutcome::from_exit(id, code, &node, bytes_out as i64)) {
+                    eprintln!(
+                        "[F-2] outcome queue full — the oldest was dropped and will \
+                         resolve as outcome_unreported"
+                    );
+                }
+            }
             let _ = handle.eof(channel).await;
             let _ = handle.exit_status_request(channel, code as u32).await;
             let _ = handle.close(channel).await;
@@ -1183,6 +1236,8 @@ mod tests {
             shell: ShellSpec::Program(vec!["/bin/cat".to_string()]),
             elevate: None,
             cmd_grant: None,
+            outcomes: None,
+            node_id: None,
         };
         tokio::spawn(async move {
             let _ = serve_on(listener, cfg, host_key).await;
@@ -1233,6 +1288,8 @@ mod tests {
             shell: ShellSpec::LoginShell("whoever-is-running-this-test".to_string()),
             elevate: None,
             cmd_grant: None,
+            outcomes: None,
+            node_id: None,
         };
         tokio::spawn(async move {
             let _ = serve_on(listener, cfg, host_key).await;
@@ -1280,6 +1337,8 @@ mod tests {
             shell: ShellSpec::LoginShell("whoever-is-running-this-test".to_string()),
             elevate: None,
             cmd_grant: None,
+            outcomes: None,
+            node_id: None,
         };
         tokio::spawn(async move {
             let _ = serve_on(listener, cfg, host_key).await;
@@ -1311,6 +1370,19 @@ mod tests {
             "every byte streamed over the channel must land on disk unchanged"
         );
     }
+}
+
+/// The `grant_id` inside a token whose signature did NOT verify.
+///
+/// Used only to say WHICH grant was refused. Nothing is trusted from it — a caller that
+/// forges an id gets a refusal recorded against an id that does not exist, which is
+/// visible and harmless, while dropping the id entirely would lose the one detail that
+/// makes a digest mismatch worth reading.
+fn grant_id_of(token: &str) -> Option<String> {
+    use base64::{engine::general_purpose::STANDARD_NO_PAD, Engine as _};
+    let payload = STANDARD_NO_PAD.decode(token.split_once('.')?.0).ok()?;
+    let v: serde_json::Value = serde_json::from_slice(&payload).ok()?;
+    v.get("grant_id")?.as_str().map(|s| s.to_string())
 }
 
 /// Structural guards for the command-grant path (command-grant gate).

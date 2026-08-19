@@ -7,6 +7,7 @@ pub mod dataplane; // overlay peer model + packet routing helpers (testable)
 pub mod disco; // NAT-traversal driver: STUN discovery + hole-punch on the WG socket (G-2/G-3)
 pub mod dns; // F-3 private-DNS responder + raw IP/UDP framing (daemon + iOS extension)
 pub mod domain; // pure business logic, no I/O
+pub mod exec_outcome;
 pub mod machine_key; // stable per-device identity proven at enrollment (Ed25519)
 pub mod oidc; // CI OIDC token fetch for secretless deploy (B-3)
 pub mod ports; // trait interfaces for external systems

@@ -1026,6 +1026,58 @@ pub async fn agent_enroll(
         .map_err(|e| ApiError::Decode(e.to_string()))
 }
 
+/// Deliver queued command-grant outcomes. `POST {base_url}/api/v1/exec/outcome`.
+///
+/// Authenticated with the NODE service token, not a user session: the node is the only
+/// party that watched the command, and a report authenticated as a human would be a
+/// report from something that did not see it. `[T:Part D §D.11]`
+///
+/// Delivers oldest-first and STOPS at the first failure, putting that outcome back at the
+/// front. Continuing past it would reorder the ledger, and an operator reading it should
+/// see the outcomes in the order they happened rather than in the order the network
+/// recovered.
+pub async fn deliver_outcomes(
+    http: &reqwest::Client,
+    base_url: &str,
+    node_service_token: &NodeServiceToken,
+    queue: &crate::exec_outcome::OutcomeQueue,
+) -> usize {
+    let mut pending = queue.drain();
+    let mut delivered = 0usize;
+    while !pending.is_empty() {
+        let outcome = pending.remove(0);
+        let sent = http
+            .post(url(base_url, "/api/v1/exec/outcome"))
+            .bearer_auth(node_service_token.as_str())
+            .json(&outcome)
+            .timeout(CP_REST_TIMEOUT)
+            .send()
+            .await;
+        match sent {
+            // A 4xx means the control plane has decided about this grant — already
+            // closed, or not ours. Retrying forever would block every outcome behind it,
+            // so it is dropped and the reason logged. Only a transport failure or a 5xx
+            // is worth waiting out.
+            Ok(r) if r.status().is_success() => delivered += 1,
+            Ok(r) if r.status().is_client_error() => {
+                eprintln!(
+                    "[F-2] control plane refused an outcome for {} ({}); dropping it",
+                    outcome.grant_id,
+                    r.status()
+                );
+            }
+            _ => {
+                queue.requeue_front(outcome);
+                for left in pending.into_iter().rev() {
+                    queue.requeue_front(left);
+                }
+                return delivered;
+            }
+        }
+    }
+    delivered
+}
+
 /// Open an SSE stream for peer events. `GET /api/v1/peers/events`.
 /// Authenticated with the node service token (not the user session token).
 /// Returns the raw response; the caller reads it as a byte stream.
