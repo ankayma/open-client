@@ -1304,6 +1304,11 @@ async fn enroll_and_persist(
         workload_kind: Some("AppServer".to_string()),
         platform: Some(std::env::consts::OS.to_string()),
         machine_proof: Some(proof),
+        // Declared because this build carries the command-grant enforcement point
+        // (`agent_core::cmd_grant`). Derived from the code that is actually compiled in
+        // rather than from a version string: a version is a claim about a build, a
+        // constant next to the enforcement is the build. `[T:A.1.20]`
+        caps: vec![agent_core::cmd_grant::CAP_CMD_GRANT.to_string()],
     };
     let resp = adapters::enroll(http, &cfg.control_plane, token, &req)
         .await
@@ -1336,6 +1341,7 @@ async fn enroll_via_join_and_persist(
         workload_kind: Some("AppServer".to_string()),
         platform: Some(std::env::consts::OS.to_string()),
         machine_proof: Some(proof),
+        caps: vec![agent_core::cmd_grant::CAP_CMD_GRANT.to_string()],
     };
     let resp = adapters::enroll_via_join_token(http, &cfg.control_plane, &req)
         .await

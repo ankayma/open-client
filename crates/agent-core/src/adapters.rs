@@ -462,6 +462,10 @@ pub struct JoinEnrollRequest {
     /// administrator's revocation of this device — the invite IS the re-admission.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub machine_proof: Option<String>,
+    /// See `domain::EnrollRequest::caps`. A node that joins by invite enrols exactly like
+    /// one that joins by session, so it declares the same way. `[T:A.1.20]`
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub caps: Vec<String>,
 }
 
 /// Redeem a node invite (`ankayma://join?token=…`) to enroll THIS device into the
@@ -1969,6 +1973,7 @@ mod tests {
             workload_kind: None,
             platform: None,
             machine_proof: None,
+            caps: vec![],
         };
         let err = enroll(&http, "https://cp.ankayma.com", "bogus-token", &req)
             .await
@@ -2002,6 +2007,7 @@ mod tests {
             workload_kind: None,
             platform: None,
             machine_proof: None,
+            caps: vec![],
         };
         let err = enroll_via_join_token(&http, "https://cp.ankayma.com", &req)
             .await
@@ -2058,6 +2064,7 @@ mod tests {
                 workload_kind: None,
                 platform: None,
                 machine_proof: None,
+                caps: vec![],
             },
         )
         .await

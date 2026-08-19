@@ -33,6 +33,17 @@ pub struct EnrollRequest {
     /// field: omitting it falls back to matching on `public_key`. Always send it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub machine_proof: Option<String>,
+    /// What this agent can ENFORCE, not what it can do. The control plane refuses to
+    /// issue an authorisation whose enforcement point is absent here — an agent that has
+    /// not declared a capability is not assumed to have it, because assuming would mean
+    /// recording an enforcement that never happened.
+    ///
+    /// Additive and optional: an older control plane ignores it, and an older agent that
+    /// never sends it is simply never issued the things it cannot enforce. That is the
+    /// graceful degradation A.1.20 asks for — old agents keep working, they just do not
+    /// receive new authority. `[T:A.1.20 + A.1.6]`
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub caps: Vec<String>,
 }
 
 /// Control-plane response to a successful enrollment. `[T:B.5.1]`
@@ -542,6 +553,7 @@ mod tests {
             workload_kind: None,
             platform: None,
             machine_proof: None,
+            caps: vec![],
         };
         let v: serde_json::Value = serde_json::to_value(&req).unwrap();
         assert_eq!(v["public_key"], "PUBKEY");
