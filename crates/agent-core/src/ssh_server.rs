@@ -32,6 +32,8 @@ use russh::{Channel, ChannelId};
 use tokio::net::TcpListener;
 use tokio::sync::mpsc;
 
+use crate::cmd_grant::{CommandGrantVerifier, Refusal, CMD_GRANT_ENV};
+
 use crate::ssh_grant::{ElevationGrant, GrantVerifier};
 
 /// The SSH env var the client sets (via `set_env`) to carry a CP-signed elevation
@@ -129,6 +131,10 @@ pub struct SshServerConfig {
     /// this node (a client that presents a grant just lands unprivileged). Set once
     /// the agent has fetched the CP's elevation public key. `[T:f2 §H.4]`
     pub elevate: Option<GrantVerifier>,
+    /// Verifier for COMMAND grants (W2 / S-5). `None` → this node cannot enforce them,
+    /// and the control plane will not issue one to it: absent capability means "has not
+    /// said", which is not "yes". `[T:masterplan W2 R-1]`
+    pub cmd_grant: Option<CommandGrantVerifier>,
 }
 
 impl SshServerConfig {
@@ -141,7 +147,17 @@ impl SshServerConfig {
             authorizer: Authorizer::TrustOverlay,
             shell: ShellSpec::LoginShell("ankayma".to_string()),
             elevate: None,
+            cmd_grant: None,
         }
+    }
+
+    /// Enable command grants on this node. Until this is set the node runs the legacy
+    /// exec path, which is exactly why the control plane refuses to issue it a command
+    /// grant — a node that cannot compare a digest would record an enforcement it did not
+    /// perform. `[T:masterplan W2 R-1]`
+    pub fn with_command_grants(mut self, verifier: CommandGrantVerifier) -> Self {
+        self.cmd_grant = Some(verifier);
+        self
     }
 
     /// Enable root elevation on this node using the CP's elevation verifier.
@@ -253,6 +269,7 @@ pub async fn serve_on(
         authorizer: Arc::new(cfg.authorizer),
         shell: cfg.shell,
         elevate: cfg.elevate.map(Arc::new),
+        cmd_grant: cfg.cmd_grant.map(Arc::new),
     };
     listener_srv
         .run_on_socket(config, &listener)
@@ -265,6 +282,7 @@ struct Listener {
     authorizer: Arc<Authorizer>,
     shell: ShellSpec,
     elevate: Option<Arc<GrantVerifier>>,
+    cmd_grant: Option<Arc<CommandGrantVerifier>>,
 }
 
 impl server::Server for Listener {
@@ -274,7 +292,11 @@ impl server::Server for Listener {
             authorizer: self.authorizer.clone(),
             shell: self.shell.clone(),
             elevate: self.elevate.clone(),
+            cmd_grant: self.cmd_grant.clone(),
             pending_grant: None,
+            pending_cmd_grant: None,
+            active_grant: None,
+            last_refusal: None,
             term: "xterm".to_string(),
             size: PtySize::default(),
             writer: None,
@@ -296,8 +318,19 @@ struct ConnHandler {
     authorizer: Arc<Authorizer>,
     shell: ShellSpec,
     elevate: Option<Arc<GrantVerifier>>,
+    cmd_grant: Option<Arc<CommandGrantVerifier>>,
     /// The grant token the client set via env, awaiting verification at shell time.
     pending_grant: Option<String>,
+    /// A COMMAND grant token set via env. Its presence changes what this channel is
+    /// allowed to be: one authorised command, never a session.
+    pending_cmd_grant: Option<String>,
+    /// The verified grant this channel is executing under, kept so the outcome can name
+    /// the grant it belongs to.
+    active_grant: Option<crate::cmd_grant::CommandGrant>,
+    /// Why a command was refused, if it was. Reported rather than discarded — the control
+    /// plane records `rejected_digest_mismatch` as evidence, and a refusal nobody hears
+    /// about is a refusal that did not happen as far as the ledger knows.
+    last_refusal: Option<Refusal>,
     term: String,
     size: PtySize,
     writer: Option<Box<dyn Write + Send>>,
@@ -466,6 +499,177 @@ impl Drop for ConnHandler {
     }
 }
 
+impl ConnHandler {
+    /// Run exactly the command a CP-signed grant authorises — or refuse, with a reason.
+    ///
+    /// The argv comes from the GRANT. The exec string the client sent is used for nothing
+    /// but a mismatch note: a client that could supply the command would be a client that
+    /// decides what runs, which is the property this whole path removes.
+    ///
+    /// Elevation is deliberately NOT consulted here. A command grant authorises one
+    /// command as configured, and silently running it as root because an elevation grant
+    /// happened to be in the same channel would be two authorisations combining into one
+    /// nobody issued. `[T:A.1.27 #5 — intersection, not union]`
+    /// Returns the command to run, or `None` when it was refused (the channel has already
+    /// been failed by then).
+    fn exec_under_command_grant(
+        &mut self,
+        channel: ChannelId,
+        token: &str,
+        requested: &str,
+        session: &mut Session,
+    ) -> Option<std::process::Command> {
+        let Some(verifier) = self.cmd_grant.clone() else {
+            // The node was handed a command grant it cannot check. Refusing is the only
+            // honest answer: running it anyway would produce a ledger entry claiming an
+            // enforcement that never happened. [T:masterplan W2 R-1]
+            eprintln!("[F-2] command grant presented, but this node cannot verify one");
+            let _ = session.channel_failure(channel);
+            return None;
+        };
+
+        let grant = match verifier.verify(token, unix_now()) {
+            Ok(g) => g,
+            Err(refusal) => {
+                // The reason is logged in the node's own words AND is what gets reported
+                // to the control plane as `termination_reason`. A refusal is stronger
+                // evidence than a permit, so it must not be lost.
+                eprintln!(
+                    "[F-2] refusing command: {} (reported as {})",
+                    refusal.message(),
+                    refusal.termination_reason()
+                );
+                self.last_refusal = Some(refusal);
+                let _ = session.channel_failure(channel);
+                return None;
+            }
+        };
+
+        if !grant.matches_requested(requested) {
+            // Not fatal to the grant — the argv is authoritative either way — but a client
+            // asking for something other than what it holds is worth seeing.
+            eprintln!(
+                "[F-2] client asked for a command other than the one it holds a grant for;                  running the authorised one"
+            );
+        }
+
+        let cmd = grant.to_command();
+        eprintln!(
+            "[F-2] command grant {} actor={} digest={}",
+            grant.grant_id, grant.actor_id, grant.cmd_digest
+        );
+        self.active_grant = Some(grant);
+        Some(cmd)
+    }
+
+    /// Spawn a non-interactive child and bridge it to the channel.
+    ///
+    /// Shared by both exec paths so that the command-grant path and the legacy one differ
+    /// in WHICH command runs and in nothing else — a second copy of the plumbing would be
+    /// a second place for the two to drift.
+    async fn spawn_exec(
+        &mut self,
+        channel: ChannelId,
+        mut cmd: std::process::Command,
+        elevate_deadline: Option<i64>,
+        session: &mut Session,
+    ) -> Result<(), russh::Error> {
+        let child = cmd
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn();
+        let mut child = match child {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("[F-2] exec spawn failed: {e}");
+                let _ = session.channel_failure(channel);
+                return Ok(());
+            }
+        };
+        let _ = session.channel_success(channel);
+
+        // [F-2 §H.4] Same auto-drop as the shell path: an elevated exec is killed
+        // at the grant's TTL rather than allowed to outlive it. The shell path
+        // gets this for free from portable-pty's cross-platform `clone_killer()`;
+        // this exec path spawns a bare `std::process::Child` (no PTY needed), so
+        // it needs its own per-platform kill-by-pid.
+        if let Some(deadline) = elevate_deadline {
+            let secs = deadline.saturating_sub(unix_now()).max(0) as u64;
+            let pid = child.id();
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_secs(secs)).await;
+                kill_pid(pid);
+            });
+        }
+
+        self.writer = child
+            .stdin
+            .take()
+            .map(|s| Box::new(s) as Box<dyn Write + Send>);
+        let stdout = child.stdout.take();
+        let stderr = child.stderr.take();
+        self.exec_child = Some(child);
+
+        // Bridge stdout+stderr → SSH channel (merged, matching how a PTY shell's
+        // combined output already works for interactive users). One reader thread
+        // per stream (both blocking `Read`s), one tokio task forwards to the
+        // channel and waits for the process exit to report the REAL exit code —
+        // unlike the shell path (always reports 0; a login shell's own exit code
+        // isn't the thing being proven there).
+        let handle = session.handle();
+        let (tx, mut rx) = mpsc::channel::<Vec<u8>>(64);
+        for mut stream in [
+            stdout.map(|s| Box::new(s) as Box<dyn Read + Send>),
+            stderr.map(|s| Box::new(s) as Box<dyn Read + Send>),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            let tx = tx.clone();
+            std::thread::spawn(move || {
+                let mut buf = [0u8; 8192];
+                loop {
+                    match stream.read(&mut buf) {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => {
+                            if tx.blocking_send(buf[..n].to_vec()).is_err() {
+                                break;
+                            }
+                        }
+                    }
+                }
+            });
+        }
+        drop(tx);
+
+        let mut exec_child = self.exec_child.take();
+        tokio::spawn(async move {
+            while let Some(chunk) = rx.recv().await {
+                if handle.data(channel, chunk).await.is_err() {
+                    break;
+                }
+            }
+            // Both stdout+stderr are EOF (both reader threads exited) — the
+            // process is done or about to be; wait() to reap it and get the
+            // real exit code (blocking `wait()` off the async runtime).
+            let code = tokio::task::spawn_blocking(move || {
+                exec_child
+                    .as_mut()
+                    .and_then(|c| c.wait().ok())
+                    .and_then(|s| s.code())
+                    .unwrap_or(1)
+            })
+            .await
+            .unwrap_or(1);
+            let _ = handle.eof(channel).await;
+            let _ = handle.exit_status_request(channel, code as u32).await;
+            let _ = handle.close(channel).await;
+        });
+        Ok(())
+    }
+}
+
 impl server::Handler for ConnHandler {
     type Error = russh::Error;
 
@@ -500,6 +704,14 @@ impl server::Handler for ConnHandler {
         _modes: &[(russh::Pty, u32)],
         _session: &mut Session,
     ) -> Result<(), Self::Error> {
+        // [T:buildspec §1.1(1)] A command grant authorises ONE command. Allowing a PTY
+        // under it would turn that into an interactive session with one line of client
+        // code — the exact degradation `kind` exists to prevent. Refused before the
+        // terminal is even recorded.
+        if self.pending_cmd_grant.is_some() {
+            eprintln!("[F-2] {}", Refusal::PtyRefused.message());
+            return Err(russh::Error::Inconsistent);
+        }
         self.term = if term.is_empty() {
             "xterm".to_string()
         } else {
@@ -525,6 +737,11 @@ impl server::Handler for ConnHandler {
         // client set arbitrary environment into the spawned shell).
         if variable_name == ELEVATE_GRANT_ENV {
             self.pending_grant = Some(variable_value.to_string());
+        }
+        // [T:buildspec §1.1(4)] Reuse the env-var channel the elevation grant already
+        // uses rather than inventing a second one (P.4).
+        if variable_name == CMD_GRANT_ENV {
+            self.pending_cmd_grant = Some(variable_value.to_string());
         }
         Ok(())
     }
@@ -639,6 +856,23 @@ impl server::Handler for ConnHandler {
     ) -> Result<(), Self::Error> {
         let command = String::from_utf8_lossy(data).into_owned();
 
+        // [T:buildspec §S-5] The command-grant path is taken FIRST and never falls back
+        // to the legacy one: a token that fails to verify means no command runs, because
+        // a fallback would let a caller downgrade to the unverified path by sending a
+        // deliberately broken grant.
+        //
+        // Elevation is not consulted on this path. A command grant authorises one command
+        // as configured, and running it as root because an elevation grant happened to be
+        // in the same channel would be two authorisations combining into one nobody
+        // issued. [T:A.1.27 #5 — intersection, not union]
+        if let Some(token) = self.pending_cmd_grant.clone() {
+            let Some(cmd) = self.exec_under_command_grant(channel, &token, &command, session)
+            else {
+                return Ok(());
+            };
+            return self.spawn_exec(channel, cmd, None, session).await;
+        }
+
         let decision = decide_elevation(
             self.elevate.as_deref(),
             self.pending_grant.as_deref(),
@@ -658,105 +892,13 @@ impl server::Handler for ConnHandler {
             ElevationDecision::None => false,
         };
 
-        let Some(mut cmd) = self.resolve_exec_command(elevated, &command) else {
+        let Some(cmd) = self.resolve_exec_command(elevated, &command) else {
             eprintln!("[F-2] exec refused — server is locked to a forced program");
             let _ = session.channel_failure(channel);
             return Ok(());
         };
-
-        let child = cmd
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .spawn();
-        let mut child = match child {
-            Ok(c) => c,
-            Err(e) => {
-                eprintln!("[F-2] exec spawn failed: {e}");
-                let _ = session.channel_failure(channel);
-                return Ok(());
-            }
-        };
-        let _ = session.channel_success(channel);
-
-        // [F-2 §H.4] Same auto-drop as the shell path: an elevated exec is killed
-        // at the grant's TTL rather than allowed to outlive it. The shell path
-        // gets this for free from portable-pty's cross-platform `clone_killer()`;
-        // this exec path spawns a bare `std::process::Child` (no PTY needed), so
-        // it needs its own per-platform kill-by-pid.
-        if let Some(deadline) = elevate_deadline {
-            let secs = deadline.saturating_sub(unix_now()).max(0) as u64;
-            let pid = child.id();
-            tokio::spawn(async move {
-                tokio::time::sleep(Duration::from_secs(secs)).await;
-                kill_pid(pid);
-            });
-        }
-
-        self.writer = child
-            .stdin
-            .take()
-            .map(|s| Box::new(s) as Box<dyn Write + Send>);
-        let stdout = child.stdout.take();
-        let stderr = child.stderr.take();
-        self.exec_child = Some(child);
-
-        // Bridge stdout+stderr → SSH channel (merged, matching how a PTY shell's
-        // combined output already works for interactive users). One reader thread
-        // per stream (both blocking `Read`s), one tokio task forwards to the
-        // channel and waits for the process exit to report the REAL exit code —
-        // unlike the shell path (always reports 0; a login shell's own exit code
-        // isn't the thing being proven there).
-        let handle = session.handle();
-        let (tx, mut rx) = mpsc::channel::<Vec<u8>>(64);
-        for mut stream in [
-            stdout.map(|s| Box::new(s) as Box<dyn Read + Send>),
-            stderr.map(|s| Box::new(s) as Box<dyn Read + Send>),
-        ]
-        .into_iter()
-        .flatten()
-        {
-            let tx = tx.clone();
-            std::thread::spawn(move || {
-                let mut buf = [0u8; 8192];
-                loop {
-                    match stream.read(&mut buf) {
-                        Ok(0) | Err(_) => break,
-                        Ok(n) => {
-                            if tx.blocking_send(buf[..n].to_vec()).is_err() {
-                                break;
-                            }
-                        }
-                    }
-                }
-            });
-        }
-        drop(tx);
-
-        let mut exec_child = self.exec_child.take();
-        tokio::spawn(async move {
-            while let Some(chunk) = rx.recv().await {
-                if handle.data(channel, chunk).await.is_err() {
-                    break;
-                }
-            }
-            // Both stdout+stderr are EOF (both reader threads exited) — the
-            // process is done or about to be; wait() to reap it and get the
-            // real exit code (blocking `wait()` off the async runtime).
-            let code = tokio::task::spawn_blocking(move || {
-                exec_child
-                    .as_mut()
-                    .and_then(|c| c.wait().ok())
-                    .and_then(|s| s.code())
-                    .unwrap_or(1)
-            })
+        self.spawn_exec(channel, cmd, elevate_deadline, session)
             .await
-            .unwrap_or(1);
-            let _ = handle.eof(channel).await;
-            let _ = handle.exit_status_request(channel, code as u32).await;
-            let _ = handle.close(channel).await;
-        });
-        Ok(())
     }
 
     async fn data(
@@ -1040,6 +1182,7 @@ mod tests {
             authorizer: Authorizer::TrustOverlay,
             shell: ShellSpec::Program(vec!["/bin/cat".to_string()]),
             elevate: None,
+            cmd_grant: None,
         };
         tokio::spawn(async move {
             let _ = serve_on(listener, cfg, host_key).await;
@@ -1089,6 +1232,7 @@ mod tests {
             // (plain `sh -c`), so the exact username here doesn't matter.
             shell: ShellSpec::LoginShell("whoever-is-running-this-test".to_string()),
             elevate: None,
+            cmd_grant: None,
         };
         tokio::spawn(async move {
             let _ = serve_on(listener, cfg, host_key).await;
@@ -1135,6 +1279,7 @@ mod tests {
             authorizer: Authorizer::TrustOverlay,
             shell: ShellSpec::LoginShell("whoever-is-running-this-test".to_string()),
             elevate: None,
+            cmd_grant: None,
         };
         tokio::spawn(async move {
             let _ = serve_on(listener, cfg, host_key).await;
@@ -1165,5 +1310,82 @@ mod tests {
             written, artifact,
             "every byte streamed over the channel must land on disk unchanged"
         );
+    }
+}
+
+/// Structural guards for the command-grant path (S-5 gate).
+///
+/// These read the source rather than exercise a socket, deliberately. Each property below
+/// is enforced by the ABSENCE of a line — no shell, no fallback, no PTY — and a behavioural
+/// test cannot see a line that was deleted. Whoever removes one should be told by a test
+/// rather than by an incident.
+#[cfg(test)]
+mod command_grant_structure {
+    const SOURCE: &str = include_str!("ssh_server.rs");
+
+    /// The body of `exec_under_command_grant`, which is the entire command-grant path.
+    fn grant_path() -> &'static str {
+        let start = SOURCE
+            .find("fn exec_under_command_grant")
+            .expect("the command-grant path exists");
+        let rest = &SOURCE[start..];
+        let end = rest.find("\n    }\n").expect("it ends");
+        &rest[..end]
+    }
+
+    // The claim the whole tier rests on: argv is built from the signed grant, element by
+    // element. `bash -c` is not forbidden here — it is unrepresentable, because nothing on
+    // this path can produce a shell.
+    #[test]
+    fn the_command_grant_path_cannot_build_a_shell() {
+        let body = grant_path();
+        for forbidden in ["-c", "/bin/sh", "/bin/bash", "SHELL", "su\"", "arg(\"-c\")"] {
+            assert!(
+                !body.contains(forbidden),
+                "the command-grant path must not be able to reach a shell, found {forbidden:?}"
+            );
+        }
+        assert!(
+            body.contains("grant.to_command()"),
+            "the command must come from the signed grant, not from the exec string"
+        );
+    }
+
+    // No fallback. A token that fails to verify must mean no command runs — otherwise a
+    // caller downgrades to the unverified path by sending a deliberately broken grant.
+    #[test]
+    fn a_failed_grant_never_falls_through_to_the_legacy_path() {
+        let body = grant_path();
+        assert!(
+            !body.contains("resolve_exec_command"),
+            "the grant path must not be able to reach the legacy exec builder"
+        );
+        assert_eq!(
+            body.matches("return None").count(),
+            2,
+            "both refusal branches must return without running anything"
+        );
+    }
+
+    // A PTY under a command grant turns one authorised command into a session.
+    #[test]
+    fn a_pty_is_refused_while_a_command_grant_is_in_force() {
+        let start = SOURCE
+            .find("async fn pty_request")
+            .expect("pty_request exists");
+        let body = &SOURCE[start..start + 900];
+        assert!(
+            body.contains("self.pending_cmd_grant.is_some()"),
+            "pty_request must refuse while a command grant is in force"
+        );
+    }
+
+    // Elevation is not consulted on the grant path. Two authorisations combining into one
+    // nobody issued is A.1.27 #5 read backwards.
+    #[test]
+    fn the_grant_path_does_not_consult_the_elevation_grant() {
+        let body = grant_path();
+        assert!(!body.contains("decide_elevation"));
+        assert!(!body.contains("elevated"));
     }
 }

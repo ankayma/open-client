@@ -2,6 +2,7 @@
 //! Hexagonal architecture per Part A §A.3.1.
 pub mod adapters; // concrete impls of ports
 pub mod application; // use cases, orchestration
+pub mod cmd_grant;
 pub mod dataplane; // overlay peer model + packet routing helpers (testable)
 pub mod disco; // NAT-traversal driver: STUN discovery + hole-punch on the WG socket (G-2/G-3)
 pub mod dns; // F-3 private-DNS responder + raw IP/UDP framing (daemon + iOS extension)

@@ -52,6 +52,10 @@ portable-pty = "0.9"
 # grant is an app-level signature, kept on stable primitives. Already in-tree.
 # `[T:ed25519-dalek@2]`
 ed25519-dalek = "2"
+# [T:A.1.21] `cmd_grant` recomputes the command digest the control plane decided on.
+# sha2 is already in this workspace's lockfile at this version via the signature stack,
+# so making it direct adds no supply-chain surface.
+sha2 = "0.10.9"
 # base64 for the grant token wire form (already in-tree via daemon). `[T:base64@0.22]`
 base64 = "0.22"
 # [T: Decision D-T1, part-d-transport-connectivity §5] Relay wire codec (DERP-style
