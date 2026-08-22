@@ -93,6 +93,14 @@ pub struct NodeBrief {
     pub active: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub owner_user_id: Option<String>,
+    /// Last CONTROL-PLANE check-in (ISO-8601 UTC), stamped server-side on any
+    /// service-token-authed request (~1/min for a live daemon, CP mig 039).
+    /// This says "the daemon reached the CP recently" — never data-plane
+    /// reachability, which only the tunnel endpoints can measure (A.1.1); UI
+    /// must word it as "checked in", not "online". `None`: pre-039 CP (field
+    /// absent) or a node that never checked in since the migration. [T:A.1.1 + P.3]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_seen_at: Option<String>,
 }
 
 /// A peer in the mesh as returned by the control-plane. `[T:B.5.1]`
@@ -712,5 +720,25 @@ mod tests {
         assert_eq!(v["environment"], "prod");
         assert!(v.get("ref").is_none());
         assert!(v.get("target_hostname").is_none());
+    }
+
+    #[test]
+    fn node_brief_last_seen_is_optional_both_ways() {
+        // Pre-mig-039 CP: no `last_seen_at` key at all — must still parse (P.4
+        // compose: old server, new client).
+        let old = r#"{"node_id":"n1","hostname":"h","overlay_ip":"fd00::1","active":true}"#;
+        let b: NodeBrief = serde_json::from_str(old).unwrap();
+        assert_eq!(b.last_seen_at, None);
+
+        // Post-039 CP: JSON `null` (never checked in) and a value both parse.
+        let never = r#"{"node_id":"n1","hostname":"h","overlay_ip":"fd00::1",
+                        "active":true,"last_seen_at":null}"#;
+        let b: NodeBrief = serde_json::from_str(never).unwrap();
+        assert_eq!(b.last_seen_at, None);
+
+        let seen = r#"{"node_id":"n1","hostname":"h","overlay_ip":"fd00::1",
+                       "active":true,"last_seen_at":"2026-08-17T04:00:00Z"}"#;
+        let b: NodeBrief = serde_json::from_str(seen).unwrap();
+        assert_eq!(b.last_seen_at.as_deref(), Some("2026-08-17T04:00:00Z"));
     }
 }

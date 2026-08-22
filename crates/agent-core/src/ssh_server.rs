@@ -88,6 +88,18 @@ impl SshHostKey {
 }
 
 /// Who may authenticate to the embedded server.
+///
+/// `TrustOverlay` accepts any offered key on the premise that the overlay plus
+/// `list_peers` already decided who may reach this port — the roster the control plane
+/// hands back must be scoped to the caller. That scoping is enforced control-plane side;
+/// this authorizer has no way to check it itself, only to rely on it. `[A — verify: the
+/// roster this node receives is scoped to its own tenant]`
+///
+/// `Allowlist` is the defence-in-depth that would stop depending on that premise, and it
+/// is **not reachable yet: nothing distributes per-device SSH public keys.** The client
+/// authenticates with an in-memory keypair that is never persisted and never registered,
+/// so there is currently no key material to put on a list. Wiring it needs the control
+/// plane to carry SSH pubkeys in the roster. `[A — blocked on roster key distribution]`
 #[derive(Clone)]
 pub enum Authorizer {
     /// F0: accept any offered key (the overlay + roster already authenticated the

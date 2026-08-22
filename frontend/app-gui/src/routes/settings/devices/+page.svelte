@@ -55,6 +55,28 @@
 		return mins < 60 ? `Silent for ${mins}m` : `Silent for ${Math.round(mins / 60)}h`;
 	}
 
+	// Last CONTROL-PLANE check-in as a relative label ("checked in 2m ago").
+	// Complement of the data-plane dot above, not a replacement: the dot answers
+	// "can THIS device reach it over the mesh", the check-in answers "is its
+	// daemon alive and reaching the control plane at all" — together they split
+	// daemon-dead from tunnel-dead (a peer whose daemon runs fine but whose
+	// tunnel never handshakes looks identical to a powered-off machine). The CP
+	// stamps the time on any node-authenticated request (~1/min live, mig 039).
+	// Wording stays "checked in", never "online" — reachability remains a
+	// data-plane-only claim. `[T:A.1.1 + P.3]`
+	// null/absent (old CP, or never checked in since the migration) → no label.
+	function checkinLabel(d: PeerBrief): string | null {
+		if (!d.last_seen_at) return null;
+		const t = Date.parse(d.last_seen_at);
+		if (Number.isNaN(t)) return null;
+		const secs = Math.max(0, Math.floor((Date.now() - t) / 1000));
+		// <2m = inside one stamp-throttle + resync cycle: as fresh as it gets.
+		if (secs < 120) return 'checked in just now';
+		if (secs < 3600) return `checked in ${Math.floor(secs / 60)}m ago`;
+		if (secs < 172800) return `checked in ${Math.floor(secs / 3600)}h ago`;
+		return `checked in ${Math.floor(secs / 86400)}d ago`;
+	}
+
 	// Whose device this is, for the admin roster view. Returns null when we can't
 	// name an owner (solo tenant, or a member with no roster access) -- then no
 	// label renders. "you" for my own nodes, the owner's email (or @login) for a
@@ -302,6 +324,12 @@
 						</div>
 						<div class="dev-line3">
 							<span class="ip">{d.overlay_ip}</span>
+							{#if checkinLabel(d)}
+								<span
+									class="checkin"
+									title="Last control-plane check-in — the daemon reached our servers then. Not mesh reachability: that is the dot."
+								>{checkinLabel(d)}</span>
+							{/if}
 						</div>
 					</li>
 				{/each}
@@ -499,6 +527,13 @@
 		gap: 8px;
 	}
 	.dev-line3 .ip { flex: 1; min-width: 0; }
+	/* Check-in label — quiet metadata, same register as .owner. Hover explains
+	   the control-plane vs data-plane distinction. */
+	.checkin {
+		font-size: 11px;
+		color: var(--c-text-dim);
+		flex-shrink: 0;
+	}
 	.search-box {
 		display: flex;
 		align-items: center;

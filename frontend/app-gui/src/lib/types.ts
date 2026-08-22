@@ -116,6 +116,15 @@ export interface PeerBrief {
    */
   active: boolean;
   owner_user_id?: string;
+  /**
+   * Last CONTROL-PLANE check-in (ISO-8601 UTC), stamped server-side on any
+   * node-authenticated request — roughly once a minute for a live daemon.
+   * Says "the daemon reached the control plane recently"; it is NOT mesh
+   * reachability (A.1.1 — only the tunnel endpoints can measure that, via
+   * `getPathProof()`). Word it "checked in", never "online". Absent/null:
+   * older control plane, or the node never checked in since the migration.
+   */
+  last_seen_at?: string | null;
 }
 
 // F-3 branded subdomain (Part C §H.3.6.1): a private name mapped onto a mesh node.
