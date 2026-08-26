@@ -10,9 +10,10 @@
 		amendPrincipal,
 		listPendingApprovals,
 		decideApproval,
-		taskRecord
+		taskRecord,
+		saveCommandTemplate
 	} from '$lib/tauri';
-	import type { RegisteredPrincipal, PendingApproval } from '$lib/types';
+	import type { RegisteredPrincipal, PendingApproval, ApprovalDecision } from '$lib/types';
 
 	let principals = $state<RegisteredPrincipal[]>([]);
 	let approvals = $state<PendingApproval[]>([]);
@@ -29,6 +30,14 @@
 	let deciding = $state<string | null>(null);
 	let taskId = $state('');
 	let dossier = $state<unknown>(null);
+
+	// What just got decided — shown ONCE. `grant_token` appears nowhere else, so this
+	// is the only chance to copy it; and if it was an approved FREEFORM command, the
+	// only chance to offer promoting it into the catalog before the details are gone.
+	let justDecided = $state<{ result: ApprovalDecision; source: PendingApproval } | null>(null);
+	let templateId = $state('');
+	let templateSaving = $state(false);
+	let templateSaved = $state(false);
 
 	async function load() {
 		loading = true;
@@ -74,16 +83,41 @@
 		}
 	}
 
-	async function decide(id: string, approve: boolean) {
-		deciding = id;
+	async function decide(a: PendingApproval, approve: boolean) {
+		deciding = a.approval_id;
 		error = '';
+		justDecided = null;
+		templateId = '';
+		templateSaved = false;
 		try {
-			await decideApproval(id, approve);
+			const result = await decideApproval(a.approval_id, approve);
+			if (result.credential_issued) justDecided = { result, source: a };
 			await load();
 		} catch (e) {
 			error = String(e);
 		} finally {
 			deciding = null;
+		}
+	}
+
+	async function saveAsTemplate() {
+		if (!justDecided || templateId.trim() === '') return;
+		templateSaving = true;
+		error = '';
+		try {
+			await saveCommandTemplate(
+				templateId.trim(),
+				justDecided.source.argv,
+				justDecided.source.risk_class,
+				justDecided.source.gate_reason === 'gate' ? 'human_approval' : 'none',
+				false,
+				'none'
+			);
+			templateSaved = true;
+		} catch (e) {
+			error = String(e);
+		} finally {
+			templateSaving = false;
 		}
 	}
 
@@ -139,13 +173,13 @@
 						<p class="justification">“{a.justification}”</p>
 					{/if}
 					<div class="actions">
-						<button disabled={deciding === a.approval_id} onclick={() => decide(a.approval_id, true)}>
+						<button disabled={deciding === a.approval_id} onclick={() => decide(a, true)}>
 							Approve
 						</button>
 						<button
 							class="secondary"
 							disabled={deciding === a.approval_id}
-							onclick={() => decide(a.approval_id, false)}
+							onclick={() => decide(a, false)}
 						>
 							Deny
 						</button>
@@ -157,6 +191,45 @@
 				</li>
 			{/each}
 		</ul>
+	{/if}
+
+	{#if justDecided}
+		<div class="just-decided">
+			<h3>Approved</h3>
+			<p>
+				This is the only place the credential appears — copy it now, or hand it to whoever
+				runs it (<code>agent ssh --as &lt;handle&gt; &lt;node&gt; --cmd-grant &lt;token&gt;</code>).
+			</p>
+			<pre class="argv">{justDecided.result.grant_token}</pre>
+			<dl>
+				<dt>Expires</dt><dd>{justDecided.result.expires_at}</dd>
+				<dt>cmd_digest</dt><dd>{justDecided.result.cmd_digest}</dd>
+			</dl>
+
+			{#if justDecided.source.gate_reason === 'freeform'}
+				<div class="save-template">
+					<p class="muted">
+						This ran once, off-catalog. Give it a name to skip break-glass next time — the
+						exact argv above is frozen verbatim, no parameters.
+					</p>
+					{#if templateSaved}
+						<p class="note">Saved. It's in the catalog now.</p>
+					{:else}
+						<div class="actions">
+							<input bind:value={templateId} placeholder="template-id" />
+							<button
+								disabled={templateSaving || templateId.trim() === ''}
+								onclick={saveAsTemplate}
+							>
+								Save as template
+							</button>
+						</div>
+					{/if}
+				</div>
+			{/if}
+
+			<button class="secondary" onclick={() => (justDecided = null)}>Close</button>
+		</div>
 	{/if}
 
 	<h2>Register of legal entities</h2>
@@ -308,5 +381,19 @@
 	}
 	.tag.warn {
 		background: var(--warn-bg, #fff3cd);
+	}
+	.just-decided {
+		border: 1px solid var(--border, #ddd);
+		border-radius: 0.5rem;
+		padding: 0.75rem;
+		margin: 0.75rem 0 1.5rem;
+	}
+	.just-decided h3 {
+		margin: 0 0 0.4rem;
+	}
+	.save-template {
+		border-top: 1px solid var(--border, #ddd);
+		margin-top: 0.6rem;
+		padding-top: 0.6rem;
 	}
 </style>

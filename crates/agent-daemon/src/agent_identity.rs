@@ -18,13 +18,33 @@ use anyhow::{anyhow, Result};
 
 const DEFAULT_CONTROL_PLANE: &str = "https://cp.ankayma.com";
 
-/// `agent enroll-identity --token <t> [--control-plane <url>] [--hostname <h>]`
+/// `agent enroll-identity --token <t> [--name <handle>] [--control-plane <url>]
+///                        [--hostname <h>]`
+///
+/// `--name` is what makes this identity reusable: without it, the WireGuard key this
+/// redemption mints is never persisted (secret-residue zero, one-shot by design, as
+/// it always was) and the node it creates becomes unreachable the moment this process
+/// exits. WITH a name, this also generates + persists a session signing key and saves
+/// `{agent_actor_id, self_node_id}` under that handle, so `agent ssh --as <handle>`
+/// can reconnect as this SAME identity indefinitely — one identity across every
+/// window — without spending another single-use token.
 pub async fn run(args: &[String]) -> Result<()> {
     let cfg = Config::parse(args)?;
     let http = reqwest::Client::new();
 
-    // Ephemeral identity for this one grant (key never persisted) — secret-residue zero.
+    // Ephemeral identity for this one grant. Persisted only when --name is given —
+    // without one there is nothing to reconnect AS later, so keeping it in memory only
+    // is the honest zero-secret-residue behaviour this command always had.
     let kp = WgKeypair::generate();
+
+    let session_pubkey = match &cfg.name {
+        Some(handle) => Some(
+            crate::agent_state::session_key(handle)
+                .map_err(|e| anyhow!("agent session key for {handle}: {e}"))?
+                .public_b64(),
+        ),
+        None => None,
+    };
 
     let resp = adapters::agent_enroll(
         &http,
@@ -33,6 +53,7 @@ pub async fn run(args: &[String]) -> Result<()> {
             token: cfg.token,
             public_key: kp.public_b64.clone(),
             hostname: cfg.hostname,
+            agent_session_pubkey: session_pubkey,
         },
     )
     .await
@@ -43,6 +64,29 @@ pub async fn run(args: &[String]) -> Result<()> {
         resp.node_id, resp.overlay_ip, resp.expires_in_seconds
     );
     print_agent_receipt(&resp.receipt, &cfg.control_plane);
+
+    if let Some(handle) = &cfg.name {
+        let Some(agent_actor_id) = resp.actor_id else {
+            eprintln!(
+                "warning: control plane did not return an actor id — {handle} was NOT \
+                 saved; `agent ssh --as {handle}` will not find it. Upgrade the control \
+                 plane or re-run once it does."
+            );
+            return Ok(());
+        };
+        crate::agent_state::save(
+            handle,
+            &crate::agent_state::AgentIdentity {
+                agent_actor_id,
+                self_node_id: resp.node_id.clone(),
+            },
+        )
+        .map_err(|e| anyhow!("save identity {handle}: {e}"))?;
+        println!(
+            "\nidentity saved as \"{handle}\" — `agent ssh --as {handle} <node>` reuses it, \
+             no token needed again"
+        );
+    }
     Ok(())
 }
 
@@ -71,6 +115,9 @@ struct Config {
     control_plane: String,
     token: String,
     hostname: Option<String>,
+    /// Local handle to persist this identity under, so `agent ssh --as <name>` can
+    /// reconnect as it later. Omit for the old one-shot, nothing-persisted behaviour.
+    name: Option<String>,
 }
 
 impl Config {
@@ -79,6 +126,7 @@ impl Config {
             .unwrap_or_else(|_| DEFAULT_CONTROL_PLANE.to_string());
         let mut token = std::env::var("ANKAYMA_AGENT_TOKEN").ok();
         let mut hostname = None;
+        let mut name = None;
 
         let mut it = args.iter();
         while let Some(a) = it.next() {
@@ -103,6 +151,13 @@ impl Config {
                             .clone(),
                     )
                 }
+                "--name" => {
+                    name = Some(
+                        it.next()
+                            .ok_or_else(|| anyhow!("--name needs a value"))?
+                            .clone(),
+                    )
+                }
                 other => return Err(anyhow!("unknown argument: {other}")),
             }
         }
@@ -113,6 +168,7 @@ impl Config {
             control_plane,
             token,
             hostname,
+            name,
         })
     }
 }

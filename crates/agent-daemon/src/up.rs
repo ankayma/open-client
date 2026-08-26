@@ -866,6 +866,7 @@ async fn start_embedded_ssh(
 ) {
     use agent_core::cmd_grant::CommandGrantVerifier;
     use agent_core::exec_outcome::OutcomeQueue;
+    use agent_core::session_grant::SessionGrantVerifier;
     use agent_core::ssh_grant::GrantVerifier;
     use agent_core::ssh_server::{serve, SshHostKey, SshServerConfig};
 
@@ -947,6 +948,21 @@ async fn start_embedded_ssh(
              be reported"
         ),
         (Err(e), _) => eprintln!("[F-2] command grants disabled (CP key unavailable): {e}"),
+    }
+
+    // Agent-session grants ride the SAME key too — same fetch, third `purpose` value.
+    // No outcome-reporting dependency: unlike a command grant, a session grant does not
+    // measure anything the node reports back, it only gates who may open the channel.
+    //
+    match adapters::elevate_pubkey(http, control_plane).await {
+        Ok(pubkey) => match SessionGrantVerifier::new(&pubkey, node_id) {
+            Ok(v) => {
+                cfg = cfg.with_session_grants(v);
+                println!("[F-2] agent session grants enabled");
+            }
+            Err(e) => eprintln!("[F-2] agent session grants disabled (bad CP key): {e}"),
+        },
+        Err(e) => eprintln!("[F-2] agent session grants disabled (CP key unavailable): {e}"),
     }
 
     println!("[F-2] embedded ssh server on {self_overlay}:{port} (user ankayma, identity-bound)");
@@ -1371,7 +1387,12 @@ async fn enroll_and_persist(
         // (`agent_core::cmd_grant`). Derived from the code that is actually compiled in
         // rather than from a version string: a version is a claim about a build, a
         // constant next to the enforcement is the build. `[T:A.1.20]`
-        caps: vec![agent_core::cmd_grant::CAP_CMD_GRANT.to_string()],
+        caps: vec![
+            agent_core::cmd_grant::CAP_CMD_GRANT.to_string(),
+            // Declared for the same reason: this build carries the agent-session
+            // enforcement point (`agent_core::session_grant`).
+            agent_core::session_grant::CAP_SESSION_GRANT.to_string(),
+        ],
     };
     let resp = adapters::enroll(http, &cfg.control_plane, token, &req)
         .await
@@ -1404,7 +1425,12 @@ async fn enroll_via_join_and_persist(
         workload_kind: Some("AppServer".to_string()),
         platform: Some(std::env::consts::OS.to_string()),
         machine_proof: Some(proof),
-        caps: vec![agent_core::cmd_grant::CAP_CMD_GRANT.to_string()],
+        caps: vec![
+            agent_core::cmd_grant::CAP_CMD_GRANT.to_string(),
+            // Declared for the same reason: this build carries the agent-session
+            // enforcement point (`agent_core::session_grant`).
+            agent_core::session_grant::CAP_SESSION_GRANT.to_string(),
+        ],
     };
     let resp = adapters::enroll_via_join_token(http, &cfg.control_plane, &req)
         .await

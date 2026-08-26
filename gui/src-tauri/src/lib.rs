@@ -130,6 +130,10 @@ struct AppState {
     /// [F-2 §H.2.2] Live in-app SSH terminals: id → write handle. The read side of
     /// each session runs in a task that emits `ssh_data_<id>` events to xterm.js.
     ssh_sessions: Mutex<std::collections::HashMap<String, agent_core::ssh_client::SshInput>>,
+    /// This terminal session's own `grant_id` (id → grant_id), so "Delegate ↗" can
+    /// open a delegation window hung off it. Absent entries mean an older control
+    /// plane didn't return one.
+    ssh_session_grants: Mutex<std::collections::HashMap<String, String>>,
     /// Monotonic id source for terminal sessions.
     ssh_seq: std::sync::atomic::AtomicU64,
     /// When `start_dataplane` last succeeded (desktop). Gives the daemon a settle
@@ -219,6 +223,7 @@ impl AppState {
             pending_join_team: Mutex::new(None),
             pending_join_node: Mutex::new(None),
             ssh_sessions: Mutex::new(std::collections::HashMap::new()),
+            ssh_session_grants: Mutex::new(std::collections::HashMap::new()),
             ssh_seq: std::sync::atomic::AtomicU64::new(0),
             dataplane_started: Mutex::new(None),
         }
@@ -654,7 +659,10 @@ async fn connect_inner(state: &AppState) -> Result<(), String> {
         // The app ships the agent binary it will run, so what this build can enforce is
         // what that agent can enforce. Declared rather than assumed — the control plane
         // reads absence as "has not said", never as yes. [T:A.1.20]
-        caps: vec![agent_core::cmd_grant::CAP_CMD_GRANT.to_string()],
+        caps: vec![
+            agent_core::cmd_grant::CAP_CMD_GRANT.to_string(),
+            agent_core::session_grant::CAP_SESSION_GRANT.to_string(),
+        ],
     };
     let resp = adapters::enroll(&state.http, &state.regional_base_url(), &tok, &req)
         .await
@@ -2553,7 +2561,10 @@ async fn join_enroll_node(
         // The app ships the agent binary it will run, so what this build can enforce is
         // what that agent can enforce. Declared rather than assumed — the control plane
         // reads absence as "has not said", never as yes. [T:A.1.20]
-        caps: vec![agent_core::cmd_grant::CAP_CMD_GRANT.to_string()],
+        caps: vec![
+            agent_core::cmd_grant::CAP_CMD_GRANT.to_string(),
+            agent_core::session_grant::CAP_SESSION_GRANT.to_string(),
+        ],
     };
     let resp = adapters::enroll_via_join_token(&state.http, &state.regional_base_url(), &req)
         .await
@@ -3293,6 +3304,13 @@ async fn ssh_open(
         .lock()
         .expect("ssh_sessions lock")
         .insert(id.clone(), session.input());
+    if let Some(grant_id) = &resp.grant_id {
+        state
+            .ssh_session_grants
+            .lock()
+            .expect("ssh_session_grants lock")
+            .insert(id.clone(), grant_id.clone());
+    }
 
     let ev = format!("ssh_data_{id}");
     let end_ev = format!("ssh_end_{id}");
@@ -3361,10 +3379,119 @@ async fn ssh_close(state: State<'_, AppState>, id: String) -> Result<(), String>
         .lock()
         .expect("ssh_sessions lock")
         .remove(&id);
+    state
+        .ssh_session_grants
+        .lock()
+        .expect("ssh_session_grants lock")
+        .remove(&id);
     if let Some(inp) = input {
         let _ = inp.close().await;
     }
     Ok(())
+}
+
+/// This terminal session's own grant id, if the control plane returned one — what
+/// the terminal page checks before showing "Delegate ↗" at all (an older CP that
+/// predates `grant_id` means there is nothing to delegate FROM).
+#[tauri::command]
+async fn ssh_session_grant(
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<Option<String>, String> {
+    Ok(state
+        .ssh_session_grants
+        .lock()
+        .expect("ssh_session_grants lock")
+        .get(&id)
+        .cloned())
+}
+
+#[derive(serde::Serialize)]
+struct DelegateAgentResult {
+    agent_name: String,
+    /// Single-use `agent enroll-identity --token` value. Shown once, in the copyable
+    /// command the human hands to the agent — never persisted by the GUI itself.
+    enroll_token: String,
+    redeem_within_seconds: i64,
+    window_id: String,
+    window_expires_at: i64,
+}
+
+/// "Delegate ↗": mint a fresh non-human identity, then hand it a bounded
+/// delegation window hung off THIS terminal session's own grant (never off someone
+/// else's — the control plane itself refuses that, this just supplies the caller's
+/// own id). Every click mints a NEW agent actor; there is no cross-machine lookup
+/// today that would let a second click resume an earlier one under the same handle
+/// (`agent_state.rs` reuse only works within one machine's `agent enroll-identity`
+/// history, not from this button).
+#[tauri::command]
+async fn delegate_agent(
+    state: State<'_, AppState>,
+    id: String,
+    agent_name: String,
+    ttl_seconds: Option<i64>,
+) -> Result<DelegateAgentResult, String> {
+    let tok = state.require_token()?;
+    let parent_grant_id = state
+        .ssh_session_grants
+        .lock()
+        .expect("ssh_session_grants lock")
+        .get(&id)
+        .cloned()
+        .ok_or_else(|| {
+            "this terminal session has no grant to delegate from — reconnect and retry".to_string()
+        })?;
+
+    let mint = adapters::mint_agent_identity(
+        &state.http,
+        &state.regional_base_url(),
+        &tok,
+        &agent_name,
+        None,
+        None,
+    )
+    .await
+    .map_err(|e| format!("mint agent identity: {e}"))?;
+
+    let window = adapters::open_delegation_window(
+        &state.http,
+        &state.regional_base_url(),
+        &tok,
+        &domain::OpenDelegationRequest {
+            actor_id: mint.actor_id.clone(),
+            parent_grant_id,
+            ttl_seconds,
+        },
+    )
+    .await
+    .map_err(|e| format!("open delegation window: {e}"))?;
+
+    Ok(DelegateAgentResult {
+        agent_name: mint.agent_name,
+        enroll_token: mint.token,
+        redeem_within_seconds: mint.redeem_within_seconds,
+        window_id: window.window_id,
+        window_expires_at: window.expires_at,
+    })
+}
+
+/// The last few delegation windows opened for a node — the "Delegate ↗" popup's
+/// mini-history, so a repeat visit isn't a blank form.
+#[tauri::command]
+async fn list_recent_delegations(
+    state: State<'_, AppState>,
+    node_id: String,
+) -> Result<Vec<domain::RecentDelegation>, String> {
+    let tok = state.require_token()?;
+    adapters::list_recent_delegations(
+        &state.http,
+        &state.regional_base_url(),
+        &tok,
+        &node_id,
+        Some(3),
+    )
+    .await
+    .map_err(|e| e.to_string())
 }
 
 // ── User-triggered diagnostics (bug report) ────────────────────────────────────
@@ -3662,13 +3789,14 @@ async fn list_pending_approvals(
 }
 
 /// Approve or deny one command. The credential is minted by the control plane on
-/// approval — nothing here holds or creates one.
+/// approval, INSIDE this call's own response — nothing here holds or creates one, and
+/// there is no later fetch for it, so the caller (Governance page) is what shows it.
 #[tauri::command]
 async fn decide_approval(
     approval_id: String,
     approve: bool,
     state: State<'_, AppState>,
-) -> Result<(), String> {
+) -> Result<domain::ApprovalDecision, String> {
     let tok = state.require_token()?;
     adapters::decide_approval(
         &state.http,
@@ -3676,6 +3804,45 @@ async fn decide_approval(
         &tok,
         &approval_id,
         approve,
+    )
+    .await
+    .map_err(|e| e.to_string())
+}
+
+/// Promote an approved argv into a reusable catalog entry — no parameter slots, the
+/// exact argv frozen verbatim. `argv[0]` becomes `program`; the rest becomes
+/// `argv_template`. Requires `ManagePolicy` (the control plane enforces this; a
+/// requester who lacks it just gets a 403).
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+async fn save_command_template(
+    state: State<'_, AppState>,
+    template_id: String,
+    argv: Vec<String>,
+    risk_class: String,
+    gate: String,
+    idempotent: bool,
+    stdin: String,
+) -> Result<(), String> {
+    let tok = state.require_token()?;
+    let Some((program, rest)) = argv.split_first() else {
+        return Err("a template needs at least a program to run".to_string());
+    };
+    adapters::submit_command_template(
+        &state.http,
+        &state.regional_base_url(),
+        &tok,
+        &domain::CommandTemplate {
+            template_id,
+            program: program.clone(),
+            argv_template: rest.to_vec(),
+            params_schema: Default::default(),
+            data_classes: vec![],
+            risk_class,
+            gate,
+            idempotent,
+            stdin,
+        },
     )
     .await
     .map_err(|e| e.to_string())
@@ -4714,6 +4881,7 @@ pub fn run() {
             amend_principal,
             list_pending_approvals,
             decide_approval,
+            save_command_template,
             task_record,
             ci_history,
             ssh_history,
@@ -4753,6 +4921,9 @@ pub fn run() {
             ssh_write,
             ssh_resize,
             ssh_close,
+            ssh_session_grant,
+            delegate_agent,
+            list_recent_delegations,
             get_dataplane_status,
             diagnostics_build,
             diagnostics_send,

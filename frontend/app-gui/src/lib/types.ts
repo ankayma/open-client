@@ -272,3 +272,36 @@ export interface PendingApproval {
 	requested_at: string;
 	expires_at: string;
 }
+
+/** `delegate_agent`'s result — a fresh non-human identity plus the bounded window
+ *  handed to it. `enroll_token` is single-use and shown once, in the copyable
+ *  command; the popup never persists it. */
+export interface DelegateAgentResult {
+	agent_name: string;
+	enroll_token: string;
+	redeem_within_seconds: number;
+	window_id: string;
+	window_expires_at: number;
+}
+
+/** One row of the "Delegate ↗" popup's mini-history. */
+export interface RecentDelegation {
+	window_id: string;
+	agent_actor_id: string;
+	opened_by: string;
+	opened_at: number;
+	expires_at: number;
+	closed: boolean;
+}
+
+/** `decide_approval`'s result — the credential itself, if approved. Shown once: this
+ *  response is the only place `grant_token` ever appears. */
+export interface ApprovalDecision {
+	approval_id: string;
+	decision: string;
+	grant_id: string | null;
+	grant_token: string | null;
+	cmd_digest: string | null;
+	expires_at: number | null;
+	credential_issued: boolean;
+}

@@ -14,6 +14,7 @@
 //! `<subject-prefix>.key.escrow` — vendor recovers via subscribe.
 
 mod agent_identity;
+mod agent_state;
 mod agent_token;
 mod ci_deploy;
 mod ci_policy;

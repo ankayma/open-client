@@ -227,6 +227,13 @@ pub struct AgentEnrollRequest {
     pub public_key: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hostname: Option<String>,
+    /// The public half of a signing key this agent identity will use on every call
+    /// AFTER this one (`agent ssh --as`, via `POST /api/v1/agents/ssh-session`).
+    /// Generated once client-side, persisted locally, reused for the identity's whole
+    /// lifetime — this is what lets `--as` connect without spending a fresh single-use
+    /// token per connection.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent_session_pubkey: Option<String>,
 }
 
 /// Control-plane response to an agent identity redemption. Mirrors `AgentEnrollResp`.
@@ -237,6 +244,12 @@ pub struct AgentEnrollResponse {
     pub allowed_ips: Vec<String>,
     pub expires_in_seconds: u32,
     pub receipt: AgentReceipt,
+    /// The actor id this identity was minted under — persisted locally alongside the
+    /// session key so `agent ssh --as` can reuse ONE identity across every delegation
+    /// window instead of re-enrolling per window. `None` only against a CP that
+    /// predates this field.
+    #[serde(default)]
+    pub actor_id: Option<String>,
 }
 
 /// Proof a non-human actor was admitted — first-class in the ledger, scoped,
@@ -283,6 +296,188 @@ pub struct SshSessionResponse {
     /// client can PIN it — no blind TOFU (A.1.3). Absent on an older CP.
     #[serde(default)]
     pub server_host_key: Option<String>,
+    /// This session's own grant — the root a human can later delegate FROM
+    /// (`POST /api/v1/delegations`, `parent_grant_id`). Absent on an older CP.
+    ///
+    #[serde(default)]
+    pub grant_id: Option<String>,
+    #[serde(default)]
+    pub task_id: Option<String>,
+}
+
+/// `POST /api/v1/agents/ssh-session` request — an AGENT identity (not a human) asks to
+/// connect to one node under its own live delegation window. No bearer session: `proof`
+/// is a self-signed token proving possession of the identity's own `agent_session_pubkey`
+/// (§`AgentEnrollRequest`).
+#[derive(Debug, Clone, Serialize)]
+pub struct AgentSshSessionRequest {
+    pub target_node_id: String,
+    pub proof: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ttl_seconds: Option<i64>,
+}
+
+/// `POST /api/v1/agents/ssh-session` response: the resolved overlay target plus a
+/// CP-signed `session_grant` the node's `agent_core::session_grant` verifies before
+/// opening a channel.
+#[derive(Debug, Clone, Deserialize)]
+pub struct AgentSshSessionResponse {
+    pub overlay_ip: String,
+    pub target_host: String,
+    pub session_grant: String,
+    pub grant_id: String,
+    pub task_id: String,
+    pub expires_at: i64,
+}
+
+/// `POST /api/v1/agents/token` response, typed. `agent_token.rs` (the CLI) keeps using
+/// the raw-string `mint_agent_token` because a human just reads the token off the
+/// screen; the GUI's "Delegate ↗" button needs `actor_id` back to chain straight into
+/// `open_delegation_window` without a human retyping anything. `[T:Part C §H.3.3 / F-4]`
+#[derive(Debug, Clone, Deserialize)]
+pub struct AgentIdentityMint {
+    pub token: String,
+    pub agent_name: String,
+    pub actor_id: String,
+    #[serde(default)]
+    pub enroll_url: Option<String>,
+    /// How long the token stays redeemable — after this, `agent enroll-identity` gets
+    /// a plain 401 and the human has to click "Delegate ↗" again for a fresh one.
+    pub redeem_within_seconds: i64,
+}
+
+/// `POST /api/v1/delegations` request — a human hands an agent actor a bounded window
+/// hung off a grant the human already holds (their own open terminal session, per
+/// `SshSessionResponse.grant_id`).
+#[derive(Debug, Clone, Serialize)]
+pub struct OpenDelegationRequest {
+    pub actor_id: String,
+    pub parent_grant_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ttl_seconds: Option<i64>,
+}
+
+/// `POST /api/v1/delegations` response.
+#[derive(Debug, Clone, Deserialize)]
+pub struct OpenDelegationResponse {
+    pub window_id: String,
+    pub expires_at: i64,
+}
+
+/// One row of `GET /api/v1/delegations/recent` — a past window opened for this node,
+/// so the "Delegate ↗" popup can show "you already did this" instead of a blank form.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RecentDelegation {
+    pub window_id: String,
+    pub agent_actor_id: String,
+    pub opened_by: String,
+    pub opened_at: i64,
+    pub expires_at: i64,
+    pub closed: bool,
+}
+
+/// One command in a `mint_command_grants` batch — mirrors the control plane's
+/// `CommandReq`. `template_id = "FREEFORM"` is break-glass: `argv` carries the literal
+/// command (never through a shell) and `justification` is required. Any other
+/// `template_id` is a catalog lookup: `params` fills its declared slots, `argv` stays
+/// empty.
+#[derive(Debug, Clone, Serialize)]
+pub struct CommandReq {
+    pub template_id: String,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub params: std::collections::BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub argv: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub justification: Option<String>,
+}
+
+/// `POST /api/v1/grants/command` request — a human authorises an already-enrolled
+/// non-human actor to run specific commands on one node. Human-session-authed only:
+/// an agent does not mint its own authority (A.1.27 #2).
+#[derive(Debug, Clone, Serialize)]
+pub struct CommandGrantRequest {
+    pub node_id: String,
+    pub actor_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub purpose_code: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub business_justification: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ttl_seconds: Option<i64>,
+    pub commands: Vec<CommandReq>,
+}
+
+/// One resolved outcome inside `CommandGrantResponse.commands` — either a minted
+/// credential (`status: "GRANTED"`) or a refusal to mint without a person deciding
+/// first (`status: "PENDING_APPROVAL"`, no credential).
+#[derive(Debug, Clone, Deserialize)]
+pub struct IssuedCommand {
+    pub template_id: String,
+    pub cmd_digest: String,
+    pub status: String,
+    #[serde(default)]
+    pub grant_id: Option<String>,
+    /// What the caller presents as `ANKAYMA_CMD_GRANT`. Only on `status: "GRANTED"`.
+    #[serde(default)]
+    pub grant_token: Option<String>,
+    #[serde(default)]
+    pub approval_id: Option<String>,
+    #[serde(default)]
+    pub gate_reason: Option<String>,
+    pub credential_issued: bool,
+}
+
+/// `POST /api/v1/grants/command` response.
+#[derive(Debug, Clone, Deserialize)]
+pub struct CommandGrantResponse {
+    pub task_id: String,
+    pub node_id: String,
+    pub actor_id: String,
+    pub expires_at: i64,
+    pub commands: Vec<IssuedCommand>,
+    pub pending_approval: i64,
+}
+
+/// `POST /api/v1/approvals/{id}/decide` response — the credential itself, if the
+/// decision was "approve". A denial carries none. This is the ONLY place the token
+/// appears; there is no later fetch-by-approval-id.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ApprovalDecision {
+    pub approval_id: String,
+    pub decision: String,
+    #[serde(default)]
+    pub grant_id: Option<String>,
+    #[serde(default)]
+    pub grant_token: Option<String>,
+    #[serde(default)]
+    pub cmd_digest: Option<String>,
+    #[serde(default)]
+    pub expires_at: Option<i64>,
+    pub credential_issued: bool,
+}
+
+/// One catalog entry to declare. Mirrors the control plane's OWN (closed)
+/// `catalog::CommandTemplate` — two independently-defined types by design, same as
+/// `cmd_grant::CommandGrant`'s split from the CP's `CommandGrantToken`, pinned by wire
+/// shape rather than shared. `params_schema` stays untyped here: nothing on this side
+/// builds a parameterised template yet (only a zero-slot "save an approved FREEFORM
+/// argv verbatim" flow), so modelling the CP's `ParamSpec` enum would be speculative.
+///
+#[derive(Debug, Clone, Serialize)]
+pub struct CommandTemplate {
+    pub template_id: String,
+    pub program: String,
+    #[serde(default)]
+    pub argv_template: Vec<String>,
+    #[serde(default)]
+    pub params_schema: std::collections::BTreeMap<String, serde_json::Value>,
+    #[serde(default)]
+    pub data_classes: Vec<String>,
+    pub risk_class: String,
+    pub gate: String,
+    pub idempotent: bool,
+    pub stdin: String,
 }
 
 /// `POST /api/v1/ssh/elevate` request: ask the control plane for a root-elevation

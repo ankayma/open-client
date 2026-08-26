@@ -129,6 +129,18 @@ pub struct SshConnectOptions {
     /// sends it as an SSH env var before requesting the shell, so the server lands
     /// a root PTY instead of the unprivileged shared user. `None` → normal login.
     pub elevate_grant: Option<String>,
+    /// A CP-signed agent-SESSION grant to present. Set when the connecting
+    /// identity is an AGENT (`agent ssh --as`), never for a human's own connection.
+    /// The server refuses the channel outright if it cannot verify a presented one —
+    /// unlike `elevate_grant`, this is not "land unprivileged on failure", it is
+    /// whether the channel opens at all. `None` → today's behaviour, unchanged.
+    pub session_grant: Option<String>,
+    /// A CP-signed COMMAND grant to present — authorises exactly
+    /// ONE command, once. Only meaningful on the exec (no-PTY) path: the node's
+    /// `pty_request` refuses outright the moment this is set, so a caller that also
+    /// wants an interactive shell has the wrong option set. `None` → today's
+    /// behaviour, unchanged.
+    pub cmd_grant: Option<String>,
     /// How long to wait for the TCP connect before giving up on a SINGLE attempt
     /// (fail-fast instead of the ~75s OS default when the mesh path is down).
     pub connect_timeout: Duration,
@@ -154,6 +166,8 @@ impl SshConnectOptions {
             cols: 80,
             rows: 24,
             elevate_grant: None,
+            session_grant: None,
+            cmd_grant: None,
             connect_timeout: Duration::from_secs(12),
             connect_deadline: Duration::from_secs(30),
         }
@@ -352,6 +366,27 @@ impl SshSession {
                 .await
                 .map_err(|e| anyhow!("present elevation grant: {e}"))?;
         }
+        // Present the agent-session grant, same as the interactive path —
+        // the server refuses the channel outright if it cannot verify it.
+        if let Some(grant) = &opts.session_grant {
+            channel
+                .set_env(
+                    false,
+                    crate::session_grant::SESSION_GRANT_ENV,
+                    grant.clone(),
+                )
+                .await
+                .map_err(|e| anyhow!("present agent session grant: {e}"))?;
+        }
+        // Present the command grant. `argv` comes from the GRANT
+        // itself, never from `command` — the exec string below is used for nothing
+        // but the node's own mismatch check, and an empty one always passes it.
+        if let Some(grant) = &opts.cmd_grant {
+            channel
+                .set_env(false, crate::cmd_grant::CMD_GRANT_ENV, grant.clone())
+                .await
+                .map_err(|e| anyhow!("present command grant: {e}"))?;
+        }
         channel
             .exec(true, command.as_bytes())
             .await
@@ -464,6 +499,16 @@ impl SshSession {
                 .set_env(false, crate::ssh_server::ELEVATE_GRANT_ENV, grant.clone())
                 .await
                 .map_err(|e| anyhow!("present elevation grant: {e}"))?;
+        }
+        if let Some(grant) = &opts.session_grant {
+            channel
+                .set_env(
+                    false,
+                    crate::session_grant::SESSION_GRANT_ENV,
+                    grant.clone(),
+                )
+                .await
+                .map_err(|e| anyhow!("present agent session grant: {e}"))?;
         }
         channel
             .request_shell(true)

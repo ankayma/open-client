@@ -21,6 +21,9 @@ import type {
   PendingInvitesView,
   PolicyView,
   MyAccess,
+  DelegateAgentResult,
+  RecentDelegation,
+  ApprovalDecision,
 } from "./types";
 
 // Runtime check — @tauri-apps/api works in Tauri webview and stubs gracefully in browser
@@ -302,6 +305,34 @@ export async function sshOpen(
 
 export async function sshWrite(id: string, dataB64: string): Promise<void> {
   return invoke("ssh_write", { id, dataB64 });
+}
+
+/** This terminal session's own grant id, if the control plane returned one — `null`
+ *  means an older CP, so "Delegate ↗" has nothing to hang a window off. */
+export async function sshSessionGrant(id: string): Promise<string | null> {
+  return invoke<string | null>("ssh_session_grant", { id });
+}
+
+/** Mint a non-human identity and hand it a bounded delegation window hung off
+ *  this open terminal session. */
+export async function delegateAgent(
+  id: string,
+  agentName: string,
+  ttlSeconds?: number,
+): Promise<DelegateAgentResult> {
+  return invoke<DelegateAgentResult>("delegate_agent", {
+    id,
+    agentName,
+    ttlSeconds: ttlSeconds ?? null,
+  });
+}
+
+/** The last few delegation windows opened for this node — the "Delegate ↗" popup's
+ *  mini-history. */
+export async function listRecentDelegations(
+  nodeId: string,
+): Promise<RecentDelegation[]> {
+  return invoke<RecentDelegation[]>("list_recent_delegations", { nodeId });
 }
 
 export async function sshResize(id: string, cols: number, rows: number): Promise<void> {
@@ -668,15 +699,37 @@ export async function listPendingApprovals(): Promise<PendingApproval[]> {
   return invoke<PendingApproval[]>("list_pending_approvals");
 }
 
-/** The decision that creates, or withholds, a credential. The control plane mints. */
+/** The decision that creates, or withholds, a credential. The control plane mints it
+ *  INSIDE this response — `grant_token` never appears anywhere else, so the caller
+ *  must show it now or it is gone. */
 export async function decideApproval(
   approvalId: string,
   approve: boolean,
-): Promise<void> {
-  return invoke("decide_approval", { approvalId, approve });
+): Promise<ApprovalDecision> {
+  return invoke<ApprovalDecision>("decide_approval", { approvalId, approve });
 }
 
 /** The one-page dossier, passed through as the control plane shaped it. */
 export async function taskRecord(taskId: string): Promise<unknown> {
   return invoke<unknown>("task_record", { taskId });
+}
+
+/** Promote an approved argv into a reusable catalog entry, verbatim, no parameter
+ *  slots — `argv[0]` becomes the template's program. */
+export async function saveCommandTemplate(
+  templateId: string,
+  argv: string[],
+  riskClass: string,
+  gate: string,
+  idempotent: boolean,
+  stdin: string,
+): Promise<void> {
+  return invoke("save_command_template", {
+    templateId,
+    argv,
+    riskClass,
+    gate,
+    idempotent,
+    stdin,
+  });
 }

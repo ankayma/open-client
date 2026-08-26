@@ -34,6 +34,7 @@ use tokio::sync::mpsc;
 
 use crate::cmd_grant::{CommandGrantVerifier, Refusal, CMD_GRANT_ENV};
 use crate::exec_outcome::{ExecOutcome, OutcomeQueue};
+use crate::session_grant::{SessionGrantVerifier, SESSION_GRANT_ENV};
 
 use crate::ssh_grant::{ElevationGrant, GrantVerifier};
 
@@ -148,6 +149,14 @@ pub struct SshServerConfig {
     /// and the control plane will not issue one to it: absent capability means "has not
     /// said", which is not "yes". `[T:A.1.20 capability negotiation + A.1.6 fail-closed]`
     pub cmd_grant: Option<CommandGrantVerifier>,
+    /// Verifier for AGENT-SESSION grants. `None` → this node cannot accept
+    /// one, and a client that presents `ANKAYMA_SESSION_GRANT` anyway is refused rather
+    /// than silently falling back to `authorizer`'s ordinary check — a token this node
+    /// cannot verify is not evidence the control plane ever meant to let it in.
+    /// `[T:A.1.6 fail-closed]` Only consulted when the connecting client actually sets
+    /// the env var; a human's own `agent ssh <node>` never does, so that path is
+    /// unaffected by whether this is configured at all.
+    pub session_grant: Option<SessionGrantVerifier>,
     /// Where outcomes of command grants are queued for delivery. Shared with whatever
     /// drains it — the ssh server observes, it does not talk to the control plane.
     pub outcomes: Option<OutcomeQueue>,
@@ -166,6 +175,7 @@ impl SshServerConfig {
             shell: ShellSpec::LoginShell("ankayma".to_string()),
             elevate: None,
             cmd_grant: None,
+            session_grant: None,
             outcomes: None,
             node_id: None,
         }
@@ -177,6 +187,14 @@ impl SshServerConfig {
     /// perform. `[T:A.1.20 capability negotiation + A.1.6 fail-closed]`
     pub fn with_command_grants(mut self, verifier: CommandGrantVerifier) -> Self {
         self.cmd_grant = Some(verifier);
+        self
+    }
+
+    /// Enable agent-session grants on this node. Same fail-closed reasoning
+    /// as `with_command_grants`: until this is set, the control plane refuses to mint a
+    /// session grant scoped to this node at all (R-1 shape).
+    pub fn with_session_grants(mut self, verifier: SessionGrantVerifier) -> Self {
+        self.session_grant = Some(verifier);
         self
     }
 
@@ -298,6 +316,7 @@ pub async fn serve_on(
         shell: cfg.shell,
         elevate: cfg.elevate.map(Arc::new),
         cmd_grant: cfg.cmd_grant.map(Arc::new),
+        session_grant: cfg.session_grant.map(Arc::new),
         outcomes: cfg.outcomes,
         node_id: cfg.node_id,
     };
@@ -313,6 +332,7 @@ struct Listener {
     shell: ShellSpec,
     elevate: Option<Arc<GrantVerifier>>,
     cmd_grant: Option<Arc<CommandGrantVerifier>>,
+    session_grant: Option<Arc<SessionGrantVerifier>>,
     outcomes: Option<OutcomeQueue>,
     node_id: Option<String>,
 }
@@ -325,10 +345,12 @@ impl server::Server for Listener {
             shell: self.shell.clone(),
             elevate: self.elevate.clone(),
             cmd_grant: self.cmd_grant.clone(),
+            session_grant: self.session_grant.clone(),
             outcomes: self.outcomes.clone(),
             node_id: self.node_id.clone(),
             pending_grant: None,
             pending_cmd_grant: None,
+            pending_session_grant: None,
             active_grant: None,
             last_refusal: None,
             term: "xterm".to_string(),
@@ -353,6 +375,7 @@ struct ConnHandler {
     shell: ShellSpec,
     elevate: Option<Arc<GrantVerifier>>,
     cmd_grant: Option<Arc<CommandGrantVerifier>>,
+    session_grant: Option<Arc<SessionGrantVerifier>>,
     outcomes: Option<OutcomeQueue>,
     node_id: Option<String>,
     /// The grant token the client set via env, awaiting verification at shell time.
@@ -360,6 +383,10 @@ struct ConnHandler {
     /// A COMMAND grant token set via env. Its presence changes what this channel is
     /// allowed to be: one authorised command, never a session.
     pending_cmd_grant: Option<String>,
+    /// An AGENT-SESSION grant token set via env. Present only when the connecting
+    /// client is an agent identity, not a human's own device — checked once, before
+    /// either `shell_request` or `exec_request` does anything else.
+    pending_session_grant: Option<String>,
     /// The verified grant this channel is executing under, kept so the outcome can name
     /// the grant it belongs to.
     active_grant: Option<crate::cmd_grant::CommandGrant>,
@@ -536,6 +563,31 @@ impl Drop for ConnHandler {
 }
 
 impl ConnHandler {
+    /// Verify a presented agent-session grant, if one was set. Absent env var → true,
+    /// no-op — a human's own connection never sets it, so this never touches that path.
+    /// Present-but-unverifiable → the channel is failed here and the caller must stop,
+    /// never fall through to `Authorizer`'s ordinary check: a token this node could not
+    /// check is not evidence the control plane meant to let this connection in.
+    /// `[T:A.1.6 fail-closed]`
+    async fn admit_session_grant(&mut self, channel: ChannelId, session: &mut Session) -> bool {
+        let Some(token) = self.pending_session_grant.clone() else {
+            return true;
+        };
+        let Some(verifier) = self.session_grant.clone() else {
+            eprintln!("[F-2] agent-session grant presented, but this node cannot verify one");
+            let _ = session.channel_failure(channel);
+            return false;
+        };
+        match verifier.verify(&token, unix_now()) {
+            Ok(_grant) => true,
+            Err(refusal) => {
+                eprintln!("[F-2] refusing agent session: {}", refusal.message());
+                let _ = session.channel_failure(channel);
+                false
+            }
+        }
+    }
+
     /// Run exactly the command a CP-signed grant authorises — or refuse, with a reason.
     ///
     /// The argv comes from the GRANT. The exec string the client sent is used for nothing
@@ -808,6 +860,9 @@ impl server::Handler for ConnHandler {
         if variable_name == CMD_GRANT_ENV {
             self.pending_cmd_grant = Some(variable_value.to_string());
         }
+        if variable_name == SESSION_GRANT_ENV {
+            self.pending_session_grant = Some(variable_value.to_string());
+        }
         Ok(())
     }
 
@@ -816,6 +871,12 @@ impl server::Handler for ConnHandler {
         channel: ChannelId,
         session: &mut Session,
     ) -> Result<(), Self::Error> {
+        // Checked first, before any other work: an agent-session grant that fails
+        // verification must not fall through to a shell landed on `Authorizer`'s
+        // ordinary say-so. [T:A.1.6 fail-closed]
+        if !self.admit_session_grant(channel, session).await {
+            return Ok(());
+        }
         // Decide elevation from the presented grant (fail-safe: any problem lands
         // unprivileged). `[T:f2 §H.4]`
         let decision = decide_elevation(
@@ -919,6 +980,13 @@ impl server::Handler for ConnHandler {
         data: &[u8],
         session: &mut Session,
     ) -> Result<(), Self::Error> {
+        // Same fail-closed gate `shell_request` runs, first: an unverifiable
+        // agent-session grant must not fall through to the command-grant check below,
+        // let alone the plain unauthenticated exec path. No-op when the connecting
+        // client is not an agent identity (no env var set). [T:A.1.6 fail-closed]
+        if !self.admit_session_grant(channel, session).await {
+            return Ok(());
+        }
         let command = String::from_utf8_lossy(data).into_owned();
 
         // [T:A.1.27 #1 — a grant may not widen in transit] The command-grant path is taken FIRST and never falls back
@@ -1248,6 +1316,7 @@ mod tests {
             shell: ShellSpec::Program(vec!["/bin/cat".to_string()]),
             elevate: None,
             cmd_grant: None,
+            session_grant: None,
             outcomes: None,
             node_id: None,
         };
@@ -1300,6 +1369,7 @@ mod tests {
             shell: ShellSpec::LoginShell("whoever-is-running-this-test".to_string()),
             elevate: None,
             cmd_grant: None,
+            session_grant: None,
             outcomes: None,
             node_id: None,
         };
@@ -1349,6 +1419,7 @@ mod tests {
             shell: ShellSpec::LoginShell("whoever-is-running-this-test".to_string()),
             elevate: None,
             cmd_grant: None,
+            session_grant: None,
             outcomes: None,
             node_id: None,
         };

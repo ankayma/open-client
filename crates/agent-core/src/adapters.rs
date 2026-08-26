@@ -519,6 +519,31 @@ pub async fn open_ssh_session(
         .map_err(|e| ApiError::Decode(e.to_string()))
 }
 
+/// An AGENT identity asks to connect to one node under its own live delegation
+/// window. `POST /api/v1/agents/ssh-session` — no bearer session: the request body's
+/// `proof` is what authenticates the caller (the control plane's `resolve_anchor`
+/// agent branch), the same way `agent_enroll`'s single-use token is what
+/// authenticates a redemption rather than a header.
+pub async fn open_agent_ssh_session(
+    http: &reqwest::Client,
+    base_url: &str,
+    req: &crate::domain::AgentSshSessionRequest,
+) -> Result<crate::domain::AgentSshSessionResponse, ApiError> {
+    let resp = http
+        .post(url(base_url, "/api/v1/agents/ssh-session"))
+        .json(req)
+        .timeout(CP_REST_TIMEOUT)
+        .send()
+        .await
+        .map_err(|e| ApiError::Transport(e.to_string()))?;
+    if !resp.status().is_success() {
+        return Err(status_error(resp).await);
+    }
+    resp.json::<crate::domain::AgentSshSessionResponse>()
+        .await
+        .map_err(|e| ApiError::Decode(e.to_string()))
+}
+
 /// Request a root-elevation grant for a node. `POST /api/v1/ssh/elevate`
 /// (session-authed). The CP evaluates authz (owner-implicit at F0, AdminAccessPolicy
 /// at F1+) + AAL step-up, then returns a signed grant the client presents to the
@@ -1207,13 +1232,17 @@ pub async fn list_pending_approvals(
 
 /// `POST /api/v1/approvals/{id}/decide` — the decision that creates, or withholds, a
 /// credential. The control plane mints on approval; nothing is minted here.
+/// `credential_issued` on the returned `ApprovalDecision` is the whole reason this
+/// deserializes the body instead of discarding it like `expect_ok`: an approval mints
+/// its credential HERE, in this response, and nowhere else — there is no later
+/// fetch-by-approval-id.
 pub async fn decide_approval(
     http: &reqwest::Client,
     base_url: &str,
     token: &str,
     approval_id: &str,
     approve: bool,
-) -> Result<(), ApiError> {
+) -> Result<crate::domain::ApprovalDecision, ApiError> {
     let resp = http
         .post(url(
             base_url,
@@ -1227,7 +1256,61 @@ pub async fn decide_approval(
         .send()
         .await
         .map_err(|e| ApiError::Transport(e.to_string()))?;
+    if !resp.status().is_success() {
+        return Err(status_error(resp).await);
+    }
+    resp.json::<crate::domain::ApprovalDecision>()
+        .await
+        .map_err(|e| ApiError::Decode(e.to_string()))
+}
+
+/// Declare a reusable command template. `POST /api/v1/command-templates`
+/// (session-authed, requires `ManagePolicy`). The natural caller today is "save this
+/// approved FREEFORM argv so it doesn't have to be typed as break-glass again" —
+/// promoting it out of the catalog gap this whole tier's CLI otherwise leans on.
+///
+pub async fn submit_command_template(
+    http: &reqwest::Client,
+    base_url: &str,
+    session_token: &str,
+    t: &crate::domain::CommandTemplate,
+) -> Result<(), ApiError> {
+    let resp = http
+        .post(url(base_url, "/api/v1/command-templates"))
+        .bearer_auth(session_token)
+        .json(t)
+        .timeout(CP_REST_TIMEOUT)
+        .send()
+        .await
+        .map_err(|e| ApiError::Transport(e.to_string()))?;
     expect_ok(resp).await
+}
+
+/// A human authorises an already-enrolled non-human actor to run specific commands on
+/// one node. `POST /api/v1/grants/command` (session-authed — A.1.27 #2: an agent does
+/// not mint its own authority, only a human may call this). A command whose template
+/// asks for a person, or is off-catalog (`FREEFORM`), comes back `PENDING_APPROVAL`
+/// with no credential — see `decide_approval`.
+pub async fn mint_command_grants(
+    http: &reqwest::Client,
+    base_url: &str,
+    session_token: &str,
+    req: &crate::domain::CommandGrantRequest,
+) -> Result<crate::domain::CommandGrantResponse, ApiError> {
+    let resp = http
+        .post(url(base_url, "/api/v1/grants/command"))
+        .bearer_auth(session_token)
+        .json(req)
+        .timeout(CP_REST_TIMEOUT)
+        .send()
+        .await
+        .map_err(|e| ApiError::Transport(e.to_string()))?;
+    if !resp.status().is_success() {
+        return Err(status_error(resp).await);
+    }
+    resp.json::<crate::domain::CommandGrantResponse>()
+        .await
+        .map_err(|e| ApiError::Decode(e.to_string()))
 }
 
 /// `GET /api/v1/tasks/{id}` — the one-page dossier, returned as-is.
@@ -1413,6 +1496,93 @@ pub async fn mint_agent_token(
         .await
         .map_err(|e| ApiError::Transport(e.to_string()))?;
     read_ok_text(resp).await
+}
+
+/// Mint a single-use agent identity token, typed (GUI use — see
+/// `domain::AgentIdentityMint`). Same endpoint as `mint_agent_token`; kept separate
+/// rather than making the CLI's raw-string path parse-then-reserialize, per the
+/// existing comment on why that one stays raw. `[T:Part C §H.3.3 / F-4]`
+pub async fn mint_agent_identity(
+    http: &reqwest::Client,
+    base_url: &str,
+    session_token: &str,
+    agent_name: &str,
+    scope: Option<&str>,
+    ttl_seconds: Option<u64>,
+) -> Result<crate::domain::AgentIdentityMint, ApiError> {
+    #[derive(serde::Serialize)]
+    struct Req<'a> {
+        agent_name: &'a str,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        scope: Option<&'a str>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        ttl_seconds: Option<u64>,
+    }
+    let resp = http
+        .post(url(base_url, "/api/v1/agents/token"))
+        .bearer_auth(session_token)
+        .json(&Req {
+            agent_name,
+            scope,
+            ttl_seconds,
+        })
+        .timeout(CP_REST_TIMEOUT)
+        .send()
+        .await
+        .map_err(|e| ApiError::Transport(e.to_string()))?;
+    if !resp.status().is_success() {
+        return Err(status_error(resp).await);
+    }
+    resp.json::<crate::domain::AgentIdentityMint>()
+        .await
+        .map_err(|e| ApiError::Decode(e.to_string()))
+}
+
+/// A human hands an agent actor a bounded delegation window, hung off a grant the
+/// human already holds. `POST /api/v1/delegations` (session-authed).
+pub async fn open_delegation_window(
+    http: &reqwest::Client,
+    base_url: &str,
+    session_token: &str,
+    req: &crate::domain::OpenDelegationRequest,
+) -> Result<crate::domain::OpenDelegationResponse, ApiError> {
+    let resp = http
+        .post(url(base_url, "/api/v1/delegations"))
+        .bearer_auth(session_token)
+        .json(req)
+        .timeout(CP_REST_TIMEOUT)
+        .send()
+        .await
+        .map_err(|e| ApiError::Transport(e.to_string()))?;
+    if !resp.status().is_success() {
+        return Err(status_error(resp).await);
+    }
+    resp.json::<crate::domain::OpenDelegationResponse>()
+        .await
+        .map_err(|e| ApiError::Decode(e.to_string()))
+}
+
+/// The last few delegation windows opened for a node, newest first — what the
+/// "Delegate ↗" popup shows under the handle field. `GET /api/v1/delegations/recent`.
+/// [A] `node_id` goes into the query string un-encoded, same as `ci_history`'s `node`:
+/// these are DNS-label-shaped ids, which are query-safe.
+pub async fn list_recent_delegations(
+    http: &reqwest::Client,
+    base_url: &str,
+    session_token: &str,
+    node_id: &str,
+    limit: Option<i64>,
+) -> Result<Vec<crate::domain::RecentDelegation>, ApiError> {
+    #[derive(serde::Deserialize)]
+    struct Resp {
+        delegations: Vec<crate::domain::RecentDelegation>,
+    }
+    let path = match limit {
+        Some(n) => format!("/api/v1/delegations/recent?node_id={node_id}&limit={n}"),
+        None => format!("/api/v1/delegations/recent?node_id={node_id}"),
+    };
+    let resp: Resp = get_json(http, base_url, &path, session_token).await?;
+    Ok(resp.delegations)
 }
 
 /// List the tenant's CI/CD deploy policies. `GET /api/v1/ci/policy`. `[T:Part C §H.3.3]`
