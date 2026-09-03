@@ -101,6 +101,11 @@ pub struct NodeBrief {
     /// absent) or a node that never checked in since the migration. [T:A.1.1 + P.3]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_seen_at: Option<String>,
+    /// Part B `Tag` (`part-b-domain.md:147` — `env:production`, `tier:1`, …), the
+    /// domain concept `policy::authz::Resource.tags` reads. `[]`, never absent, on a
+    /// CP that has it; `default` here only covers a CP that predates the column.
+    #[serde(default)]
+    pub tags: Vec<String>,
 }
 
 /// A peer in the mesh as returned by the control-plane. `[T:B.5.1]`
@@ -559,6 +564,11 @@ pub struct Subdomain {
     /// `none|pending|issued|failed` — ACME issuance progress. `[T:F-3 auto-TLS]`
     #[serde(default)]
     pub cert_status: Option<String>,
+    /// Part B `Tag`, this service's own (`part-b-domain.md:147` names Node and
+    /// Service as independently-taggable) — not inherited from `target_node_id`'s
+    /// tags, same as `data_class` is its own classification, not the node's.
+    #[serde(default)]
+    pub tags: Vec<String>,
 }
 
 /// Create request for a branded subdomain. `POST /api/v1/subdomain` — map `label`

@@ -497,9 +497,21 @@ export async function deleteNode(nodeId: string, proof?: StepUpProof): Promise<v
   });
 }
 
+// Declare what a node is, for policy to read (Part B Tag, e.g. "env:production").
+// Always overwrites the whole set -- [] clears every tag, it is not a no-op.
+export async function setNodeTags(nodeId: string, tags: string[]): Promise<void> {
+  return invoke("set_node_tags", { nodeId, tags });
+}
+
 // F-3 branded subdomains (private-default; map a name onto a mesh node).
 export async function listSubdomains(): Promise<Subdomain[]> {
   return invoke<Subdomain[]>("list_subdomains");
+}
+
+// Same as setNodeTags, for a Service (subdomain) -- its own tag set, not
+// inherited from the node it targets.
+export async function setSubdomainTags(fqdn: string, tags: string[]): Promise<void> {
+  return invoke("set_subdomain_tags", { fqdn, tags });
 }
 
 export async function createSubdomain(

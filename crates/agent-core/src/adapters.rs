@@ -1727,6 +1727,58 @@ pub async fn delete_node(
     expect_ok(resp).await
 }
 
+/// Declare what a node is, for policy to read — Part B's `Tag` entity
+/// (`part-b-domain.md:147`), e.g. `env:production`, `tier:1`. Always overwrites the
+/// whole set; `&[]` clears every tag, it is not a no-op. `PUT
+/// /api/v1/nodes/{node_id}/tags` (session-authed, owner-or-`ManageNodes`).
+pub async fn set_node_tags(
+    http: &reqwest::Client,
+    base_url: &str,
+    session_token: &str,
+    node_id: &str,
+    tags: &[String],
+) -> Result<(), ApiError> {
+    #[derive(serde::Serialize)]
+    struct Req<'a> {
+        tags: &'a [String],
+    }
+    let resp = http
+        .put(url(base_url, &format!("/api/v1/nodes/{node_id}/tags")))
+        .bearer_auth(session_token)
+        .json(&Req { tags })
+        .timeout(CP_REST_TIMEOUT)
+        .send()
+        .await
+        .map_err(|e| ApiError::Transport(e.to_string()))?;
+    expect_ok(resp).await
+}
+
+/// Same as `set_node_tags`, for a Service (subdomain) — Part B names Node and
+/// Service as independently-taggable, so this is its own tag set, not the target
+/// node's. `PUT /api/v1/subdomains/{fqdn}/tags` (session-authed,
+/// owner-of-target-node-or-`ManageSubdomains`).
+pub async fn set_subdomain_tags(
+    http: &reqwest::Client,
+    base_url: &str,
+    session_token: &str,
+    fqdn: &str,
+    tags: &[String],
+) -> Result<(), ApiError> {
+    #[derive(serde::Serialize)]
+    struct Req<'a> {
+        tags: &'a [String],
+    }
+    let resp = http
+        .put(url(base_url, &format!("/api/v1/subdomains/{fqdn}/tags")))
+        .bearer_auth(session_token)
+        .json(&Req { tags })
+        .timeout(CP_REST_TIMEOUT)
+        .send()
+        .await
+        .map_err(|e| ApiError::Transport(e.to_string()))?;
+    expect_ok(resp).await
+}
+
 /// `POST /api/v1/stepup/request` (session-authed) — ask the control plane to mint an
 /// OTP challenge for a sensitive action and send the code out-of-band. Returns the
 /// `challenge_id` to pass back at the action. `[T:Part D invite-flow §Authority model]`

@@ -1,7 +1,7 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
 	import { goto } from '$app/navigation';
-	import { listSubdomains, createSubdomain, deleteSubdomain, openSubdomain, listNodes, listMembers, getNodeInfo, publishSampleDemo, unpublishSampleDemo } from '$lib/tauri';
+	import { listSubdomains, createSubdomain, deleteSubdomain, openSubdomain, listNodes, listMembers, getNodeInfo, publishSampleDemo, unpublishSampleDemo, setSubdomainTags } from '$lib/tauri';
 	import { runWithStepUp } from '$lib/stepup';
 	import type { Subdomain, PeerBrief } from '$lib/types';
 	import { connection } from '$lib/stores';
@@ -84,6 +84,35 @@
 			await load();
 		} catch (e: unknown) {
 			loadError = e instanceof Error ? e.message : 'Failed to remove subdomain';
+		}
+	}
+
+	// Service tags (Part B `Tag`, part-b-domain.md:147) — this service's own, not
+	// inherited from its target node. Same free-text-comma-in convention as the
+	// device tag editor.
+	let editingTags = $state<string | null>(null); // fqdn being edited, or null
+	let tagsDraft = $state('');
+	let savingTags = $state(false);
+
+	function startEditTags(entry: Subdomain) {
+		editingTags = entry.fqdn;
+		tagsDraft = entry.tags.join(', ');
+	}
+
+	async function saveTags(fqdn: string) {
+		savingTags = true;
+		try {
+			const tags = tagsDraft
+				.split(',')
+				.map((t) => t.trim())
+				.filter((t) => t.length > 0);
+			await setSubdomainTags(fqdn, tags);
+			editingTags = null;
+			await load();
+		} catch (e: unknown) {
+			loadError = e instanceof Error ? e.message : 'Failed to save tags';
+		} finally {
+			savingTags = false;
 		}
 	}
 
@@ -214,6 +243,33 @@
 								{#if isSampleDemo(entry)}
 									<button class="invite-link" onclick={() => goto('/add-device')}>Invite someone to view &rarr;</button>
 								{/if}
+								<div class="entry-tags">
+									{#if editingTags === entry.fqdn}
+										<input
+											class="tags-input"
+											bind:value={tagsDraft}
+											placeholder="env:production, tier:1"
+											disabled={savingTags}
+										/>
+										<button
+											class="tag-save"
+											disabled={savingTags}
+											onclick={() => saveTags(entry.fqdn)}
+										>{savingTags ? '…' : 'Save'}</button>
+										<button
+											class="tag-cancel"
+											disabled={savingTags}
+											onclick={() => (editingTags = null)}
+										>Cancel</button>
+									{:else}
+										{#each entry.tags as t (t)}<span class="tag-chip">{t}</span>{/each}
+										<button
+											class="tag-edit"
+											title="Free-text labels for filtering &amp; access rules — e.g. env:production, tier:1"
+											onclick={() => startEditTags(entry)}
+										>{entry.tags.length ? 'edit tags' : '+ tag'}</button>
+									{/if}
+								</div>
 							</div>
 							<div class="entry-actions">
 								<button
@@ -442,6 +498,58 @@
 		gap: 6px;
 		font-size: 12px;
 		color: var(--c-text-dim);
+	}
+
+	.entry-tags {
+		display: flex;
+		align-items: center;
+		flex-wrap: wrap;
+		gap: 6px;
+		margin-top: 4px;
+	}
+	.tag-chip {
+		font-size: 11px;
+		color: var(--c-text-dim);
+		background: color-mix(in srgb, var(--c-text-dim) 12%, transparent);
+		border-radius: 999px;
+		padding: 1px 8px;
+	}
+	.tag-edit {
+		font-size: 11px;
+		color: var(--c-text-dim);
+		background: none;
+		border: none;
+		padding: 0;
+		cursor: pointer;
+		text-decoration: underline;
+	}
+	.tags-input {
+		flex: 1;
+		min-width: 120px;
+		font-size: 12px;
+		background: var(--c-surface);
+		border: 1px solid var(--c-border);
+		border-radius: 6px;
+		padding: 3px 8px;
+		color: var(--c-text);
+	}
+	.tag-save,
+	.tag-cancel {
+		font-size: 11px;
+		border-radius: 6px;
+		padding: 3px 8px;
+		cursor: pointer;
+		flex-shrink: 0;
+	}
+	.tag-save {
+		background: var(--c-accent);
+		color: #fff;
+		border: none;
+	}
+	.tag-cancel {
+		background: color-mix(in srgb, var(--c-text-dim) 12%, transparent);
+		color: var(--c-text-dim);
+		border: 1px solid var(--c-border);
 	}
 
 	/* Owner tag — same quiet pill as My Devices; admin tells whose node a name hits. */

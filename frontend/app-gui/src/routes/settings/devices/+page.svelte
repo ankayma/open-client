@@ -6,7 +6,15 @@
 	import { goto } from '$app/navigation';
 	import { onMount } from 'svelte';
 	import { connection, quota } from '$lib/stores';
-	import { listNodes, getNodeInfo, deleteNode, getQuota, getPathProof, listMembers } from '$lib/tauri';
+	import {
+		listNodes,
+		getNodeInfo,
+		deleteNode,
+		setNodeTags,
+		getQuota,
+		getPathProof,
+		listMembers
+	} from '$lib/tauri';
 	import { runWithStepUp } from '$lib/stepup';
 	import PathChain from '$lib/components/PathChain.svelte';
 	import type { PeerBrief, PathProof } from '$lib/types';
@@ -189,6 +197,36 @@
 		}
 	}
 
+	// Node tags (Part B `Tag`, part-b-domain.md:147 — e.g. "env:production"). Comma-
+	// separated free text in, trimmed + empties dropped out; [] is a real clear, not
+	// a no-op, same as the endpoint it calls.
+	let editingTags = $state<string | null>(null); // node_id being edited, or null
+	let tagsDraft = $state('');
+	let savingTags = $state(false);
+
+	function startEditTags(d: PeerBrief) {
+		editingTags = d.node_id;
+		tagsDraft = d.tags.join(', ');
+	}
+
+	async function saveTags(nodeId: string) {
+		savingTags = true;
+		error = '';
+		try {
+			const tags = tagsDraft
+				.split(',')
+				.map((t) => t.trim())
+				.filter((t) => t.length > 0);
+			await setNodeTags(nodeId, tags);
+			editingTags = null;
+			await load();
+		} catch (e) {
+			error = String(e);
+		} finally {
+			savingTags = false;
+		}
+	}
+
 	// Client-side keyword filter (UI-only, no CP call) — the roster gets long once a team
 	// shares many devices, so let the user narrow by hostname / IP / owner.
 	let search = $state('');
@@ -329,6 +367,33 @@
 									class="checkin"
 									title="Last control-plane check-in — the daemon reached our servers then. Not mesh reachability: that is the dot."
 								>{checkinLabel(d)}</span>
+							{/if}
+						</div>
+						<div class="dev-line4">
+							{#if editingTags === d.node_id}
+								<input
+									class="tags-input"
+									bind:value={tagsDraft}
+									placeholder="env:production, tier:1"
+									disabled={savingTags}
+								/>
+								<button
+									class="tag-save"
+									disabled={savingTags}
+									onclick={() => saveTags(d.node_id)}
+								>{savingTags ? '…' : 'Save'}</button>
+								<button
+									class="tag-cancel"
+									disabled={savingTags}
+									onclick={() => (editingTags = null)}
+								>Cancel</button>
+							{:else}
+								{#each d.tags as t (t)}<span class="tag-chip">{t}</span>{/each}
+								<button
+									class="tag-edit"
+									title="Free-text labels for filtering &amp; access rules — e.g. env:production, tier:1"
+									onclick={() => startEditTags(d)}
+								>{d.tags.length ? 'edit tags' : '+ tag'}</button>
 							{/if}
 						</div>
 					</li>
@@ -533,6 +598,58 @@
 		font-size: 11px;
 		color: var(--c-text-dim);
 		flex-shrink: 0;
+	}
+	.dev-line4 {
+		display: flex;
+		align-items: center;
+		gap: 6px;
+		flex-wrap: wrap;
+		margin-top: 4px;
+	}
+	.tag-chip {
+		font-size: 11px;
+		color: var(--c-text-dim);
+		background: var(--btn-secondary-bg);
+		border: 1px solid var(--c-border);
+		border-radius: 999px;
+		padding: 1px 8px;
+	}
+	.tag-edit {
+		font-size: 11px;
+		color: var(--c-text-dim);
+		background: none;
+		border: none;
+		padding: 0;
+		cursor: pointer;
+		text-decoration: underline;
+	}
+	.tags-input {
+		flex: 1;
+		min-width: 120px;
+		font-size: 12px;
+		background: var(--c-surface);
+		border: 1px solid var(--c-border);
+		border-radius: 6px;
+		padding: 3px 8px;
+		color: var(--c-text);
+	}
+	.tag-save,
+	.tag-cancel {
+		font-size: 11px;
+		border-radius: 6px;
+		padding: 3px 8px;
+		cursor: pointer;
+		flex-shrink: 0;
+	}
+	.tag-save {
+		background: var(--c-accent);
+		color: #fff;
+		border: none;
+	}
+	.tag-cancel {
+		background: var(--btn-secondary-bg);
+		color: var(--c-text-dim);
+		border: 1px solid var(--c-border);
 	}
 	.search-box {
 		display: flex;

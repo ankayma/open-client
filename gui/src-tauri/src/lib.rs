@@ -4358,6 +4358,41 @@ async fn delete_node(
     Ok(())
 }
 
+/// Declare what a node is, for policy to read (Part B `Tag`, e.g. `env:production`).
+/// No step-up — a classification, not a destructive/security-elevating action, same
+/// tier as `set_subdomain_tags` below.
+#[tauri::command]
+async fn set_node_tags(
+    node_id: String,
+    tags: Vec<String>,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let tok = state.require_token()?;
+    adapters::set_node_tags(
+        &state.http,
+        &state.regional_base_url(),
+        &tok,
+        &node_id,
+        &tags,
+    )
+    .await
+    .map_err(|e| e.to_string())
+}
+
+/// Same as `set_node_tags`, for a Service (subdomain) — its own tag set, not
+/// inherited from the node it targets.
+#[tauri::command]
+async fn set_subdomain_tags(
+    fqdn: String,
+    tags: Vec<String>,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let tok = state.require_token()?;
+    adapters::set_subdomain_tags(&state.http, &state.regional_base_url(), &tok, &fqdn, &tags)
+        .await
+        .map_err(|e| e.to_string())
+}
+
 /// Tenant node roster for the deploy-target picker. Reuses `GET /api/v1/peers`.
 #[tauri::command]
 async fn list_nodes(state: State<'_, AppState>) -> Result<Vec<domain::NodeBrief>, String> {
@@ -4889,6 +4924,8 @@ pub fn run() {
             delete_ci_policy,
             list_nodes,
             delete_node,
+            set_node_tags,
+            set_subdomain_tags,
             create_join_link,
             get_server_enroll_command,
             request_step_up,

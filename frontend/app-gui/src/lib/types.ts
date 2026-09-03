@@ -125,6 +125,12 @@ export interface PeerBrief {
    * older control plane, or the node never checked in since the migration.
    */
   last_seen_at?: string | null;
+  /**
+   * Part B `Tag` (part-b-domain.md:147) — e.g. `env:production`, `tier:1` — what
+   * `policy::authz::Resource.tags` reads. Always an array, never absent, on a
+   * control plane that has the column.
+   */
+  tags: string[];
 }
 
 // F-3 branded subdomain (Part C §H.3.6.1): a private name mapped onto a mesh node.
@@ -137,6 +143,9 @@ export interface Subdomain {
   // relay forwards decrypted traffic to; issuance progress for that cert.
   target_port?: number;
   cert_status?: 'none' | 'pending' | 'issued' | 'failed';
+  // Part B `Tag`, this service's own — not inherited from target_node_id's tags
+  // (Node and Service are independently-taggable per part-b-domain.md:147).
+  tags: string[];
 }
 
 // GET /api/v1/subdomain/{fqdn}/cert — polling fallback for ACME issuance state.
