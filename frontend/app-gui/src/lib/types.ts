@@ -314,3 +314,68 @@ export interface ApprovalDecision {
 	expires_at: number | null;
 	credential_issued: boolean;
 }
+
+// ── Tenant Overview (admin dashboard) — the report the CP composes ─────────────
+// Timestamps arrive as ISO-8601 strings (the CP casts ::text), unlike the numeric
+// epochs elsewhere in this file — the overview is a display report, not a domain entity.
+
+export interface OverviewSeatCount {
+	seat_type: string;
+	count: number;
+}
+
+export interface OverviewActivity {
+	id: number;
+	event_type: string;
+	payload: unknown;
+	created_at: string;
+	grant_id: string;
+}
+
+export interface OverviewGrant {
+	grant_id: string;
+	kind: string; // "session" | "command"
+	actor_id: string;
+	node_id: string;
+	on_behalf_of: string;
+	issued_at: string;
+	expires_at: string;
+}
+
+export interface OverviewDelegation {
+	window_id: string;
+	agent_actor_id: string;
+	opened_by: string;
+	opened_at: string;
+	expires_at: string;
+}
+
+export interface OverviewStaleNode {
+	node_id: string;
+	hostname: string;
+	last_seen_at: string;
+}
+
+export interface OverviewDeny {
+	event_type: string;
+	created_at: string;
+}
+
+export interface Overview {
+	fleet: {
+		// last_seen is CP check-in recency, NOT a reachability claim (same caveat as NodeInfo).
+		nodes_total: number;
+		nodes_seen_5m: number;
+		members_total: number;
+		members_by_seat: OverviewSeatCount[];
+		services_total: number;
+	};
+	activity: OverviewActivity[];
+	grants: OverviewGrant[];
+	delegations: OverviewDelegation[];
+	alerts: {
+		stale_nodes: OverviewStaleNode[];
+		pending_approvals: number;
+		recent_denies: OverviewDeny[];
+	};
+}

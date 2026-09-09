@@ -1339,6 +1339,20 @@ pub async fn task_record(
         .map_err(|e| ApiError::Decode(e.to_string()))
 }
 
+/// `GET /api/v1/overview` — the admin Tenant Overview, returned as-is.
+///
+/// Deliberately untyped, same reasoning as `task_record`: this is a REPORT the control
+/// plane composes (fleet counts, recent ledger events, live grants, alerts). Mirroring
+/// it into a struct would force a client release every time a panel gains a field the
+/// client only displays. Admin-gated server-side (403 for a plain member). [T:A.1.1]
+pub async fn overview(
+    http: &reqwest::Client,
+    base_url: &str,
+    token: &str,
+) -> Result<serde_json::Value, ApiError> {
+    get_json(http, base_url, "/api/v1/overview", token).await
+}
+
 /// Open an SSE stream for peer events. `GET /api/v1/peers/events`.
 /// Authenticated with the node service token (not the user session token).
 /// Returns the raw response; the caller reads it as a byte stream.

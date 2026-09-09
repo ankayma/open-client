@@ -24,6 +24,7 @@ import type {
   DelegateAgentResult,
   RecentDelegation,
   ApprovalDecision,
+  Overview,
 } from "./types";
 
 // Runtime check — @tauri-apps/api works in Tauri webview and stubs gracefully in browser
@@ -724,6 +725,12 @@ export async function decideApproval(
 /** The one-page dossier, passed through as the control plane shaped it. */
 export async function taskRecord(taskId: string): Promise<unknown> {
   return invoke<unknown>("task_record", { taskId });
+}
+
+/** Tenant Overview (admin dashboard): fleet, activity, live grants, alerts.
+ *  Passed through as the control plane composed it; admin-gated server-side. */
+export async function overview(): Promise<Overview> {
+  return invoke<Overview>("overview", {});
 }
 
 /** Promote an approved argv into a reusable catalog entry, verbatim, no parameter

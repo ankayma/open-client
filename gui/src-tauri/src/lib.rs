@@ -3859,6 +3859,16 @@ async fn task_record(
         .map_err(|e| e.to_string())
 }
 
+// [Tenant Overview dashboard] admin surface — fleet, activity, live grants, alerts.
+// Report returned as-is; admin-gated server-side. [T:part-d-tenant-dashboard §H.1]
+#[tauri::command]
+async fn overview(state: State<'_, AppState>) -> Result<serde_json::Value, String> {
+    let tok = state.require_token()?;
+    adapters::overview(&state.http, &state.regional_base_url(), &tok)
+        .await
+        .map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 async fn list_ci_policies(state: State<'_, AppState>) -> Result<Vec<domain::CiPolicy>, String> {
     let tok = state.require_token()?;
@@ -4918,6 +4928,7 @@ pub fn run() {
             decide_approval,
             save_command_template,
             task_record,
+            overview,
             ci_history,
             ssh_history,
             add_ci_policy,
