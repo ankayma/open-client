@@ -73,6 +73,25 @@ promoted all four broken builds just as quickly. Before anything moves it:
   wrong bytes, the updater rejects the artifact and the machine cannot move forward at all
 - confirms the DMG is stapled and Gatekeeper-accepted
 
+## The manifest keys the app looks up
+
+`latest.json` is a map, and the app only ever reads one entry of it. The updater composes
+the key from the slice it is running — `darwin-aarch64` on Apple silicon, `darwin-x86_64`
+on Intel, `windows-x86_64` — and if that key is absent it returns an error *before* it
+compares versions. There is no `darwin-universal` fallback anywhere in the plugin; that
+name is our own convention.
+
+So the macOS job publishes one universal artifact under three keys: both arch keys, which
+apps read, plus `darwin-universal`, which `promote.yml` gates on.
+
+This was not a hypothetical. From 2026-07-01 to 2026-09-10 the manifest carried
+`darwin-universal` alone, so every macOS app asked for an update, got `TargetsNotFound`,
+and did nothing — and since release builds register no logger, the error went nowhere.
+Two months of "the updater is wired" that had never delivered a byte; every machine that
+moved forward did so because someone dragged a DMG. The gate at the end of the publish
+step now fetches the manifest a user would fetch and fails the build if the keys the app
+looks up are not in it.
+
 ## Rolling back
 
 Re-run `promote.yml` with the previous tag. That copies the older artifacts back over the

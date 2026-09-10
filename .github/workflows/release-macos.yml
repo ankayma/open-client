@@ -131,15 +131,33 @@ jobs:
           SIGNATURE="$(cat "$UPDATER_ARCHIVE.sig")"
           mkdir -p publish
           cp "$DMG" "$UPDATER_ARCHIVE" publish/
+          URL="https://get.ankayma.com/macos/beta/$(basename "$UPDATER_ARCHIVE")"
+          # One universal artifact, three keys. The updater plugin never looks for
+          # `darwin-universal`: it composes `{os}-{arch}` from the slice it is running
+          # (`darwin-aarch64` on Apple silicon, `darwin-x86_64` on Intel) and errors with
+          # TargetsNotFound when neither key is in the manifest — before it even compares
+          # versions. With no logger registered in release builds that error was invisible,
+          # so every macOS app since 2026-07-01 checked for updates and silently found
+          # nothing. Keep `darwin-universal` too: promote.yml gates on it.
+          # [T:tauri-plugin-updater@2.10.1-src/updater.rs get_urls() — searches only
+          #  `{os}-{arch}-{installer}` then `{os}-{arch}`; the crate has no "universal" case]
           cat > publish/latest.json <<EOF
           {
             "version": "$VERSION",
             "notes": "See release notes on GitHub.",
             "pub_date": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
             "platforms": {
+              "darwin-aarch64": {
+                "signature": "$SIGNATURE",
+                "url": "$URL"
+              },
+              "darwin-x86_64": {
+                "signature": "$SIGNATURE",
+                "url": "$URL"
+              },
               "darwin-universal": {
                 "signature": "$SIGNATURE",
-                "url": "https://get.ankayma.com/macos/beta/$(basename "$UPDATER_ARCHIVE")"
+                "url": "$URL"
               }
             }
           }
@@ -156,6 +174,31 @@ jobs:
           AWS_DEFAULT_REGION: auto
         run: |
           aws s3 sync publish/ "s3://${{ secrets.R2_BUCKET_MACOS }}/macos/beta/" --endpoint-url "${{ secrets.R2_ENDPOINT }}"
+
+      # The gate this pipeline was missing: publishing a manifest and a manifest an app
+      # can actually read were never the same thing, and nothing checked. Fetch what a
+      # user's updater fetches — through the custom domain, not the bucket — and assert
+      # the keys it will look up are there for the version we just built.
+      - name: Gate — the published manifest carries the keys the updater looks up
+        run: |
+          set -euo pipefail
+          VERSION="$(sed -n 's/.*"version": *"\(.*\)".*/\1/p' gui/src-tauri/tauri.conf.json | head -1)"
+          curl -fsSL --retry 5 --retry-delay 5 --retry-all-errors \
+            https://get.ankayma.com/macos/beta/latest.json -o fetched.json
+          VERSION="$VERSION" python3 - <<'PY'
+          import json, os, sys
+          m = json.load(open("fetched.json"))
+          want = os.environ["VERSION"]
+          if m["version"] != want:
+              sys.exit(f"✗ beta manifest reads {m['version']}, this build is {want}")
+          missing = [k for k in ("darwin-aarch64", "darwin-x86_64") if k not in m["platforms"]]
+          if missing:
+              sys.exit(f"✗ manifest has no {missing} — every Mac on that arch would silently find no update")
+          for key, plat in m["platforms"].items():
+              if not plat.get("signature", "").strip():
+                  sys.exit(f"✗ {key} carries no signature — the app would reject the download")
+          print(f"✓ beta manifest {want} carries {sorted(m['platforms'])}")
+          PY
 
       # macOS user-facing download lives on the GitHub Release (the .dmg); the R2
       # copy above is the auto-updater channel (latest.json + .app.tar.gz). Tags only —

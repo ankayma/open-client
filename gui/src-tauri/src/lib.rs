@@ -4874,13 +4874,28 @@ pub fn run() {
             #[cfg(target_os = "macos")]
             app.set_activation_policy(tauri::ActivationPolicy::Regular);
 
-            if cfg!(debug_assertions) {
-                app.handle().plugin(
-                    tauri_plugin_log::Builder::default()
-                        .level(log::LevelFilter::Info)
-                        .build(),
-                )?;
-            }
+            // A release build used to register no logger at all, which is how a
+            // two-month auto-update outage stayed invisible: `check_for_update`
+            // failed on every launch, logged a warning, and the warning went
+            // nowhere. Release builds now keep warnings and errors — the lines
+            // that mean something is broken — in the app's log directory.
+            // Dependency chatter below Warn stays in dev, where the console is
+            // watched anyway.
+            // [T:tauri-plugin-log@2 — default target is Target::LogDir]
+            app.handle().plugin(
+                tauri_plugin_log::Builder::default()
+                    .level(if cfg!(debug_assertions) {
+                        log::LevelFilter::Info
+                    } else {
+                        log::LevelFilter::Warn
+                    })
+                    // This crate stays at Info in release: it emits six info lines in
+                    // total, three of them the update check's own trace. That is the
+                    // difference between "the updater is wired" as a belief and as
+                    // something a log can settle. Dependencies stay at Warn.
+                    .level_for("app_lib", log::LevelFilter::Info)
+                    .build(),
+            )?;
 
             // Silent check-download-install-restart, release builds only — dev
             // runs aren't signed so `check()` would just fail noisily every launch.
