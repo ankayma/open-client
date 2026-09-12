@@ -47,6 +47,9 @@
 	function action(ev: string): { label: string; kind: ActionKind } {
 		switch (ev) {
 			case 'SshSessionOpened': return { label: 'SSH', kind: 'ssh' };
+			// The private-URL visit: the request is peer-to-peer, so the app reports it
+			// (POST /api/v1/subdomains/{fqdn}/opened) — nothing else can see it.
+			case 'ServiceOpened': return { label: 'Open', kind: 'open' };
 			case 'ElevationGranted': return { label: 'Elevate', kind: 'elevate' };
 			case 'CiArtifactPublished':
 			case 'CiDeployPolicyRegistered':

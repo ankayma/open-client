@@ -4028,12 +4028,36 @@ async fn delete_subdomain(
 /// (`cert_status == issued`); pass `scheme: "http"` to fall back when it is not —
 /// HTTP relay is available without a cert. Default remains HTTPS.
 #[tauri::command]
-async fn open_subdomain(fqdn: String, scheme: Option<String>) -> Result<(), String> {
+async fn open_subdomain(
+    state: State<'_, AppState>,
+    fqdn: String,
+    scheme: Option<String>,
+) -> Result<(), String> {
     let scheme = match scheme.as_deref() {
         Some("http") => "http",
         _ => "https",
     };
-    open_url(&format!("{scheme}://{fqdn}"))
+    // Open first. The browser is what the user asked for; the ledger report must not
+    // be able to delay it, and must not be able to fail it.
+    let opened = open_url(&format!("{scheme}://{fqdn}"));
+
+    // Then tell the control plane a service was visited. Nothing else can: the request
+    // to a private domain is peer-to-peer over the overlay and never reaches the
+    // control plane [T:A.1.1], which is why the tenant's access panel showed SSH and
+    // CI/CD but never the kind of access people do most. Signed out = nothing to
+    // report. Best-effort: a failure here loses an evidence row, not the user's click.
+    if let Ok(tok) = state.require_token() {
+        let http = state.http.clone();
+        let base = state.regional_base_url();
+        tauri::async_runtime::spawn(async move {
+            if let Err(e) =
+                adapters::record_subdomain_opened(&http, &base, &tok, &fqdn, scheme).await
+            {
+                log::warn!("service open not recorded: {e}");
+            }
+        });
+    }
+    opened
 }
 
 /// The label reserved for the one-click sample demo. A bare constant, not

@@ -1815,6 +1815,36 @@ pub async fn set_subdomain_tags(
     expect_ok(resp).await
 }
 
+/// `POST /api/v1/subdomains/{fqdn}/opened` (session-authed) — tell the control plane
+/// that this member just opened a private service, so the tenant's access panel shows
+/// the visit next to the SSH and CI/CD rows it already had.
+///
+/// The request to the service itself never touches the control plane — it is
+/// peer-to-peer over the overlay `[T:A.1.1]` — so this report is the only thing that
+/// can put a service visit in the ledger at all. Best-effort by design: the caller
+/// opens the browser first and does not wait on this.
+pub async fn record_subdomain_opened(
+    http: &reqwest::Client,
+    base_url: &str,
+    session_token: &str,
+    fqdn: &str,
+    scheme: &str,
+) -> Result<(), ApiError> {
+    #[derive(serde::Serialize)]
+    struct Req<'a> {
+        scheme: &'a str,
+    }
+    let resp = http
+        .post(url(base_url, &format!("/api/v1/subdomains/{fqdn}/opened")))
+        .bearer_auth(session_token)
+        .json(&Req { scheme })
+        .timeout(CP_REST_TIMEOUT)
+        .send()
+        .await
+        .map_err(|e| ApiError::Transport(e.to_string()))?;
+    expect_ok(resp).await
+}
+
 /// `POST /api/v1/stepup/request` (session-authed) — ask the control plane to mint an
 /// OTP challenge for a sensitive action and send the code out-of-band. Returns the
 /// `challenge_id` to pass back at the action. `[T:Part D invite-flow §Authority model]`
