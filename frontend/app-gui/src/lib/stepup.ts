@@ -54,6 +54,26 @@ export function isStepUpRequired(e: unknown): boolean {
   return m.includes("STEP_UP_REQUIRED");
 }
 
+// The control plane refuses an emailed code once the account holds a stronger
+// factor — a permanent answer for every non-recovery purpose, not a transient send
+// failure. `adapters.rs` surfaces it as its own sentinel precisely so this flow can
+// stop instead of opening a code box that no code can fill.
+export function isStrongFactorRequired(e: unknown): boolean {
+  const m = e instanceof Error ? e.message : String(e);
+  return m.startsWith("STRONG_FACTOR_REQUIRED:");
+}
+
+function strongFactorMessage(e: unknown): string {
+  const m = e instanceof Error ? e.message : String(e);
+  return m.slice("STRONG_FACTOR_REQUIRED:".length).trim();
+}
+
+// Mirrors the server's `is_recovery_purpose`: removing a lost or broken factor IS
+// the recovery path, so email stays available there even when a strong factor is
+// enrolled. Every other purpose loses it.
+// [T:control-plane stepup.rs is_recovery_purpose()]
+const RECOVERY_PURPOSES = new Set(["manage_auth_factor", "manage_member_factor"]);
+
 function parseStepUpRequired(e: unknown): { purpose: string; requiredAal: number } {
   const m = e instanceof Error ? e.message : String(e);
   const [, purpose, aal] = m.split(":");
@@ -82,8 +102,10 @@ export function purposeLabel(p: string): string {
 //     On macOS/iOS that UI comes from native AuthenticationServices, NOT from the
 //     webview — WKWebView does not support security keys, so `navigator.credentials`
 //     never gets to show anything. See `docs/webauthn-security-key-decision.md`.
-//   - requiredAal 2: check whether the user has a confirmed TOTP credential (skip
-//     straight to code entry) or fall back to emailing an OTP, drive the modal.
+//   - requiredAal 2: Touch ID/Face ID if this device has it; otherwise a confirmed
+//     TOTP (straight to code entry) or an emailed OTP, driving the modal. The
+//     emailed code is only reachable when the server would actually send one —
+//     it refuses once a strong factor exists, recovery purposes aside.
 // Either way we exchange the proof for a proof_token and retry `action({proofToken})`
 // until it succeeds, the user cancels, or a non-recoverable error surfaces.
 export async function runWithStepUp<T>(
@@ -107,22 +129,39 @@ export async function runWithStepUp<T>(
   }
 
   // Touch ID/Face ID, if enrolled: try it first, no modal — same "the ceremony
-  // IS the UI" shape as the AAL3 security-key path above. Unlike AAL3 there IS
-  // a fallback here: a cancelled/failed Touch ID (sensor issue, no finger
-  // enrolled, etc.) falls through to TOTP/OTP below rather than hard-failing —
-  // that's recovering via a DIFFERENT independent factor, not the same
-  // ceremony silently degrading to a password (which is exactly what this
-  // factor exists to avoid — see stepup.rs StepUpVerifyReq::PlatformKey doc).
+  // IS the UI" shape as the AAL3 security-key path above. A cancelled/failed
+  // Touch ID (sensor issue, no finger enrolled, etc.) may still be recovered by
+  // a DIFFERENT independent factor — an authenticator app — which is recovery,
+  // not the same ceremony silently degrading (see stepup.rs
+  // StepUpVerifyReq::PlatformKey doc). What it may NOT fall back to is an
+  // emailed code: the server refuses that for every non-recovery purpose once a
+  // strong factor is enrolled, so offering it here produced a code box the user
+  // could stare at but never satisfy.
+  let biometricError: string | null = null;
   if (await platformKeyStatus().catch(() => false)) {
+    let proofToken: string | null = null;
     try {
-      const proofToken = await platformKeySignChallenge(purpose);
-      return await action({ proofToken });
-    } catch {
-      // fall through to TOTP/OTP below
+      proofToken = await platformKeySignChallenge(purpose);
+    } catch (e) {
+      // Only the CEREMONY failing is a reason to try another factor.
+      biometricError = e instanceof Error ? e.message : String(e);
     }
+    // Deliberately outside the catch: once Touch ID has produced a proof, a
+    // failure of the action itself is the action's failure. Retrying it inside
+    // the catch sent every such error — a rejected proof, a server 500, a
+    // validation refusal — into the OTP fallback, where the user saw a code box
+    // and never the reason. [P.3]
+    if (proofToken !== null) return await action({ proofToken });
   }
 
   let factor: "totp" | "otp" = (await totpStatus().catch(() => false)) ? "totp" : "otp";
+  // No authenticator app, and the biometric ceremony just failed: for a
+  // non-recovery purpose the server will refuse an emailed code (a strong factor
+  // is enrolled — that is what just failed), so the modal would be a dead end.
+  // Report what actually broke instead of asking for a code that cannot come.
+  if (factor === "otp" && biometricError !== null && !RECOVERY_PURPOSES.has(purpose)) {
+    throw new Error(biometricError);
+  }
   let challengeId = "";
 
   return await new Promise<T>((resolve, reject) => {
@@ -182,6 +221,11 @@ export async function runWithStepUp<T>(
           resendCooldownUntil: armCooldown(),
         });
       } catch (e3) {
+        if (isStrongFactorRequired(e3)) {
+          close();
+          reject(new Error(strongFactorMessage(e3)));
+          return;
+        }
         patch({ sending: false, error: e3 instanceof Error ? e3.message : String(e3) });
       }
     };
@@ -216,9 +260,16 @@ export async function runWithStepUp<T>(
           challengeId = cid;
           patch({ sending: false, resendCooldownUntil: armCooldown() });
         })
-        .catch((e) =>
-          patch({ sending: false, error: e instanceof Error ? e.message : String(e) }),
-        );
+        .catch((e) => {
+          // A refused downgrade is final: leaving the modal open would show a
+          // code box that never receives a code. Close it and say why.
+          if (isStrongFactorRequired(e)) {
+            close();
+            reject(new Error(strongFactorMessage(e)));
+            return;
+          }
+          patch({ sending: false, error: e instanceof Error ? e.message : String(e) });
+        });
     }
   });
 }

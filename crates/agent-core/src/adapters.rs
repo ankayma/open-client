@@ -57,6 +57,14 @@ pub enum ApiError {
     /// (2 = email-OTP/TOTP, 3 = WebAuthn/YubiKey — A.1.10 no-soft-fallback).
     /// [T:Part D §H.5]
     StepUpRequired { purpose: String, required_aal: i32 },
+    /// The control plane refuses an EMAIL-OTP step-up because the account holds a
+    /// stronger factor (Touch ID / security key / confirmed TOTP) — 409 with
+    /// `strong_factor_required`. A distinct variant because it is a permanent
+    /// answer, not a hiccup: the GUI must not hand the user a code box that no
+    /// code can ever fill, the way it did when this arrived as a generic server
+    /// error. Recovery purposes keep the email path and never produce this.
+    /// [T:control-plane stepup.rs strong_factor_required() — 409 + the flag]
+    StrongFactorRequired { message: String },
 }
 
 impl std::fmt::Display for ApiError {
@@ -71,6 +79,11 @@ impl std::fmt::Display for ApiError {
                 purpose,
                 required_aal,
             } => write!(f, "STEP_UP_REQUIRED:{purpose}:{required_aal}"),
+            // Sentinel + the server's own sentence, so the GUI can both branch on
+            // it and show the reason verbatim.
+            ApiError::StrongFactorRequired { message } => {
+                write!(f, "STRONG_FACTOR_REQUIRED:{message}")
+            }
         }
     }
 }
@@ -1434,6 +1447,8 @@ async fn status_error(resp: reqwest::Response) -> ApiError {
         step_up_required: bool,
         purpose: Option<String>,
         required_aal: Option<i32>,
+        #[serde(default)]
+        strong_factor_required: bool,
     }
     match resp.json::<ErrBody>().await {
         // Step-up demand (Part D §Authority model) takes priority — distinct variant
@@ -1443,6 +1458,13 @@ async fn status_error(resp: reqwest::Response) -> ApiError {
         Ok(b) if b.step_up_required => ApiError::StepUpRequired {
             purpose: b.purpose.unwrap_or_default(),
             required_aal: b.required_aal.unwrap_or(2),
+        },
+        // A refused email-OTP downgrade is a decision, not a failure — keep it
+        // typed so the GUI can stop the flow instead of opening a code box.
+        Ok(b) if b.strong_factor_required => ApiError::StrongFactorRequired {
+            message: b
+                .error
+                .unwrap_or_else(|| "a stronger sign-in method is enrolled; use it".to_string()),
         },
         Ok(ErrBody { error: Some(m), .. }) if !m.trim().is_empty() => ApiError::Server {
             status: code,
@@ -2404,6 +2426,44 @@ mod tests {
             started.elapsed() < std::time::Duration::from_secs(5),
             "call must be bounded by CP_REST_TIMEOUT, took {:?}",
             started.elapsed()
+        );
+    }
+
+    /// A refused email-OTP downgrade must arrive as its own variant, not as a
+    /// generic server error. The GUI branches on it to stop the flow; when it was
+    /// indistinguishable from a transient send failure the user got a code box
+    /// that no code could ever satisfy.
+    #[tokio::test]
+    async fn refused_email_downgrade_maps_to_its_own_variant() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            use tokio::io::AsyncWriteExt;
+            let (mut sock, _) = listener.accept().await.unwrap();
+            // The control plane's exact refusal: 409 + the machine-readable flag.
+            let body = r#"{"error":"a stronger sign-in method is enrolled; use it. Email codes are recovery-only.","strong_factor_required":true}"#;
+            let resp = format!(
+                "HTTP/1.1 409 Conflict\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = sock.write_all(resp.as_bytes()).await;
+            let _ = sock.shutdown().await;
+        });
+
+        let http = reqwest::Client::new();
+        let err = request_step_up(&http, &format!("http://{addr}"), "token", "enroll_node")
+            .await
+            .unwrap_err();
+        let ApiError::StrongFactorRequired { message } = &err else {
+            panic!("expected StrongFactorRequired, got {err:?}");
+        };
+        assert!(
+            message.contains("recovery-only"),
+            "the server's own sentence must survive: {message}"
+        );
+        assert!(
+            err.to_string().starts_with("STRONG_FACTOR_REQUIRED:"),
+            "the GUI matches on this sentinel: {err}"
         );
     }
 
