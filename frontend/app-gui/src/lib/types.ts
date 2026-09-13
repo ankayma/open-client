@@ -330,6 +330,9 @@ export interface OverviewActivity {
 	payload: unknown;
 	created_at: string;
 	grant_id: string;
+	/** The member, resolved server-side — through the grant when the payload names
+	 *  nobody (an SSH row carries only a grant id). Empty when there is no human. */
+	actor?: string;
 }
 
 export interface OverviewGrant {

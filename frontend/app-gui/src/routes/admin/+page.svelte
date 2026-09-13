@@ -63,7 +63,17 @@
 			case 'MemberRemoved':
 			case 'MemberInviteRevoked': return { label: 'Member', kind: 'member' };
 			case 'SubdomainRegistered':
-			case 'SubdomainRemoved': return { label: 'Service', kind: 'service' };
+			case 'SubdomainRemoved':
+			case 'ServiceTagsDeclared':
+			case 'ServiceDataClassDeclared': return { label: 'Service', kind: 'service' };
+			case 'GrantTerminated': return { label: 'Session end', kind: 'ssh' };
+			case 'CommandApprovalRequested':
+			case 'CommandApprovalDecided': return { label: 'Approval', kind: 'elevate' };
+			case 'StepUpDowngradeRefused': return { label: 'Denied', kind: 'other' };
+			case 'AuthFactorDisabled':
+			case 'MemberFactorReset':
+			case 'VendorFactorReset': return { label: 'Factor', kind: 'member' };
+			case 'PolicyBlockSubmitted': return { label: 'Policy', kind: 'cicd' };
 			case 'AgentIdentityIssued':
 			case 'DelegationWithdrawn': return { label: 'Delegate', kind: 'cicd' };
 			default: return { label: ev, kind: 'other' };
@@ -75,7 +85,9 @@
 	function target(a: OverviewActivity): string {
 		const p = a.payload as Record<string, unknown> | null;
 		if (!p || typeof p !== 'object') return '';
-		for (const k of ['node_id', 'node', 'hostname', 'label', 'fqdn', 'subdomain', 'email', 'repo', 'actor_id']) {
+		// Most specific NAME first: a row about a service should read as the service,
+		// not as the node id it happens to sit on (which is what `node_id` first gave).
+		for (const k of ['fqdn', 'subdomain', 'label', 'hostname', 'node_id', 'node', 'email', 'repo', 'actor_id']) {
 			const v = p[k];
 			if (typeof v === 'string' && v) return v;
 		}
@@ -90,7 +102,11 @@
 				if (typeof v === 'string' && v) return v;
 			}
 		}
-		return a.grant_id ? 'grant ' + a.grant_id.slice(0, 8) : '—';
+		// Resolved through the grant by the control plane. Falling back to the grant's
+		// own id, as this did, put "grant grant_5f" in a column headed MEMBER — an
+		// answer to a question nobody asked. A dash is the honest answer when no human
+		// is attached to the event.
+		return a.actor || '—';
 	}
 
 	function clockTime(iso: string): string {
@@ -138,6 +154,44 @@
 			</svg>
 		</button>
 	</header>
+
+	<!-- Section navigation. Stays ABOVE the overview: this route is the Admin MENU
+	     first and a dashboard second, and putting the panels first buried every
+	     admin section under a screenful of activity — reachable only by scrolling
+	     past it, which reads as "the tabs are gone". -->
+	<section class="quick-actions">
+		<button class="quick-item" onclick={() => goto('/subdomains')}>
+			<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+				<circle cx="12" cy="12" r="9"/><path d="M3.6 9h16.8M3.6 15h16.8M12 3a15 15 0 010 18"/>
+			</svg>
+			<span>Subdomains</span>
+			<svg class="arrow" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 18l6-6-6-6"/></svg>
+		</button>
+		<button class="quick-item" onclick={() => goto('/members')}>
+			<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+				<path d="M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 00-3-3.87M16 3.13a4 4 0 010 7.75"/>
+			</svg>
+			<span>{STRINGS[lang].nav_users}</span>
+			<svg class="arrow" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 18l6-6-6-6"/></svg>
+		</button>
+		<button class="quick-item" onclick={() => goto('/access')}>
+			<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+				<rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0110 0v4"/>
+			</svg>
+			<span>Access</span>
+			<svg class="arrow" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 18l6-6-6-6"/></svg>
+		</button>
+		<button class="quick-item" onclick={() => goto('/policies')}>
+			<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 17l6-6-6-6M12 19h8"/></svg>
+			<span>Deploy Rules</span>
+			<svg class="arrow" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 18l6-6-6-6"/></svg>
+		</button>
+		<button class="quick-item" onclick={() => goto('/governance')}>
+			<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 3l8 4v6c0 4-3.5 7-8 8-4.5-1-8-4-8-8V7z"/></svg>
+			<span>Governance</span>
+			<svg class="arrow" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 18l6-6-6-6"/></svg>
+		</button>
+	</section>
 
 	{#if forbidden}
 		<section class="notice">Tenant overview is an admin-only view.</section>
@@ -271,40 +325,6 @@
 		</div>
 	{/if}
 
-	<!-- Section navigation (was the whole page; now the detail links below the overview) -->
-	<section class="quick-actions">
-		<button class="quick-item" onclick={() => goto('/subdomains')}>
-			<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
-				<circle cx="12" cy="12" r="9"/><path d="M3.6 9h16.8M3.6 15h16.8M12 3a15 15 0 010 18"/>
-			</svg>
-			<span>Subdomains</span>
-			<svg class="arrow" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 18l6-6-6-6"/></svg>
-		</button>
-		<button class="quick-item" onclick={() => goto('/members')}>
-			<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
-				<path d="M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 00-3-3.87M16 3.13a4 4 0 010 7.75"/>
-			</svg>
-			<span>{STRINGS[lang].nav_users}</span>
-			<svg class="arrow" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 18l6-6-6-6"/></svg>
-		</button>
-		<button class="quick-item" onclick={() => goto('/access')}>
-			<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
-				<rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0110 0v4"/>
-			</svg>
-			<span>Access</span>
-			<svg class="arrow" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 18l6-6-6-6"/></svg>
-		</button>
-		<button class="quick-item" onclick={() => goto('/policies')}>
-			<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 17l6-6-6-6M12 19h8"/></svg>
-			<span>Deploy Rules</span>
-			<svg class="arrow" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 18l6-6-6-6"/></svg>
-		</button>
-		<button class="quick-item" onclick={() => goto('/governance')}>
-			<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 3l8 4v6c0 4-3.5 7-8 8-4.5-1-8-4-8-8V7z"/></svg>
-			<span>Governance</span>
-			<svg class="arrow" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 18l6-6-6-6"/></svg>
-		</button>
-	</section>
 
 	{#if tier === 'F0'}
 		<section class="upgrade-banner">
@@ -371,7 +391,9 @@
 		gap: 8px; align-items: center;
 	}
 	.act-head { font-size: 11px; font-weight: 600; color: var(--c-text-dim); letter-spacing: 0.03em; padding: 0 8px; }
-	.act-rows { display: flex; flex-direction: column; gap: 2px; }
+	/* Twenty rows is taller than most windows; let the list scroll inside the card so
+	   the page stays one screen and nothing below it gets pushed out of sight. */
+	.act-rows { display: flex; flex-direction: column; gap: 2px; max-height: 420px; overflow-y: auto; }
 	.act-row { font-size: 13px; padding: 8px; border-radius: 8px; }
 	.act-row:nth-child(odd) { background: color-mix(in srgb, var(--c-bg) 45%, transparent); }
 	.act-row .t { color: var(--c-text-dim); font-size: 12px; }
@@ -432,5 +454,13 @@
 		.tiles { grid-template-columns: repeat(4, minmax(0, 1fr)); }
 		.grid { grid-template-columns: minmax(0, 1.7fr) minmax(0, 1fr); align-items: start; }
 		.act-head, .act-row { grid-template-columns: 60px minmax(0, 1fr) 84px minmax(0, 1.2fr); }
+		/* One segmented bar instead of five stacked rows: the sections have to be
+		   visible with the overview, not instead of it. The phone keeps the list. */
+		.quick-actions { flex-direction: row; flex-wrap: wrap; gap: 0; }
+		.quick-item { width: auto; flex: 1 1 0; justify-content: center; gap: 8px;
+			padding: 12px 14px; border-bottom: none; border-right: 1px solid var(--c-border); }
+		.quick-item:last-child { border-right: none; }
+		.quick-item span { flex: 0 1 auto; }
+		.quick-item .arrow { display: none; }
 	}
 </style>
