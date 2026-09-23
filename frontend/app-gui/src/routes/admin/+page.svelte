@@ -124,36 +124,36 @@
 			</div>
 		</section>
 
-		<div class="grid">
-			<!-- Panel 2 — access activity -->
-			<section class="card activity">
-				<div class="card-head">
-					<div>
-						<h3>{STRINGS[lang].access_activity_title}</h3>
-						<p class="sub">{STRINGS[lang].access_activity_sub}</p>
-					</div>
+		<!-- Activity full width; the two short panels sit below it as equal columns.
+		     Same reasoning as the personal dashboard: the ledger is the subject. -->
+		<section class="card activity">
+			<div class="card-head">
+				<div>
+					<h3>{STRINGS[lang].access_activity_title}</h3>
+					<p class="sub">{STRINGS[lang].access_activity_sub}</p>
 				</div>
-				<ActivityTable activity={data.activity} />
+				<span class="hint">{STRINGS[lang].activity_click_hint}</span>
+			</div>
+			<ActivityTable activity={data.activity} />
+		</section>
+
+		<div class="below">
+			<section class="card">
+				<div class="card-head"><h3>{STRINGS[lang].active_grants_title}</h3></div>
+				<GrantList grants={data.grants} delegations={data.delegations} />
 			</section>
 
-			<div class="col">
-				<!-- Panel 3 — active grants -->
-				<section class="card">
-					<div class="card-head"><h3>{STRINGS[lang].active_grants_title}</h3></div>
-					<GrantList grants={data.grants} delegations={data.delegations} />
-				</section>
-
-				<!-- Panel 4 — alerts -->
-				<section class="card">
-					<div class="card-head">
-						<h3>{STRINGS[lang].alerts_title}</h3>
-						{#if data.alerts.pending_approvals > 0}
-							<span class="badge">{data.alerts.pending_approvals} pending</span>
-						{/if}
-					</div>
-					{#if data.alerts.stale_nodes.length === 0 && data.alerts.recent_denies.length === 0 && data.alerts.pending_approvals === 0}
-						<p class="empty ok">Nothing needs attention.</p>
-					{:else}
+			<section class="card">
+				<div class="card-head">
+					<h3>{STRINGS[lang].alerts_title}</h3>
+					{#if data.alerts.pending_approvals > 0}
+						<span class="badge">{data.alerts.pending_approvals} pending</span>
+					{/if}
+				</div>
+				{#if data.alerts.stale_nodes.length === 0 && data.alerts.recent_denies.length === 0 && data.alerts.pending_approvals === 0}
+					<p class="empty ok">Nothing needs attention.</p>
+				{:else}
+					<div class="alert-list">
 						{#each data.alerts.recent_denies as dny}
 							<div class="alert danger">
 								<span class="dot"></span>
@@ -175,12 +175,11 @@
 								</div>
 							</div>
 						{/each}
-					{/if}
-				</section>
-			</div>
+					</div>
+				{/if}
+			</section>
 		</div>
 	{/if}
-
 
 	{#if tier === 'F0'}
 		<section class="upgrade-banner">
@@ -228,8 +227,9 @@
 	.tile-val .dim { font-size: 15px; color: var(--c-text-dim); font-weight: 500; }
 	.tile-note { font-size: 11.5px; color: var(--c-text-dim); font-weight: 500; }
 
-	.grid { display: grid; grid-template-columns: 1fr; gap: 12px; }
-	.col { display: flex; flex-direction: column; gap: 12px; }
+	.below { display: grid; grid-template-columns: 1fr; gap: 12px; align-items: start; }
+	.hint { font-size: 11.5px; color: var(--c-text-dim); }
+	.alert-list { display: flex; flex-direction: column; gap: 8px; max-height: 260px; overflow-y: auto; }
 
 	.card { background: var(--c-surface); border: 1px solid var(--c-border); border-radius: var(--radius);
 		padding: 16px 18px; display: flex; flex-direction: column; gap: 12px; }
@@ -283,7 +283,7 @@
 	/* Desktop: two-column main grid + wider activity table */
 	@media (min-width: 860px) {
 		.tiles { grid-template-columns: repeat(4, minmax(0, 1fr)); }
-		.grid { grid-template-columns: minmax(0, 1.7fr) minmax(0, 1fr); align-items: start; }
+		.below { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 		/* One segmented bar instead of five stacked rows: the sections have to be
 		   visible with the overview, not instead of it. The phone keeps the list. */
 		.quick-actions { flex-direction: row; flex-wrap: wrap; gap: 0; }
