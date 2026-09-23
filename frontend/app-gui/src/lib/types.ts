@@ -382,3 +382,20 @@ export interface Overview {
 		recent_denies: OverviewDeny[];
 	};
 }
+
+// ── My overview (every user's own dashboard) ───────────────────────────────────
+// The same panels as the tenant view, scoped to the caller: my devices, what I
+// accessed, my live grants. Admin-only data (other members, tenant-wide counts,
+// pending approvals) is absent by construction, not hidden client-side.
+
+export interface MyOverview {
+	me: { user_id: string; email: string; role: string };
+	fleet: {
+		nodes_total: number;
+		nodes_seen_5m: number;
+	};
+	activity: OverviewActivity[];
+	grants: OverviewGrant[];
+	delegations: OverviewDelegation[];
+	alerts: { stale_nodes: OverviewStaleNode[] };
+}

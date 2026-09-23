@@ -25,6 +25,7 @@ import type {
   RecentDelegation,
   ApprovalDecision,
   Overview,
+  MyOverview,
 } from "./types";
 
 // Runtime check — @tauri-apps/api works in Tauri webview and stubs gracefully in browser
@@ -731,6 +732,11 @@ export async function taskRecord(taskId: string): Promise<unknown> {
  *  Passed through as the control plane composed it; admin-gated server-side. */
 export async function overview(): Promise<Overview> {
   return invoke<Overview>("overview", {});
+}
+
+/** The caller's own dashboard — no admin capability involved. */
+export async function myOverview(): Promise<MyOverview> {
+  return invoke<MyOverview>("my_overview", {});
 }
 
 /** Promote an approved argv into a reusable catalog entry, verbatim, no parameter

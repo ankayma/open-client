@@ -1366,6 +1366,18 @@ pub async fn overview(
     get_json(http, base_url, "/api/v1/overview", token).await
 }
 
+/// `GET /api/v1/me/overview` — the same report asked about ONESELF: my devices, my
+/// access, my live grants. Needs no admin capability because the caller IS the scope
+/// — the my-access view of `part-d-tenant-dashboard.md` §H.2. Untyped for the same
+/// reason as `overview`. [T:part-d-tenant-dashboard.md §H.2 + A.1.2]
+pub async fn my_overview(
+    http: &reqwest::Client,
+    base_url: &str,
+    token: &str,
+) -> Result<serde_json::Value, ApiError> {
+    get_json(http, base_url, "/api/v1/me/overview", token).await
+}
+
 /// Open an SSE stream for peer events. `GET /api/v1/peers/events`.
 /// Authenticated with the node service token (not the user session token).
 /// Returns the raw response; the caller reads it as a byte stream.

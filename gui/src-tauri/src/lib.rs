@@ -3869,6 +3869,16 @@ async fn overview(state: State<'_, AppState>) -> Result<serde_json::Value, Strin
         .map_err(|e| e.to_string())
 }
 
+// [My dashboard] the same surface, scoped to the caller — every user has one.
+// [T:part-d-tenant-dashboard §H.2 my-access view]
+#[tauri::command]
+async fn my_overview(state: State<'_, AppState>) -> Result<serde_json::Value, String> {
+    let tok = state.require_token()?;
+    adapters::my_overview(&state.http, &state.regional_base_url(), &tok)
+        .await
+        .map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 async fn list_ci_policies(state: State<'_, AppState>) -> Result<Vec<domain::CiPolicy>, String> {
     let tok = state.require_token()?;
@@ -4968,6 +4978,7 @@ pub fn run() {
             save_command_template,
             task_record,
             overview,
+            my_overview,
             ci_history,
             ssh_history,
             add_ci_policy,

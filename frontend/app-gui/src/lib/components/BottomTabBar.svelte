@@ -14,6 +14,13 @@
 
 	const ALL_TABS = [
 		{
+			hrefs: ['/dashboard'],
+			go: '/dashboard',
+			label: () => STRINGS[lang].nav_dashboard,
+			// Four panes: a dashboard glyph, not a document one.
+			icon: 'M3 3h7v9H3z M14 3h7v5h-7z M14 12h7v9h-7z M3 16h7v5H3z'
+		},
+		{
 			hrefs: ['/services'],
 			go: '/services',
 			label: () => STRINGS[lang].nav_services,

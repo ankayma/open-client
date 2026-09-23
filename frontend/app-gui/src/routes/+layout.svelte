@@ -198,6 +198,24 @@
 
 	// Settings sub-nav (My Devices / Account / Security) — mirrors the admin
 	// hub pattern; shown inline in the sidebar when a /settings/* route is active.
+	// Admin sub-nav — the SAME pattern as Settings. The admin sections used to be
+	// reachable only from a list inside /admin, so the dashboard that landed on that
+	// page pushed them out of sight. Sections belong in the nav, not in a panel.
+	let adminSubnav = $derived([
+		{ href: '/admin',       label: STRINGS[lang].nav_overview },
+		{ href: '/subdomains',  label: STRINGS[lang].nav_subdomains },
+		{ href: '/members',     label: STRINGS[lang].nav_users },
+		{ href: '/access',      label: STRINGS[lang].nav_access },
+		{ href: '/policies',    label: STRINGS[lang].nav_policies },
+		{ href: '/governance',  label: STRINGS[lang].nav_governance }
+	]);
+
+	const ADMIN_ROUTES = ['/admin', '/subdomains', '/members', '/access', '/policies', '/governance'];
+
+	// Hide the admin entry from members, matching BottomTabBar. Fail open while the
+	// role is still unknown (null) — the server gates every admin action anyway.
+	let showAdmin = $derived($myRole === null || $myRole === 'admin');
+
 	let settingsSubnav = $derived([
 		{ href: '/settings/devices',  label: STRINGS[lang].nav_devices },
 		{ href: '/settings/account',  label: STRINGS[lang].nav_account },
@@ -245,18 +263,39 @@
 				Ankayma
 			</div>
 			<nav>
+				<!-- Mine first: the page about the person using the app, which every
+				     signed-in user has. The tenant-wide one lives under Admin. -->
+				<button class="nav-item" class:active={active('/dashboard')} onclick={() => goto('/dashboard')}>
+					<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="3" width="7" height="9" rx="1.5"/><rect x="14" y="3" width="7" height="5" rx="1.5"/><rect x="14" y="12" width="7" height="9" rx="1.5"/><rect x="3" y="16" width="7" height="5" rx="1.5"/></svg>
+					<span>{STRINGS[lang].nav_dashboard}</span>
+				</button>
 				<button class="nav-item" class:active={active('/services')} onclick={() => goto('/services')}>
 					<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M3 7h18M3 12h18M3 17h18"/><circle cx="7" cy="7" r="0.5"/></svg>
 					<span>{STRINGS[lang].nav_services}</span>
 				</button>
-				<button
-					class="nav-item"
-					class:active={active(['/admin', '/subdomains', '/members', '/access', '/policies'])}
-					onclick={() => goto('/admin')}
-				>
-					<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0110 0v4"/></svg>
-					<span>{STRINGS[lang].nav_admin}</span>
-				</button>
+				{#if showAdmin}
+					<button
+						class="nav-item"
+						class:active={active(ADMIN_ROUTES)}
+						onclick={() => goto('/admin')}
+					>
+						<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0110 0v4"/></svg>
+						<span>{STRINGS[lang].nav_admin}</span>
+					</button>
+					{#if active(ADMIN_ROUTES)}
+						<div class="subnav">
+							{#each adminSubnav as sub}
+								<button
+									class="subnav-item"
+									class:active={path === sub.href || path.startsWith(sub.href + '/')}
+									onclick={() => goto(sub.href)}
+								>
+									{sub.label}
+								</button>
+							{/each}
+						</div>
+					{/if}
+				{/if}
 				<button class="nav-item nav-settings" class:active={active('/settings')} onclick={() => goto('/settings/devices')}>
 					<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 11-2.83 2.83l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 11-2.83-2.83l.06-.06A1.65 1.65 0 004.6 15a1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 112.83-2.83l.06.06A1.65 1.65 0 009 4.6a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 112.83 2.83l-.06.06a1.65 1.65 0 00-.33 1.82V12a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z"/></svg>
 					<span>{STRINGS[lang].nav_settings}</span>
