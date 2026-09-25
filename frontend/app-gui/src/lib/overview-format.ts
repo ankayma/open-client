@@ -71,10 +71,14 @@ export function actorOf(a: OverviewActivity): string {
 	return a.actor || '—';
 }
 
+// A ledger row carries a DATE, not just a clock time: "10:51" is unreadable as evidence
+// the moment the list spans midnight, and an auditor reading a row has to know the day
+// without counting back from the top of the page.
 export function clockTime(iso: string): string {
 	const d = new Date(iso);
 	if (isNaN(d.getTime())) return iso;
-	return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+	const p = (n: number) => String(n).padStart(2, '0');
+	return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
 }
 
 // TTL remaining, in "12m" / "45s" / "expired" form, recomputed as `now` ticks.

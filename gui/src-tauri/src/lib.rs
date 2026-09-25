@@ -3869,6 +3869,122 @@ async fn overview(state: State<'_, AppState>) -> Result<serde_json::Value, Strin
         .map_err(|e| e.to_string())
 }
 
+// ── Evidence export (for an outside auditor) ─────────────────────────────────
+//
+// Written to a file rather than rendered on screen on purpose: what an auditor needs is
+// the bytes the control plane recorded, whole and in order, to hand to their own tooling.
+// A screenful of rows is a summary; a file is evidence. [T:A.1.4 + A.1.8]
+
+#[derive(serde::Serialize)]
+struct ExportResult {
+    path: String,
+    /// Ledger: events written. ROI: entities in the register.
+    count: usize,
+    /// False when the walk stopped at the page cap rather than at the tail — said out
+    /// loud, because a partial export that claims to be whole is the worst outcome here.
+    complete: bool,
+}
+
+fn downloads_dir() -> std::path::PathBuf {
+    let home = std::path::PathBuf::from(agent_core::home_root());
+    let dl = home.join("Downloads");
+    if dl.is_dir() {
+        dl
+    } else {
+        home
+    }
+}
+
+fn stamp() -> String {
+    // Local date+time to the minute, filename-safe. Two exports on the same day must not
+    // silently overwrite each other.
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let days = now / 86_400;
+    let secs = now % 86_400;
+    // Civil-from-days (Howard Hinnant's algorithm) — no chrono in this crate's deps.
+    let z = days as i64 + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+    format!(
+        "{:04}{:02}{:02}-{:02}{:02}",
+        y,
+        m,
+        d,
+        secs / 3600,
+        (secs % 3600) / 60
+    )
+}
+
+/// Walk the whole ledger and write it as NDJSON. Each page is appended verbatim.
+#[tauri::command]
+async fn export_ledger(state: State<'_, AppState>) -> Result<ExportResult, String> {
+    let tok = state.require_token()?;
+    let base = state.regional_base_url();
+    // A cap, not a limit on the customer's evidence: 400 pages × 1000 = 400k events. A
+    // bigger ledger needs a collector polling the same endpoint, which is what it is for.
+    const MAX_PAGES: usize = 400;
+    let mut after: Option<i64> = None;
+    let mut body = String::new();
+    let mut lines = 0usize;
+    let mut complete = false;
+    for _ in 0..MAX_PAGES {
+        let page = agent_core::adapters::ledger_export_page(&state.http, &base, &tok, after, 1000)
+            .await
+            .map_err(|e| e.to_string())?;
+        lines += page.body.lines().filter(|l| !l.trim().is_empty()).count();
+        body.push_str(&page.body);
+        if page.complete || page.next.is_none() {
+            complete = true;
+            break;
+        }
+        after = page.next;
+    }
+    let path = downloads_dir().join(format!("ankayma-ledger-{}.ndjson", stamp()));
+    std::fs::write(&path, body).map_err(|e| e.to_string())?;
+    Ok(ExportResult {
+        path: path.to_string_lossy().to_string(),
+        count: lines,
+        complete,
+    })
+}
+
+/// The Register of Information projection, written as JSON.
+#[tauri::command]
+async fn export_roi(state: State<'_, AppState>) -> Result<ExportResult, String> {
+    let tok = state.require_token()?;
+    let v = agent_core::adapters::roi_export(&state.http, &state.regional_base_url(), &tok)
+        .await
+        .map_err(|e| e.to_string())?;
+    let count = v
+        .get("entries")
+        .and_then(|e| e.as_array())
+        .map(|a| a.len())
+        .unwrap_or(0);
+    // A register with missing fields is still a complete EXPORT — the gaps are reported
+    // inside it, which is the point of the projection. [T:painpoint-schema §8.6]
+    let path = downloads_dir().join(format!("ankayma-roi-{}.json", stamp()));
+    std::fs::write(
+        &path,
+        serde_json::to_vec_pretty(&v).map_err(|e| e.to_string())?,
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(ExportResult {
+        path: path.to_string_lossy().to_string(),
+        count,
+        complete: true,
+    })
+}
+
 // [My dashboard] the same surface, scoped to the caller — every user has one.
 // [T:part-d-tenant-dashboard §H.2 my-access view]
 #[tauri::command]
@@ -4979,6 +5095,8 @@ pub fn run() {
             task_record,
             overview,
             my_overview,
+            export_ledger,
+            export_roi,
             ci_history,
             ssh_history,
             add_ci_policy,

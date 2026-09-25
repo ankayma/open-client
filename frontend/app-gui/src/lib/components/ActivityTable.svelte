@@ -117,12 +117,12 @@
 
 	.act-head, .act-row {
 		display: grid;
-		grid-template-columns: 52px minmax(0, 1fr) 74px minmax(0, 1.1fr);
+		grid-template-columns: 96px minmax(0, 1fr) 74px minmax(0, 1.1fr);
 		gap: 8px;
 		align-items: center;
 	}
 	.act-head.no-who, .act-row.no-who {
-		grid-template-columns: 52px 84px minmax(0, 1fr);
+		grid-template-columns: 96px 84px minmax(0, 1fr);
 	}
 	.act-head { font-size: 11px; font-weight: 600; color: var(--c-text-dim); letter-spacing: 0.03em; padding: 0 8px; }
 	/* Twenty rows is taller than most windows; let the list scroll inside the card so
@@ -131,7 +131,7 @@
 	.act-row { font-size: 13px; padding: 8px; border-radius: 8px; text-align: left; width: 100%; }
 	.act-row:nth-child(odd) { background: color-mix(in srgb, var(--c-bg) 45%, transparent); }
 	.act-row:hover { background: color-mix(in srgb, var(--c-accent) 10%, transparent); }
-	.act-row .t { color: var(--c-text-dim); font-size: 12px; }
+	.act-row .t { color: var(--c-text-dim); font-size: 12px; white-space: nowrap; }
 	.act-row .who, .act-row .tgt { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 	.act-row .tgt { color: var(--c-text-dim); }
 	.act { font-size: 12px; font-weight: 600; }
@@ -167,8 +167,8 @@
 	.foot { font-size: 11.5px; color: var(--c-text-dim); }
 
 	@media (min-width: 860px) {
-		.act-head, .act-row { grid-template-columns: 76px minmax(0, 1fr) 96px minmax(0, 1.6fr); }
-		.act-head.no-who, .act-row.no-who { grid-template-columns: 76px 110px minmax(0, 1fr); }
+		.act-head, .act-row { grid-template-columns: 130px minmax(0, 1fr) 96px minmax(0, 1.6fr); }
+		.act-head.no-who, .act-row.no-who { grid-template-columns: 130px 110px minmax(0, 1fr); }
 		.act-rows { max-height: 520px; }
 	}
 </style>

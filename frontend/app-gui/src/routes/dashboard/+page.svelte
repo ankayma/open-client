@@ -86,15 +86,6 @@
 		return new Date(ms).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 	}
 
-	// Bytes → "1.4 GB". Quota arrives in bytes; a raw byte count is not a limit anyone
-	// can read at a glance.
-	function bytes(n: number): string {
-		if (!Number.isFinite(n) || n <= 0) return '0';
-		const u = ['B', 'KB', 'MB', 'GB', 'TB'];
-		const i = Math.min(Math.floor(Math.log(n) / Math.log(1024)), u.length - 1);
-		const v = n / Math.pow(1024, i);
-		return `${v >= 10 || i === 0 ? Math.round(v) : v.toFixed(1)} ${u[i]}`;
-	}
 </script>
 
 <main>
@@ -147,21 +138,18 @@
 						</span>
 					</div>
 				</div>
-				<!-- Limits, from the quota the app already holds — no new call. Shown
-				     here because "how much of my plan is left" is a question about me. -->
+				<!-- Device allowance, from the quota the app already holds — no new call.
+				     Bandwidth is deliberately NOT shown: the control plane returns a
+				     hard-coded 0 used against a hard-coded limit it does not enforce, so a
+				     meter here would claim a measurement nobody took. The same claim was
+				     already pulled from the website as a P.3 violation.
+				     [T:part-c-phase-evolution.md §quota-enforcement + pricing.md §sync] -->
 				{#if $quota}
 					<div class="tile">
 						<div class="tile-label">{STRINGS[lang].quota_nodes_label}</div>
 						<div class="tile-val">
 							{$quota.nodes_used}<span class="dim">/{$quota.nodes_limit}</span>
 							<span class="tile-note">{STRINGS[lang].quota_nodes_note}</span>
-						</div>
-					</div>
-					<div class="tile">
-						<div class="tile-label">{STRINGS[lang].quota_bw_label}</div>
-						<div class="tile-val">
-							<span class="bw">{bytes($quota.bandwidth_bytes_used)}</span>
-							<span class="dim">/ {bytes($quota.bandwidth_bytes_limit)}</span>
 						</div>
 					</div>
 				{/if}
@@ -266,7 +254,6 @@
 	.top { display: grid; gap: 12px; }
 	.conn { display: flex; flex-direction: column; }
 	.tiles { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; align-content: start; }
-	.bw { font-size: 20px; }
 	.tile { background: var(--c-surface); border: 1px solid var(--c-border); border-radius: var(--radius);
 		padding: 14px 16px; display: flex; flex-direction: column; gap: 4px; }
 	.tile-label { font-size: 11.5px; font-weight: 600; color: var(--c-text-dim); letter-spacing: 0.03em; }
@@ -307,7 +294,7 @@
 		/* Status card beside the numbers, not stacked above them — one glance covers
 		   "am I on the mesh" and "what do I have". */
 		.top { grid-template-columns: 260px minmax(0, 1fr); align-items: start; }
-		.tiles { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+		.tiles { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 		.below { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 		.links { flex-direction: row; gap: 20px; }
 	}

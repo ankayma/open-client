@@ -1378,6 +1378,74 @@ pub async fn my_overview(
     get_json(http, base_url, "/api/v1/me/overview", token).await
 }
 
+/// One page of the evidence ledger, as the export endpoint hands it over.
+#[derive(Debug, Clone)]
+pub struct LedgerPage {
+    /// NDJSON — one event per line, verbatim. Never parsed here: an auditor's copy must
+    /// be the bytes the control plane signed over, not a re-serialisation of them.
+    pub body: String,
+    /// Resume point for the next page; `None` once the tail is reached.
+    pub next: Option<i64>,
+    /// The server saw this page reach the end of the ledger.
+    pub complete: bool,
+}
+
+/// `GET /api/v1/ledger/export` — the tenant's own evidence, in SIEM shape.
+///
+/// Tenant-scoped by the session, resumable by cursor, and the read is itself appended to
+/// the ledger as `LedgerExported` — a pull that leaves no trace cannot be investigated.
+/// [T:A.1.8]
+pub async fn ledger_export_page(
+    http: &reqwest::Client,
+    base_url: &str,
+    token: &str,
+    after: Option<i64>,
+    limit: i64,
+) -> Result<LedgerPage, ApiError> {
+    let mut path = format!("/api/v1/ledger/export?limit={limit}");
+    if let Some(a) = after {
+        path.push_str(&format!("&after={a}"));
+    }
+    let resp = http
+        .get(url(base_url, &path))
+        .bearer_auth(token)
+        .send()
+        .await
+        .map_err(|e| ApiError::Transport(e.to_string()))?;
+    if !resp.status().is_success() {
+        return Err(status_error(resp).await);
+    }
+    let next = resp
+        .headers()
+        .get("x-next-cursor")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.parse::<i64>().ok());
+    // Present only on the page that reached the tail — absence is not "false", it is
+    // "there is more". [T:ledger_export header contract]
+    let complete = resp.headers().contains_key("x-ledger-complete");
+    let body = resp
+        .text()
+        .await
+        .map_err(|e| ApiError::Decode(e.to_string()))?;
+    Ok(LedgerPage {
+        body,
+        next,
+        complete,
+    })
+}
+
+/// `GET /api/v1/roi/export` — the Register of Information projection, admin-only.
+///
+/// Carries a completeness report beside the rows: a filing that merely looks populated is
+/// the documented failure mode. [T:painpoint-schema-evidence.md §8.6 roi_export]
+pub async fn roi_export(
+    http: &reqwest::Client,
+    base_url: &str,
+    token: &str,
+) -> Result<serde_json::Value, ApiError> {
+    get_json(http, base_url, "/api/v1/roi/export", token).await
+}
+
 /// Open an SSE stream for peer events. `GET /api/v1/peers/events`.
 /// Authenticated with the node service token (not the user session token).
 /// Returns the raw response; the caller reads it as a byte stream.

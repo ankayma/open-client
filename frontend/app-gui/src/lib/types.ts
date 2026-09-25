@@ -399,3 +399,13 @@ export interface MyOverview {
 	delegations: OverviewDelegation[];
 	alerts: { stale_nodes: OverviewStaleNode[] };
 }
+
+// ── Evidence export ───────────────────────────────────────────────────────────
+/** Where the file landed and how much went into it. `complete` false means the walk
+ *  stopped at the page cap, not at the end of the ledger — said out loud rather than
+ *  letting a partial export pass as whole. */
+export interface ExportResult {
+	path: string;
+	count: number;
+	complete: boolean;
+}

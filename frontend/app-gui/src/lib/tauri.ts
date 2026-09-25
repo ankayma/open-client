@@ -26,6 +26,7 @@ import type {
   ApprovalDecision,
   Overview,
   MyOverview,
+  ExportResult,
 } from "./types";
 
 // Runtime check — @tauri-apps/api works in Tauri webview and stubs gracefully in browser
@@ -732,6 +733,16 @@ export async function taskRecord(taskId: string): Promise<unknown> {
  *  Passed through as the control plane composed it; admin-gated server-side. */
 export async function overview(): Promise<Overview> {
   return invoke<Overview>("overview", {});
+}
+
+/** Walk the whole tenant ledger and write it to a file (NDJSON, verbatim). */
+export async function exportLedger(): Promise<ExportResult> {
+  return invoke<ExportResult>("export_ledger", {});
+}
+
+/** The Register of Information projection, written to a file. Admin-only server-side. */
+export async function exportRoi(): Promise<ExportResult> {
+  return invoke<ExportResult>("export_roi", {});
 }
 
 /** The caller's own dashboard — no admin capability involved. */

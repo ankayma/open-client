@@ -7,6 +7,7 @@
 	import type { Overview } from '$lib/types';
 	import { clockTime, short } from '$lib/overview-format';
 	import ActivityTable from '$lib/components/ActivityTable.svelte';
+	import ExportDialog from '$lib/components/ExportDialog.svelte';
 	import GrantList from '$lib/components/GrantList.svelte';
 
 	let lang = $state<Lang>('vn');
@@ -19,6 +20,9 @@
 	let err = $state<string | null>(null);
 	// Admin-only endpoint: a plain member gets 403 → show the nav, hide the panels.
 	let forbidden = $state(false);
+	// The evidence hand-off surface. Admin-only like the rest of this page; the control
+	// plane enforces it again on each endpoint. [T:A.1.8]
+	let showExport = $state(false);
 
 	async function load() {
 		loading = true;
@@ -45,6 +49,12 @@
 			<h2>{STRINGS[lang].tenant_overview_title}</h2>
 			<p class="sub">{STRINGS[lang].tenant_overview_sub}</p>
 		</div>
+		<button class="export-btn btn-secondary" onclick={() => (showExport = true)}>
+			<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+				<path d="M12 3v12M8 11l4 4 4-4M4 19h16"/>
+			</svg>
+			{STRINGS[lang].export_btn}
+		</button>
 		<button class="refresh" onclick={load} disabled={loading} aria-label="Refresh">
 			<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
 				<path d="M21 12a9 9 0 11-2.6-6.3M21 3v6h-6"/>
@@ -190,6 +200,9 @@
 			<button class="upgrade-btn" onclick={() => goto('/upgrade')}>Upgrade</button>
 		</section>
 	{/if}
+	{#if showExport}
+		<ExportDialog onclose={() => (showExport = false)} />
+	{/if}
 </main>
 
 <style>
@@ -206,6 +219,8 @@
 	.title { flex: 1; }
 	h2 { font-size: 22px; font-weight: 700; }
 	.sub { font-size: 12.5px; color: var(--c-text-dim); margin-top: 2px; }
+	.export-btn { display: inline-flex; align-items: center; gap: 7px; font-size: 13px;
+		padding: 8px 13px; border-radius: 10px; flex-shrink: 0; }
 	.refresh {
 		width: 34px; height: 34px; display: flex; align-items: center; justify-content: center;
 		border: 1px solid var(--c-border); border-radius: 10px; background: var(--c-surface);
