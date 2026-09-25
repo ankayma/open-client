@@ -97,7 +97,15 @@ jobs:
 
       # Puts cmdline-tools (sdkmanager) on PATH. GitHub's ubuntu-latest image stopped
       # shipping sdkmanager on PATH by default → the manual step below was exit-127.
-      - uses: android-actions/setup-android@v3
+      # v3's default package set included `tools`, which Google stopped serving — the
+      # action then died on `Failed to find package 'tools'` before any of our code was
+      # touched (green on 1.1.46, red from 1.1.47 with an unchanged workflow: the break
+      # came from the floating tag, not from us). v4 dropped it from the defaults; the
+      # empty list keeps this step to just the cmdline-tools, since the next step
+      # installs exactly the NDK, build-tools and platform we pin.
+      - uses: android-actions/setup-android@v4
+        with:
+          packages: ''
 
       - name: Provision Android SDK bits (NDK + build-tools + platform)
         run: |
